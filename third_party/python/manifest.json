@@ -24,8 +24,7 @@
     "package": "Werkzeug",
     "version": "3.1.9",
     "notices": [
-      "Werkzeug/werkzeug-3.1.9.dist-info/licenses/LICENSE.txt",
-      "Werkzeug/werkzeug/debug/shared/ICON_LICENSE.md"
+      "Werkzeug/werkzeug-3.1.9.dist-info/licenses/LICENSE.txt"
     ]
   },
   {
@@ -118,9 +117,7 @@
     "notices": [
       "packaging/packaging-26.3.dist-info/licenses/LICENSE",
       "packaging/packaging-26.3.dist-info/licenses/LICENSE.APACHE",
-      "packaging/packaging-26.3.dist-info/licenses/LICENSE.BSD",
-      "packaging/packaging/licenses/__init__.py",
-      "packaging/packaging/licenses/_spdx.py"
+      "packaging/packaging-26.3.dist-info/licenses/LICENSE.BSD"
     ]
   },
   {
@@ -183,10 +180,6 @@
       "setuptools/setuptools/_vendor/packaging-24.2.dist-info/LICENSE",
       "setuptools/setuptools/_vendor/packaging-24.2.dist-info/LICENSE.APACHE",
       "setuptools/setuptools/_vendor/packaging-24.2.dist-info/LICENSE.BSD",
-      "setuptools/setuptools/_vendor/packaging/licenses/__init__.py",
-      "setuptools/setuptools/_vendor/packaging/licenses/__pycache__/__init__.cpython-312.pyc",
-      "setuptools/setuptools/_vendor/packaging/licenses/__pycache__/_spdx.cpython-312.pyc",
-      "setuptools/setuptools/_vendor/packaging/licenses/_spdx.py",
       "setuptools/setuptools/_vendor/platformdirs-4.2.2.dist-info/licenses/LICENSE",
       "setuptools/setuptools/_vendor/tomli-2.0.1.dist-info/LICENSE",
       "setuptools/setuptools/_vendor/typeguard-4.3.0.dist-info/LICENSE",

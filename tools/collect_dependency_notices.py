@@ -32,7 +32,7 @@ def main():
     for name, dist in sorted(distributions.items()):
         notices = []
         for file in dist.files or []:
-            if not any(word in str(file).lower() for word in ("license", "copying", "notice")):
+            if not any(Path(str(file)).name.lower().startswith(word) for word in ("license", "copying", "notice")):
                 continue
             source = dist.locate_file(file)
             if not source.is_file():
