@@ -49,7 +49,7 @@ python3 -m venv .venv-live
 
 ## 项目结构和验证范围
 
-[实现与验收](docs/implementation.md) · [目录归档说明](docs/archive-layout.md) · [原生开发说明](native/README.md)
+[实现与验收](docs/implementation.md) · [本次发布验收](docs/release-2026-11-19.md) · [目录归档说明](docs/archive-layout.md) · [原生开发说明](native/README.md)
 
 当前主路线只包含工作台。旧回放、独立 RTC 会议房等路线已移到同级 `back1119`，不参与构建。共享存储模块保留历史数据结构以兼容本机现有资料。
 
