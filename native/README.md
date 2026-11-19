@@ -16,7 +16,7 @@ python3 native/scripts/probe_desktop_backend.py
 
 开发 App：`native/build/ZSJHWorkbench.app`。通过 Finder 双击打开；首次自动创建私有工作区，WKWebView 自动登录本机服务。页面提供开始/停止收听和模型状态，原生“音频”菜单保留相同操作作为备用入口。先创建或选择真实会议，再显式开始收听；示例会议不采集真实音频。退出 App 会关闭本机服务和音频组件；重新打开不会自动恢复采音。
 
-本机安装版为 `/Applications/真实交互工作台.app`，可从“应用程序”中打开。图标原稿位于 `Assets/AppIcon/AppIcon.png`，由 ppimage 生成；`build-desktop.sh` 自动调用 `scripts/build-icon.sh` 生成各分辨率 ICNS 并加入签名包，重建后不会丢失图标。安装副本使用同一应用标识及上述私有工作区，会议记录与配置保存在用户目录。当前为本机临时签名安装，未作 Developer ID 公证分发。
+本机安装版为 `/Applications/真实交互.app`，可从“应用程序”中打开。图标原稿位于 `Assets/AppIcon/AppIcon.png`，由 ppimage 生成；`build-desktop.sh` 自动调用 `scripts/build-icon.sh` 生成各分辨率 ICNS 并加入签名包，重建后不会丢失图标。安装副本使用同一应用标识及上述私有工作区，会议记录与配置保存在用户目录。当前为本机临时签名安装，未作 Developer ID 公证分发。
 
 原生标题栏保留标准窗口按钮，初始内容尺寸 1280×820，最小窗口 980×680。设置提供跟随系统、浅色和深色，原生窗口与网页同步切换；桌面偏好保存在 UserDefaults，跨重启保留。网页访问码仍仅保存在临时 WebKit 会话中。
 

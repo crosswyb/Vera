@@ -87,8 +87,15 @@ def probe(backend):
             assert saved_caps["model_name"] == "frozen-provider-fixture" and saved_caps["search_provider"] == "tavily"
             assert not saved_caps["model_enabled"] and not saved_caps["search_enabled"]
             result["settings_restart_persistence"] = True
+            status, data = request("/live/v2/storage")
+            storage = json.loads(data)
+            assert status == 200 and storage["output_root"] == str((root / "meetings").resolve())
+            first_root, second_root = root / "chosen meetings", root / "next meetings"
+            status, data = request("/live/v2/storage", {"output_root": str(first_root)}, method="PUT")
+            assert status == 200 and json.loads(data)["output_root"] == str(first_root.resolve())
             status, data = request("/live/v2/meetings", {"title": "Frozen local smoke", "data_scope": "synthetic"})
             meeting = json.loads(data)
+            assert meeting["output_root"] == str(first_root.resolve())
             status, _ = request("/live/v2/meetings/" + meeting["id"] + "/demo", {})
             result["offline_demo"] = status
             deadline = time.monotonic() + 8
@@ -101,15 +108,17 @@ def probe(backend):
                     break
                 time.sleep(0.1)
             assert answer, "offline reference answer did not finish"
-            result["created_markdown_files"] = len(list((root / "meetings").rglob("*.md")))
+            result["created_markdown_files"] = len(list(first_root.rglob("*.md")))
             assert result["created_markdown_files"] > 0
             assert answer["brief"]["short_answer"] and answer["brief"]["caveat"]
             assert 1 <= len(answer["brief"]["key_points"]) <= 3
-            document = next(path.read_text() for path in (root / "meetings").rglob("*.md")
+            document = next(path.read_text() for path in first_root.rglob("*.md")
                             if "## 一句话结论" in path.read_text())
             assert document.index("## 一句话结论") < document.index("## 完整分析") < document.index("## 关键依据")
             assert answer["brief"]["caveat"] in document
             result["structured_brief_and_markdown"] = "short answer, full analysis, caveat, original evidence"
+            status, data = request("/live/v2/storage", {"output_root": str(second_root)}, method="PUT")
+            assert status == 200 and json.loads(data)["output_root"] == str(second_root.resolve())
             status, _ = request("/live/v2/meetings/" + meeting["id"] + "/controls", {"action": "end"})
             assert status == 200
             result["base_files"] = {}
@@ -117,6 +126,7 @@ def probe(backend):
                 status, data = request("/live/v2/meetings/" + meeting["id"] + "/files/" + kind)
                 saved = json.loads(data)
                 assert status == 200 and Path(saved["path"]).is_file() and saved["content"].strip()
+                assert Path(saved["path"]).is_relative_to(first_root.resolve())
                 result["base_files"][kind] = saved["filename"]
             assert result["base_files"]["transcript"] == "02-全量转录.md"
             # This offline probe has no model. Do not label raw excerpts as an
@@ -130,17 +140,19 @@ def probe(backend):
             status, data = request(meeting_url + "/deletion")
             impact = json.loads(data)
             assert status == 200 and impact["file_count"] > 0 and impact["question_count"] > 0
-            directory = root / "meetings" / meeting["directory"]
+            directory = first_root / meeting["directory"]
             assert directory.is_dir(), "deletion preview must not remove files"
             status, data = request("/live/v2/meetings", {"title": "Preserved frozen smoke", "data_scope": "synthetic"})
             survivor = json.loads(data)
+            assert survivor["output_root"] == str(second_root.resolve())
             status, data = request(meeting_url, {"confirmation": meeting["id"]}, method="DELETE")
             assert status == 200 and json.loads(data)["deleted"] and not directory.exists()
             _, data = request("/live/v2/home")
             home = json.loads(data)
             assert {m["id"] for m in home["meetings"]} == {survivor["id"]}
-            assert not home["materials"] and (root / "meetings" / survivor["directory"]).is_dir()
+            assert not home["materials"] and (second_root / survivor["directory"]).is_dir()
             result["meeting_management"] = "rename, read-only deletion preview, owned files and records removed, other meeting preserved"
+            result["storage_switch_isolation"] = "old meeting saves/reads/deletes in its bound root; new meeting uses selected root"
         finally:
             process.terminate()
             try:
@@ -150,6 +162,13 @@ def probe(backend):
                 process.wait(timeout=3)
         result["serve_exit"] = process.returncode
         assert process.returncode == 0
+        reopened = subprocess.run([str(backend), "doctor", *args], env=environment, capture_output=True, text=True, timeout=30)
+        assert reopened.returncode == 0
+        restarted_storage = json.loads(reopened.stdout)
+        assert restarted_storage["output_root"] == str(second_root.resolve())
+        assert restarted_storage["default_output_root"] == str((root / "meetings").resolve())
+        assert (second_root / survivor["directory"]).is_dir()
+        result["storage_restart_persistence"] = True
         result["minimal_path"] = environment["PATH"]
         result["passed"] = True
     return result

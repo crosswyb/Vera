@@ -162,6 +162,7 @@
 
         <section id="settings-view" class="settings-view prose-view" hidden aria-labelledby="settings-title"><header class="page-heading provider-page-heading"><div><h1 id="settings-title">设置</h1><p>管理外观、本机转写和联网服务。</p><p id="service-settings-result" class="provider-result" role="status" aria-live="polite">正在读取服务设置…</p></div><button id="save-service-settings" form="service-settings-form" type="submit" class="primary" disabled>保存设置</button></header>
           <section class="settings-section appearance-settings" aria-labelledby="appearance-title"><h2 id="appearance-title">外观</h2><div class="setting-row"><label for="theme-preference">主题</label><select id="theme-preference" aria-describedby="theme-help"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div><p id="theme-help" class="setting-note">立即生效，自动保存。</p></section>
+          <section class="settings-section" aria-labelledby="storage-settings-title"><h2 id="storage-settings-title">保存与回看</h2><div class="setting-row storage-location"><div><h3>会议文件保存位置</h3><p id="settings-output-root" class="storage-path">正在读取保存位置…</p></div><div class="storage-actions"><button id="settings-open-folder" type="button" disabled>打开文件夹</button><button id="settings-choose-folder" type="button" aria-describedby="settings-output-help" disabled>选择文件夹</button></div></div><p id="settings-output-help" class="setting-note">修改后仅新建会议使用此位置，已有会议资料不移动。</p><p id="storage-settings-result" class="provider-result" role="status" aria-live="polite"></p><p id="settings-retention" class="setting-note"></p></section>
           <section class="settings-section"><h2>本机收听与转写</h2><div class="setting-row"><div><h3>系统声音与麦克风</h3><p id="settings-audio-state">请在桌面 App 中使用本机收听。</p></div><button id="check-model">检查中文模型</button></div><div class="setting-row"><div><h3>Apple 中文识别</h3><p id="settings-model-state">音频在本机处理，无需 APIKey。</p></div><button id="install-model">安装模型</button></div></section>
           <form id="service-settings-form" autocomplete="off">
             <section class="settings-section provider-section" aria-labelledby="model-service-title">
@@ -198,7 +199,6 @@
             <p class="setting-note">保存后新任务立即生效；执行中的任务沿用原服务。密钥仅保存在本机，留空保留；更换地址需填写新密钥。</p>
             <p class="setting-note">连接测试发送固定测试内容，会产生一次对应服务调用。</p><p id="settings-authorization" class="setting-note"></p>
           </form>
-          <section class="settings-section"><h2>保存与回看</h2><div class="setting-row"><div><h3>会议资料文件夹</h3><p>每场会议一个目录，按时间保存 Markdown。</p></div><button id="settings-open-folder">打开文件夹</button></div><p id="settings-retention" class="setting-note"></p></section>
         </section>
       </main>
     </div>

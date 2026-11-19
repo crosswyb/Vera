@@ -25,9 +25,10 @@ def stamp(created):
 
 
 class ArtifactWriter:
-    def __init__(self, root, registry_path=None):
-        self.root = Path(root).expanduser().resolve()
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    def __init__(self, root, registry_path=None, *, create_root=True):
+        self.root = Path(root).expanduser().resolve() if create_root else Path(root).expanduser().absolute()
+        if create_root:
+            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.temporary_registry = Path(registry_path).expanduser().resolve() if registry_path is not None else self.path(".zsjh-temporary.sqlite3")
         self.temporary_registry.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with sqlite3.connect(self.temporary_registry) as db:
@@ -64,6 +65,8 @@ class ArtifactWriter:
         return removed
 
     def path(self, relative):
+        require(self.root.is_dir() and self.root.resolve() == self.root,
+                "会议保存目录不可用，请连接原磁盘或恢复原目录后重试", 409)
         candidate = self.root / relative
         # Resolve every component: existing symlinks must never escape the root.
         require(candidate.resolve().is_relative_to(self.root), "文档路径越界", 409)

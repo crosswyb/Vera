@@ -90,7 +90,9 @@ def main():
         import certifi
         import ssl
         ssl.create_default_context(cafile=certifi.where())
-        result = {"capabilities": wb.capabilities, "output_root": str(wb.writer.root), "credentials_path": str(credentials_path)}
+        with wb.store.transaction() as db:
+            storage = wb.store._get(db, "wb_storage", "default")
+        result = {"capabilities": wb.capabilities, **storage, "credentials_path": str(credentials_path)}
         result["tls_context"] = "ready"
         if args.check_provider:
             result["provider_connection"] = check_provider(wb.provider_settings.current.model)

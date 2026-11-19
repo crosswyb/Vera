@@ -51,16 +51,16 @@ class RecordingArchive:
                 m, r = self._archive_track(db, mid, rid)
                 cleanup = r['archive_state'] == 'cleanup'
                 if not cleanup:
-                    src = self.writer.path(r['path'])
-                    dst = self.writer.path(str(Path(r['path']).with_suffix('.m4a')))
-                    require(src.suffix == '.caf' and src.parent == self.writer.path(m['directory']), '录音路径无效', 409)
+                    src = self.writer_for(m).path(r['path'])
+                    dst = self.writer_for(m).path(str(Path(r['path']).with_suffix('.m4a')))
+                    require(src.suffix == '.caf' and src.parent == self.writer_for(m).path(m['directory']), '录音路径无效', 409)
                     if not r.get('archive_stage'):
                         original = identity(src)
                         directory = Path(tempfile.mkdtemp(prefix='.zsjh-aac-', dir=src.parent))
-                        r['archive_stage'] = {'path': str(directory.relative_to(self.writer.root)),
+                        r['archive_stage'] = {'path': str(directory.relative_to(self.writer_for(m).root)),
                                               'inode': identity(directory)[:2], 'source': original}
                     stage = r['archive_stage']
-                    directory = self.writer.path(stage['path'])
+                    directory = self.writer_for(m).path(stage['path'])
                     require(directory.is_dir() and identity(directory)[:2] == stage['inode'] and identity(src) == stage['source'],
                             '录音或暂存目录已变化', 409)
                     staged = directory / 'verified.m4a'
@@ -78,22 +78,22 @@ class RecordingArchive:
                     # A crash between the link and commit can leave our own inode at dst.
                     if not (dst.exists() and dst.samefile(staged)):
                         os.link(staged, dst)
-                    r.update(raw_path=r['path'], path=str(dst.relative_to(self.writer.root)), bytes=dst.stat().st_size,
+                    r.update(raw_path=r['path'], path=str(dst.relative_to(self.writer_for(m).root)), bytes=dst.stat().st_size,
                              archive_state='cleanup', archive_identity=identity(dst))
                     self._event(db, m, 'recording.archived', {'recording_id': rid})
                     self._save(db, m)
             # Only after the playback path is durably committed may we remove the CAF.
             with self.store.transaction() as db:
                 m, r = self._archive_track(db, mid, rid)
-                primary = self.writer.path(r['path'])
+                primary = self.writer_for(m).path(r['path'])
                 require(identity(primary) == r['archive_identity'], 'M4A 文件在归档期间已变化', 409)
-                raw = self.writer.path(r['raw_path'])
+                raw = self.writer_for(m).path(r['raw_path'])
                 if not r['keep_original_caf']:
                     if raw.exists():
                         require(identity(raw) == r['archive_stage']['source'], 'CAF 文件在归档期间已变化', 409)
                         raw.unlink()
                     r.pop('raw_path')
-                clean_audio_stage(self.writer, r)
+                clean_audio_stage(self.writer_for(m), r)
                 r.pop('archive_stage'); r.pop('archive_identity')
                 r.update(archive_state='saved')
                 self._save(db, m)
@@ -113,7 +113,7 @@ class RecordingArchive:
                                         '本机音频转码或完整性校验失败' if isinstance(err, AudioCodecError) else '本机录音文件无法读写'))
                 if not after_commit and r.get('archive_stage'):
                     try:
-                        clean_audio_stage(self.writer, r)
+                        clean_audio_stage(self.writer_for(m), r)
                         r.pop('archive_stage')
                     except (LiveError, OSError):
                         pass  # Preserve ownership for subsequent cleanup.

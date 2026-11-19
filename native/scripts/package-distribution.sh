@@ -15,13 +15,13 @@ for task_suffix in dmg zip SHA256SUMS.txt; do
 done
 task_stage="$(mktemp -d "$task_native_dir/build/distribution-stage.XXXXXX")"
 trap 'rm -rf "$task_stage"' EXIT
-ditto "$task_app_dir" "$task_stage/真实交互工作台.app"
+ditto "$task_app_dir" "$task_stage/真实交互.app"
 cp "$task_native_dir/DISTRIBUTION.md" "$task_stage/安装与首次使用.md"
 ln -s /Applications "$task_stage/Applications"
 # Fail if a future build accidentally adds credentials or meeting databases.
-task_forbidden="$(find "$task_stage/真实交互工作台.app" \( -name '.env' -o -name '.env.*' -o -name 'credentials.json' -o -name 'providers.json' -o -name 'workbench.env' -o -name '*.sqlite3' \) -print -quit)"
+task_forbidden="$(find "$task_stage/真实交互.app" \( -name '.env' -o -name '.env.*' -o -name 'credentials.json' -o -name 'providers.json' -o -name 'workbench.env' -o -name '*.sqlite3' \) -print -quit)"
 [[ -z "$task_forbidden" ]] || { print -u2 -- "Release contains forbidden local state; packaging stopped."; exit 66; }
-hdiutil create -quiet -volname "真实交互工作台" -srcfolder "$task_stage" -format UDZO "$task_output_dir/$task_name.dmg"
+hdiutil create -quiet -volname "真实交互" -srcfolder "$task_stage" -format UDZO "$task_output_dir/$task_name.dmg"
 hdiutil verify -quiet "$task_output_dir/$task_name.dmg"
 ditto -c -k --sequesterRsrc "$task_stage" "$task_output_dir/$task_name.zip"
 (

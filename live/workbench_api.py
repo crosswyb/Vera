@@ -37,6 +37,14 @@ def register_workbench(app, store):
     def settings_owner():
         require(g.member["role"] == "owner", "只有工作区主持人可以配置服务", 403)
 
+    @app.get("/live/v2/storage")
+    def workbench_storage():
+        return jsonify(wb.storage(g.member))
+
+    @app.put("/live/v2/storage")
+    def workbench_save_storage():
+        return jsonify(wb.set_storage(g.member, request.get_json(silent=True)))
+
     @app.get("/live/v2/settings")
     def workbench_settings():
         settings_owner()

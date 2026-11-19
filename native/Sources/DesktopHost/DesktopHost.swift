@@ -66,7 +66,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private let startupTitle = NSTextField(labelWithString: "正在打开工作区")
     private let startupDetail = NSTextField(wrappingLabelWithString: "正在准备本机服务…")
     private let startupSpinner = NSProgressIndicator()
-    private let startupExit = NSButton(title: "退出工作台", target: nil, action: nil)
+    private let startupExit = NSButton(title: "退出应用", target: nil, action: nil)
     private var startupFailed = false
     private var status = "正在启动…" { didSet { publishNativeState() } }
     private let startItem = NSMenuItem(title: "开始收听", action: nil, keyEquivalent: "")
@@ -148,7 +148,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 try await bootBackend()
                 showStartupProgress("正在连接音频组件…")
                 try launchHelper()
-                showStartupProgress("正在加载工作台…")
+                showStartupProgress("正在加载应用…")
                 loadWorkbench()
                 status = "未在收听"
                 checkModel()
@@ -163,7 +163,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         applyThemePreference(themePreference)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "真实交互工作台"
+        window.title = "真实交互"
         window.minSize = NSSize(width: 980, height: 680)
         let root = NSView()
         window.contentView = root
@@ -191,7 +191,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         let appMenu = NSMenu()
         let rootItem = NSMenuItem()
         let menu = NSMenu()
-        menu.addItem(withTitle: "退出真实交互工作台", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(withTitle: "退出真实交互", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         rootItem.submenu = menu; appMenu.addItem(rootItem)
         let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
         let edit = NSMenu(title: "编辑")
@@ -264,7 +264,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         attachStartupView()
         startupSpinner.stopAnimation(nil)
         startupTitle.stringValue = "无法打开工作区"
-        startupDetail.stringValue = message + "\n请退出后重新打开工作台。"
+        startupDetail.stringValue = message + "\n请退出后重新打开应用。"
         startupExit.isHidden = false
     }
 
@@ -274,9 +274,9 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private func bootBackend() async throws {
-        guard let resources = Bundle.main.resourceURL else { throw DesktopError(message: "请从已打包的工作台 App 启动。") }
+        guard let resources = Bundle.main.resourceURL else { throw DesktopError(message: "请从已打包的真实交互 App 启动。") }
         let executable = resources.appendingPathComponent("backend/zsjh-workbench-backend")
-        guard FileManager.default.isExecutableFile(atPath: executable.path) else { throw DesktopError(message: "工作台包缺少本机服务，请重新构建。") }
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else { throw DesktopError(message: "应用包缺少本机服务，请重新构建。") }
         if !FileManager.default.fileExists(atPath: stateDirectory.appendingPathComponent("credentials.json").path) {
             showStartupProgress("正在创建本机工作区…")
             try await runInitialization(executable)
@@ -442,7 +442,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         pageLoaded = false; publishNativeState()
-        showStartupProgress("正在加载工作台…")
+        showStartupProgress("正在加载应用…")
         if activeMeeting != nil { stopWithStatus("页面正在重新连接，收听已暂停…") }
     }
 
@@ -450,7 +450,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         pageLoaded = isWorkbench(webView.url); publishNativeState()
         guard !startupFailed else { return }
         guard pageLoaded, hostReady else {
-            showStartupFailure("工作台尚未成功连接本机服务。")
+            showStartupFailure("应用尚未成功连接本机服务。")
             return
         }
         startupSpinner.stopAnimation(nil)
@@ -462,7 +462,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         if navigationResponse.isForMainFrame, isWorkbench(navigationResponse.response.url),
            let response = navigationResponse.response as? HTTPURLResponse,
            !(200...299).contains(response.statusCode) {
-            showStartupFailure("本机服务未能打开工作台页面（\(response.statusCode)）。")
+            showStartupFailure("本机服务未能打开应用页面（\(response.statusCode)）。")
             decisionHandler(.cancel); return
         }
         decisionHandler(.allow)
@@ -480,17 +480,17 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         let failure = error as NSError
         guard !(failure.domain == NSURLErrorDomain && failure.code == NSURLErrorCancelled) else { return }
         pageLoaded = false; publishNativeState()
-        if activeMeeting != nil { stopWithStatus("工作台连接中断，正在停止收听…") }
+        if activeMeeting != nil { stopWithStatus("应用连接中断，正在停止收听…") }
         if !startupFailed {
             showStartupFailure(failure.domain == NSURLErrorDomain && failure.code == NSURLErrorTimedOut
-                               ? "工作台页面连接超时。" : "无法加载本机工作台页面。")
+                               ? "应用页面连接超时。" : "无法加载本机应用页面。")
         }
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         pageLoaded = false; publishNativeState()
-        if activeMeeting != nil { stopWithStatus("工作台页面已退出，正在停止收听…") }
-        showStartupFailure("工作台页面进程已退出。")
+        if activeMeeting != nil { stopWithStatus("应用页面已退出，正在停止收听…") }
+        showStartupFailure("应用页面进程已退出。")
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -527,6 +527,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         case "checkModel": if modelItem.isEnabled { checkModel() }
         case "installModel": if installItem.isEnabled { installModel() }
         case "openConfiguration": openConfiguration()
+        case "chooseOutputDirectory": chooseOutputDirectory()
         case "openOutput":
             if let value = body["meetingId"] {
                 guard let id = value as? String, validMeetingID(id) else { return }
@@ -542,8 +543,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                           let record = recordings.first(where: { $0["id"] as? String == fileID }),
                           ["saved", "partial"].contains(record["state"] as? String ?? ""),
                           let relative = record["path"] as? String else { throw DesktopError(message: "录音尚未保存。") }
-                    let url = outputRoot.appendingPathComponent(relative).resolvingSymlinksInPath().standardizedFileURL
-                    guard url.path.hasPrefix(outputRoot.resolvingSymlinksInPath().path + "/"), FileManager.default.fileExists(atPath: url.path) else {
+                    let url = try meetingFileURL(relative, meeting: meeting)
+                    guard FileManager.default.fileExists(atPath: url.path) else {
                         throw DesktopError(message: "找不到本场录音。")
                     }
                     if let player = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.QuickTimePlayerX") {
@@ -590,7 +591,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 // A private template never imports repo credentials. Calls also
                 // require configured services and each meeting's visible controls.
                 let template = """
-                # 修改后请退出并重新打开工作台。只在本机填写密钥。
+                # 修改后请退出并重新打开应用。只在本机填写密钥。
                 # 配置服务后，新会议默认联网查证；创建时可关闭。调用不设次数上限。
                 ZSJH_LIVE_MODEL_ENDPOINT=https://api.deepseek.com
                 ZSJH_LIVE_MODEL_PROVIDER=deepseek
@@ -630,26 +631,92 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private func openOutput(meetingID: String?) {
         Task {
             do {
-                var destination = outputRoot
+                let destination: URL
                 if let id = meetingID {
                     let snapshot = try await meetingSnapshot(id)
-                    guard let path = snapshot["output_directory"] as? String, path.hasPrefix("/") else {
-                        throw DesktopError(message: "该会议资料已按保存期限清理。")
+                    guard let meeting = snapshot["meeting"] as? [String: Any], let relative = meeting["directory"] as? String else {
+                        throw DesktopError(message: "该会议资料目录不可用。")
                     }
-                    destination = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
-                    guard contains(destination, under: outputRoot.standardizedFileURL),
-                          contains(destination.resolvingSymlinksInPath(), under: outputRoot.resolvingSymlinksInPath()) else {
-                        throw DesktopError(message: "会议资料目录超出已批准的本机位置。")
-                    }
+                    destination = try meetingFileURL(relative, meeting: meeting)
                 } else {
-                    try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true,
-                                                            attributes: [.posixPermissions: 0o700])
+                    destination = try await configuredOutputRoot()
                 }
                 guard !closing, pageLoaded, isWorkbench(webView.url) else { return }
                 var directory: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: destination.path, isDirectory: &directory), directory.boolValue,
                       NSWorkspace.shared.open(destination) else { throw DesktopError(message: "会议资料目录不存在或无法打开。") }
             } catch { showNativeError(error.localizedDescription) }
+        }
+    }
+
+    private func meetingFileURL(_ relative: String, meeting: [String: Any]) throws -> URL {
+        guard let path = meeting["output_root"] as? String, path.hasPrefix("/"),
+              let directory = meeting["directory"] as? String, !directory.isEmpty,
+              !relative.hasPrefix("/"), !directory.hasPrefix("/"),
+              !directory.split(separator: "/").contains("..") else {
+            throw DesktopError(message: "会议保存位置不可用，请重新打开应用后重试。")
+        }
+        let root = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        let folder = root.appendingPathComponent(directory).standardizedFileURL
+        let file = root.appendingPathComponent(relative).standardizedFileURL
+        guard folder != root, contains(folder, under: root), contains(file, under: folder),
+              file == folder || file.deletingLastPathComponent() == folder,
+              contains(folder.resolvingSymlinksInPath(), under: root.resolvingSymlinksInPath()),
+              contains(file.resolvingSymlinksInPath(), under: folder.resolvingSymlinksInPath()) else {
+            throw DesktopError(message: "会议文件路径超出本场保存位置。")
+        }
+        return file
+    }
+
+    private func configuredOutputRoot() async throws -> URL {
+        let data = try await request("/live/v2/storage", owner: true)
+        guard let settings = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let path = settings["output_root"] as? String, path.hasPrefix("/") else {
+            throw DesktopError(message: "无法读取会议文件保存位置。")
+        }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    private var choosingOutputDirectory = false
+    private func chooseOutputDirectory() {
+        guard hostReady, !choosingOutputDirectory, let window else { return }
+        choosingOutputDirectory = true
+        Task {
+            do {
+                let current = try await configuredOutputRoot()
+                guard !closing else { choosingOutputDirectory = false; return }
+                let panel = NSOpenPanel()
+                panel.title = "选择会议文件保存位置"
+                panel.message = "新会议保存到这里，已有会议继续使用原位置。"
+                panel.prompt = "使用此文件夹"
+                panel.canChooseFiles = false; panel.canChooseDirectories = true
+                panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
+                panel.directoryURL = current
+                panel.beginSheetModal(for: window) { [weak self = self] response in
+                    guard let self else { return }
+                    guard response == .OK, let url = panel.url else { self.choosingOutputDirectory = false; return }
+                    Task { @MainActor in
+                        defer { self.choosingOutputDirectory = false }
+                        do {
+                            let body = try JSONSerialization.data(withJSONObject: ["output_root": url.path])
+                            _ = try await self.request("/live/v2/storage", body: body, method: "PUT", owner: true)
+                            _ = try? await self.webView.evaluateJavaScript("window.dispatchEvent(new CustomEvent('zsjh-storage-changed'));")
+                        } catch {
+                            // A lost response does not prove the server rolled
+                            // back the setting. Read it back before reporting.
+                            let message = error.localizedDescription
+                            if let actual = try? await self.configuredOutputRoot() {
+                                _ = try? await self.webView.evaluateJavaScript("window.dispatchEvent(new CustomEvent('zsjh-storage-changed'));")
+                                if actual.resolvingSymlinksInPath() != url.resolvingSymlinksInPath() {
+                                    self.showNativeError("未保存所选位置：" + message + "\n当前保存位置：" + actual.path)
+                                }
+                            } else {
+                                self.showNativeError("保存结果暂无法确认，请重新打开设置核对。\n" + message)
+                            }
+                        }
+                    }
+                }
+            } catch { choosingOutputDirectory = false; showNativeError(error.localizedDescription) }
         }
     }
 
@@ -787,18 +854,23 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         guard pageLoaded, isWorkbench(webView.url) else { throw DesktopError(message: "请等待会议页面完成连接。") }
         let value = try await webView.evaluateJavaScript("document.getElementById('meeting-select')?.value || ''")
         guard let id = value as? String, validMeetingID(id) else {
-            throw DesktopError(message: "请先在工作台选择一场进行中的会议。")
+            throw DesktopError(message: "请先在应用选择一场进行中的会议。")
         }
         return id
     }
 
-    private func request(_ path: String, body: Data? = nil) async throws -> Data {
+    private func request(_ path: String, body: Data? = nil, method: String? = nil, owner: Bool = false) async throws -> Data {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
-        request.setValue("Bearer " + agentToken, forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer " + (owner ? ownerToken : agentToken), forHTTPHeaderField: "Authorization")
         if let body { request.httpMethod = "POST"; request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        if let method { request.httpMethod = method }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw DesktopError(message: "会议服务响应无效。") }
-        guard (200...299).contains(http.statusCode) else { throw HTTPFailure(status: http.statusCode) }
+        guard (200...299).contains(http.statusCode) else {
+            if owner, let error = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let message = error["error"] as? String { throw DesktopError(message: message) }
+            throw HTTPFailure(status: http.statusCode)
+        }
         return data
     }
 
@@ -821,7 +893,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         guard let home = try JSONSerialization.jsonObject(with: homeData) as? [String: Any],
               let member = home["member"] as? [String: Any], member["role"] as? String == "agent",
               member["enabled"] as? Bool == true, let projectID = member["project_id"] as? String,
-              !projectID.isEmpty else { throw DesktopError(message: "本机采音身份不可用，请重新打开工作台。") }
+              !projectID.isEmpty else { throw DesktopError(message: "本机采音身份不可用，请重新打开应用。") }
         let snapshot = try await meetingSnapshot(id)
         guard let meeting = snapshot["meeting"] as? [String: Any], meeting["state"] as? String == "active" else {
             throw DesktopError(message: "当前会议已结束，请新建或选择会议。")
@@ -898,7 +970,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 guard try await selectedMeeting() == meeting else { throw DesktopError(message: "会议已切换，请重新导入。") }
                 try await validateCaptureMeeting(meeting, inputKind: "audio_file")
                 guard hostReady, try await selectedMeeting() == meeting, activeMeeting == nil else {
-                    throw DesktopError(message: "工作台状态已变化，请重新导入。")
+                    throw DesktopError(message: "应用状态已变化，请重新导入。")
                 }
                 let info = try await AudioFileInfo.inspect(selection.url)
                 let body = try JSONSerialization.data(withJSONObject: ["import_id": epoch, "file_name": info.name,
@@ -908,10 +980,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 guard let registeredMeeting = try JSONSerialization.jsonObject(with: registeredData) as? [String: Any],
                       let job = registeredMeeting["audio_import"] as? [String: Any],
                       let relative = job["original_path"] as? String else { throw DesktopError(message: "音频归档位置不可用。") }
-                let destination = outputRoot.appendingPathComponent(relative).standardizedFileURL
-                guard destination.resolvingSymlinksInPath().path.hasPrefix(outputRoot.resolvingSymlinksInPath().path + "/") else {
-                    throw DesktopError(message: "音频归档位置越界。")
-                }
+                let destination = try meetingFileURL(relative, meeting: registeredMeeting)
                 activeInput = "audio_file"; captureProblem = nil; meetingFinished = false
                 activeMeeting = meeting; lastMeeting = meeting; captureState = "importing"
                 beginningCapture = false; status = "正在保存原始音频副本…"
@@ -996,9 +1065,12 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 let body = try JSONSerialization.data(withJSONObject: ["recording_id": epoch, "sources": requestedInput.sources.map(\.rawValue)])
                 let registration = try await request("/internal/live/v2/meetings/\(meeting)/recordings", body: body)
                 registeredEpoch = epoch; registeredMeeting = meeting
+                let snapshot = try await meetingSnapshot(meeting)
                 guard let registered = try JSONSerialization.jsonObject(with: registration) as? [String: Any],
                       let directory = registered["recording_directory"] as? String,
-                      directory.hasPrefix(outputRoot.resolvingSymlinksInPath().path + "/") else {
+                      let savedMeeting = snapshot["meeting"] as? [String: Any],
+                      let relative = savedMeeting["directory"] as? String,
+                      directory == (try meetingFileURL(relative, meeting: savedMeeting)).path else {
                     throw DesktopError(message: "录音保存位置不可用，未开始收听。")
                 }
                 guard hostReady, try await selectedMeeting() == meeting, activeMeeting == nil else {
@@ -1171,7 +1243,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             stopWatchdog?.cancel(); healthTask?.cancel(); captureState = "stopped"
         case "audio.gap", "audio.error":
             let code = event["code"] as? String ?? type
-            let messages = ["microphone_denied": "麦克风权限未开启。请打开系统设置，允许真实交互工作台使用麦克风后重试。",
+            let messages = ["microphone_denied": "麦克风权限未开启。请打开系统设置，允许真实交互使用麦克风后重试。",
                             "device_changed": "音频设备已切换，收听已停止。请确认系统输入设备后重新开始。",
                             "capture_failed": "音源启动失败。请检查麦克风是否可用、系统输入设备及录音权限后重试。"]
             captureProblem = messages[code] ?? "收听未完成（\(code)），请检查音源和系统权限后重试。"

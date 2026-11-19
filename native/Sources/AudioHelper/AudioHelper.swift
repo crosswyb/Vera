@@ -107,7 +107,7 @@ private final class Host {
                             recordingDirectory: command.recordingDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) },
                             captureEpoch: command.captureEpoch))
                     } catch AudioCoreError.microphoneDenied {
-                        core.reportError(code: "microphone_denied", detail: "麦克风权限未开启，请在系统设置中允许真实交互工作台使用麦克风，再重新开始收听。")
+                        core.reportError(code: "microphone_denied", detail: "麦克风权限未开启，请在系统设置中允许真实交互使用麦克风，再重新开始收听。")
                     } catch { core.reportError(code: "start_rejected", detail: error.localizedDescription) }
                 }
             case "stop":

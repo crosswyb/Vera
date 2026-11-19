@@ -11,8 +11,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from live.artifact_writer import ArtifactWriter, digest, render_document
+from live.artifact_writer import digest, render_document
 from live.meeting_archive import MeetingArchive
+from live.meeting_storage import MeetingStorage
 from live.original_evidence import target_for, target_key, with_original_evidence
 from live.output_validation import failure_message, output_presentation
 from live.failure_diagnostics import historical_question_details, read_historical_ledger, request_details
@@ -54,9 +55,10 @@ def transient_detection_failure(details):
         "connection_error", "request_timeout"}
 
 
-class Workbench(MeetingArchive):
+class Workbench(MeetingArchive, MeetingStorage):
     def __init__(self, store, root, capabilities=None):
-        self.store, self.writer = store, ArtifactWriter(root, registry_path=store.path.with_name(store.path.name + ".temporary.sqlite3"))
+        self.store = store
+        self._init_storage(root)
         self.capabilities = capabilities or {}
         with store.transaction() as db:
             store._put(db, "wb_schema", "version", {"version": 1})
@@ -123,8 +125,10 @@ class Workbench(MeetingArchive):
                  "created_at": time.time(), "seq": 0, "semantic_seq": 0, "coordinator_cursor": 0,
                  "coordinator_state": "idle", "capture": {"status": "disconnected"}, "generation": 1,
                  "permissions": {**permissions.model_dump(), "updated_at": time.time(), "actor_id": principal["id"]}}
-            m["directory"] = self.writer.meeting_dir(m)
-            self.writer.path(m["directory"]).mkdir(mode=0o700)
+            m["output_root"] = self.store._get(db, "wb_storage", "default")["output_root"]
+            writer = self.writer_for(m)
+            m["directory"] = writer.meeting_dir(m)
+            writer.path(m["directory"]).mkdir(mode=0o700)
             self._event(db, m, "meeting.created", {"data_scope": m["data_scope"]})
             self._save(db, m)
         self.publish_index(m["id"])
@@ -151,10 +155,12 @@ class Workbench(MeetingArchive):
             return None
         require(len(Path(relative).parts) == 1 and relative.endswith("-" + meeting["id"][-8:]),
                 "会议文件夹归属无法确认，已停止删除", 409)
-        directory = self.writer.path(relative)
-        require(directory.parent == self.writer.root and not directory.is_symlink()
+        writer = self.writer_for(meeting)
+        directory = writer.path(relative)
+        require(directory.parent == writer.root and not directory.is_symlink()
                 and (not directory.exists() or directory.is_dir()), "会议文件夹位置异常，已停止删除", 409)
-        require(not any(m["id"] != meeting["id"] and m.get("directory") == relative
+        require(not any(m["id"] != meeting["id"] and m.get("directory")
+                        and (Path(m["output_root"]) / m["directory"]).is_relative_to(directory)
                         for m in self.store._all(db, "wb_meeting")), "会议文件夹被其他会议引用，已停止删除", 409)
         return directory
 
@@ -197,7 +203,7 @@ class Workbench(MeetingArchive):
             try:
                 directory = self._deletion_directory(db, m)
                 if m.get("directory"):
-                    self.writer.clean_temporaries(m["directory"])
+                    self.writer_for(m).clean_temporaries(m["directory"])
                 if directory and directory.exists():
                     shutil.rmtree(directory)
             except (OSError, LiveError) as exc:
@@ -253,7 +259,7 @@ class Workbench(MeetingArchive):
                                             "strategy": "import" if m.get("input_kind") == "audio_file" else "live",
                                             "held_questions": sum(self._automation_held(m, q) for q in questions)},
                     "activity": activity, "counts": counts, "capabilities": self.capabilities,
-                    "output_directory": str(self.writer.path(m["directory"])) if m["directory"] else "已按期限清理"}
+                    "output_directory": str(Path(m["output_root"]) / m["directory"]) if m["directory"] else "已按期限清理"}
 
     def _snapshot_failure_diagnostics(self, db, mid, questions):
         legacy = [q for q in questions if q["state"] in {"failed", "outcome_unknown"}
@@ -301,7 +307,7 @@ class Workbench(MeetingArchive):
             job.update(state=value.state, error=value.error, finished_at=time.time())
             for recording in m.get("recordings", []):
                 if recording["epoch"] == value.import_id and recording["state"] == "copying":
-                    path = self.writer.path(recording["path"])
+                    path = self.writer_for(m).path(recording["path"])
                     recording.update(state="partial" if path.is_file() and path.stat().st_size > 0 else "missing")
             if value.state == "completed":
                 job["processed_ms"] = job["duration_ms"]
@@ -316,7 +322,7 @@ class Workbench(MeetingArchive):
             # File publication shares the meeting deletion transaction fence.
             m = self._meeting(db, principal, mid, True)
             try:
-                self.writer.write(path, transcript["content"])
+                self.writer_for(m).write(path, transcript["content"])
                 save_state = "saved"
             except (OSError, LiveError):
                 save_state = "save_failed"
@@ -451,7 +457,7 @@ class Workbench(MeetingArchive):
                 if value.type == "audio.status" and value.state == "stopped":
                     for recording in m.get("recordings", []):
                         if recording["epoch"] == value.capture_epoch and recording["state"] == "recording":
-                            path = self.writer.path(recording["path"])
+                            path = self.writer_for(m).path(recording["path"])
                             recording.update(state="partial" if path.is_file() and path.stat().st_size > 0 else "missing")
             event = self.store._append(db, m, source, value.type, principal["id"], data,
                                              is_transcript and value.type != "transcript.interim")
@@ -854,7 +860,7 @@ class Workbench(MeetingArchive):
             row = db.execute("SELECT data FROM records WHERE kind='wb_document' AND id=?", (did,)).fetchone()
             old = json.loads(row[0]) if row else {}
             doc = {"id": did, "meeting_id": m["id"], "question_id": q["id"], "question_version": q["version"],
-                   "path": self.writer.document_path(m, q), "state": "pending", "basis_stale": False,
+                   "path": self.writer_for(m).document_path(m, q), "state": "pending", "basis_stale": False,
                    "question_generation": q["generation"], "meeting_generation": m["generation"],
                    "executor_id": principal["id"],
                    "content": render_document(m, q, result), "hash": old.get("hash"), "created_at": old.get("created_at", time.time()),
@@ -909,10 +915,12 @@ class Workbench(MeetingArchive):
                 self.store._put(db, "wb_document", did, doc)
                 return doc
             try:
-                doc["hash"] = self.writer.write(doc["path"], doc["content"], doc.get("hash"))
+                doc["hash"] = self.writer_for(m).write(doc["path"], doc["content"], doc.get("hash"))
                 doc.update(state="saved", saved_at=time.time(), error=None)
             except (OSError, LiveError) as exc:
-                doc.update(state="conflict" if isinstance(exc, LiveError) else "save_failed", error="人工编辑冲突" if isinstance(exc, LiveError) else "无法写入目录")
+                conflict = isinstance(exc, LiveError) and exc.details.get("file_conflict")
+                doc.update(state="conflict" if conflict else "save_failed",
+                           error="人工编辑冲突" if conflict else str(exc) if isinstance(exc, LiveError) else "无法写入目录")
             self.store._put(db, "wb_document", did, doc)
             q["stage"] = "已保存" if doc["state"] == "saved" else doc["error"]
             self.store._put(db, "wb_question", q["id"], q)
@@ -949,7 +957,7 @@ class Workbench(MeetingArchive):
             content = "\n".join(lines) + "\n"
             try:
                 index_path = m["directory"] + f"/index-{m['seq']:08d}.md"
-                m["index_hash"] = self.writer.write(index_path, content)
+                m["index_hash"] = self.writer_for(m).write(index_path, content)
                 m["index_path"] = index_path
                 m["index_paths"] = list(dict.fromkeys(m.get("index_paths", []) + [index_path]))
                 m["index_state"] = "saved"
@@ -960,8 +968,8 @@ class Workbench(MeetingArchive):
     def artifact(self, principal, did):
         with self.store.transaction() as db:
             doc = self.store._get(db, "wb_document", did)
-            self._meeting(db, principal, doc["meeting_id"])
-            path = self.writer.path(doc["path"])
+            m = self._meeting(db, principal, doc["meeting_id"])
+            path = self.writer_for(m).path(doc["path"])
             actual = path.read_text(encoding="utf-8") if path.exists() else None
             return {"document": {**doc, "absolute_path": str(path), "on_disk": actual is not None,
                                   "externally_modified": actual is not None and digest(actual) != doc.get("hash")},
@@ -991,10 +999,14 @@ class Workbench(MeetingArchive):
                     continue
                 m["capture"] = {"status": "disconnected"}
                 for recording in m.get("recordings", []):
-                    if recording["state"] in {"recording", "copying"}:
-                        path = self.writer.path(recording["path"])
-                        recording.update(state="partial" if path.is_file() and path.stat().st_size > 0 else "missing")
-                        interrupted.append(m["id"])
+                    if recording["state"] in {"recording", "copying", "unavailable"}:
+                        try:
+                            path = self.writer_for(m).path(recording["path"])
+                            recording.update(state="partial" if path.is_file() and path.stat().st_size > 0 else "missing")
+                            recording.pop("storage_error", None)
+                            interrupted.append(m["id"])
+                        except (OSError, LiveError):
+                            recording.update(state="unavailable", storage_error="原保存目录不可用，录音是否完整尚未核实；请连接原磁盘后重开应用。")
                 if m.get("summary", {}).get("state") == "running":
                     from live.meeting_archive import final_segments, render_summary
                     m["summary"].update(state="outcome_unknown", error="outcome_unknown")

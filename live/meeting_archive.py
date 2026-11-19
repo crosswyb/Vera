@@ -107,20 +107,20 @@ class MeetingArchive(RecordingArchive):
             require(not any(r["epoch"] == value.recording_id for r in recordings), "录音标识已使用", 409)
             for source in value.sources:
                 path = f"{m['directory']}/01-原始音频-{source}-{value.recording_id}.caf"
-                require(not self.writer.path(path).exists(), "录音文件已存在", 409)
+                require(not self.writer_for(m).path(path).exists(), "录音文件已存在", 409)
                 recordings.append({"id": value.recording_id + ":" + source, "epoch": value.recording_id,
                     "keep_original_caf": self.provider_settings.current.keep_original_caf,
                     "archive_state": "pending",
                     "source": source, "path": path, "state": "recording", "started_at": time.time()})
             self._event(db, m, "recording.started", {"recording_id": value.recording_id, "sources": value.sources})
             self._save(db, m)
-            return {"recording_directory": str(self.writer.path(m["directory"])), "capture_epoch": value.recording_id}
+            return {"recording_directory": str(self.writer_for(m).path(m["directory"])), "capture_epoch": value.recording_id}
 
     def _recording_event(self, m, value):
         recording = next((r for r in m.get("recordings", []) if r["epoch"] == value.capture_epoch and r["source"] == value.source), None)
         require(recording is not None, "录音未登记", 409)
         require(value.state in {"saved", "partial", "missing"}, "录音状态无效", 400)
-        path = self.writer.path(recording["path"])
+        path = self.writer_for(m).path(recording["path"])
         saved = path.is_file() and path.stat().st_size > 0
         recording.update(state=value.state if saved else "missing", bytes=path.stat().st_size if saved else 0,
                          duration_ms=value.audio_end_ms or 0, finished_at=time.time(), frames_received=value.frames_received)
@@ -128,21 +128,28 @@ class MeetingArchive(RecordingArchive):
     def _archive_file(self, db, m, kind, content, name):
         m.setdefault("base_files", {})
         path = m["directory"] + "/" + name + ".md"
-        if self.writer.path(path).exists() and digest(content) != digest(self.writer.path(path).read_text(encoding="utf-8")):
-            version = 2
-            while self.writer.path(m["directory"] + "/" + name + f"-v{version}.md").exists():
-                version += 1
-            path = m["directory"] + "/" + name + f"-v{version}.md"
         record = {"path": path, "state": "saved", "hash": digest(content), "updated_at": time.time()}
         try:
-            self.writer.write(path, content)
-        except (OSError, LiveError):
-            record.update(state="save_failed")
+            if self.writer_for(m).path(path).exists() and digest(content) != digest(self.writer_for(m).path(path).read_text(encoding="utf-8")):
+                version = 2
+                while self.writer_for(m).path(m["directory"] + "/" + name + f"-v{version}.md").exists():
+                    version += 1
+                path = m["directory"] + "/" + name + f"-v{version}.md"
+                record["path"] = path
+            self.writer_for(m).write(path, content)
+        except (OSError, LiveError) as exc:
+            record.update(state="save_failed", error=str(exc) if isinstance(exc, LiveError) else "无法写入目录")
         m["base_files"][kind] = record
         m.setdefault("base_file_paths", [])
         if path not in m["base_file_paths"]:
             m["base_file_paths"].append(path)
         return record
+
+    def _saved_file_exists(self, meeting, record):
+        try:
+            return record.get("state") == "saved" and self.writer_for(meeting).path(record["path"]).is_file()
+        except (OSError, LiveError):
+            return False
 
     def archive_meeting(self, mid):
         with self.store.transaction() as db:
@@ -155,9 +162,9 @@ class MeetingArchive(RecordingArchive):
             summary_file = m.get("base_files", {}).get("summary", {})
             can_start = m["state"] == "ended" and old.get("state") == "local_only" and bool(segments) and m.get("permissions", {}).get("model") and self.capabilities.get("model_enabled")
             if old.get("fingerprint") == fingerprint and not can_start:
-                if transcript.get("state") != "saved" or not self.writer.path(transcript["path"]).is_file():
+                if not self._saved_file_exists(m, transcript):
                     self._archive_file(db, m, "transcript", render_transcript(m, segments), "02-全量转录")
-                if summary_file.get("state") != "saved" or not self.writer.path(summary_file["path"]).is_file():
+                if not self._saved_file_exists(m, summary_file):
                     self._archive_file(db, m, "summary", render_summary(m, segments, old.get("result"), old["state"]), "03-会议纪要" if old.get("result") else "03-会议纪要-本机摘录")
                 self._save(db, m)
             else:
@@ -256,6 +263,6 @@ class MeetingArchive(RecordingArchive):
             require(m["state"] != "expired", "会议文件已清理", 409)
             record = m.get("base_files", {}).get(kind)
             require(record is not None, "结束会议后自动生成会议文件", 404)
-            path = self.writer.path(record["path"])
+            path = self.writer_for(m).path(record["path"])
             require(path.is_file(), "文件未成功保存，请检查目录权限后重试", 409)
             return {"content": path.read_text(encoding="utf-8"), "filename": path.name, "path": str(path), "state": record["state"]}

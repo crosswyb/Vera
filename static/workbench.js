@@ -27,6 +27,7 @@
     search: '', librarySignature: '', recentIds: [], homeRequest: null,
     native: window.__ZSJH_NATIVE__ || null, switchTarget: null, endTarget: '', importTarget: '', importFileID: '', nativeFileError: '', permissionTarget: '',
     serviceSettings: null, settingsRequest: null, settingsBusy: false, settingsDirty: false,
+    storageSettings: null, storageRequest: null, storageRefreshPending: false, storageError: '',
     clearModelKey: false, clearSearchKey: false, manageTarget: null, deletionReady: false,
     snapshotReceivedAt: 0, serverOffset: 0, transcriptHistory: null, returnNote: null,
   };
@@ -155,7 +156,7 @@
     }
     renderLibrary();
     renderSettings();
-    if (state.route === 'settings') loadServiceSettings();
+    if (state.route === 'settings') { loadServiceSettings(); loadStorageSettings(); }
     $('main').scrollTop = 0;
   }
   async function readRoute() {
@@ -447,6 +448,7 @@
     state.librarySignature = '';
     state.recentIds = [];
     state.serviceSettings = null; state.settingsRequest = null; state.settingsDirty = false;
+    state.storageSettings = null; state.storageRequest = null; state.storageRefreshPending = false; state.storageError = '';
     state.clearModelKey = false; state.clearSearchKey = false;
     $('service-model-key').value = ''; $('service-search-key').value = '';
     $('meeting-select').value = '';
@@ -459,7 +461,7 @@
     $('login').hidden = false;
     setSync('尚未连接');
     document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
-    if (showMessage) notice('已退出工作台');
+    if (showMessage) notice('已退出真实交互');
   }
   async function login(token) {
     state.token = token;
@@ -542,9 +544,45 @@
     text($('settings-search-badge'), cap.search_enabled ? '已启用' : cap.search_configured ? '待启用' : '未配置');
     text($('settings-authorization'), `新会议默认开启联网查证，可在创建或导入时关闭。自动搜索使用公开检索词。${requestLimitsText()}`);
     renderProviderSettings();
-    $('settings-open-folder').disabled = !desktop;
+    renderStorageSettings();
     text($('settings-retention'), '录音、转写、纪要与查证资料长期保存在本机，不会自动到期删除。仅在你确认删除会议时清除该会议资料。');
     $('guide-demo').hidden = state.home?.project?.data_scope !== 'synthetic';
+  }
+
+  function renderStorageSettings() {
+    const desktop = nativeAvailable();
+    const owner = state.home?.member?.role === 'owner';
+    const root = state.storageSettings?.output_root;
+    text($('settings-output-root'), root || (state.storageRequest ? '正在读取保存位置…' : '保存位置暂不可用'));
+    $('settings-output-root').title = root || '';
+    $('settings-open-folder').disabled = !desktop || !root;
+    $('settings-choose-folder').disabled = !desktop || !owner || !root || Boolean(state.storageRequest);
+    text($('settings-output-help'), `选择后自动保存，仅新建会议使用此位置，已有会议资料不移动。${!desktop ? '请在桌面 App 中选择或打开文件夹。' : !owner ? '只有工作区主持人可以修改保存位置。' : ''}`);
+    text($('storage-settings-result'), state.storageError);
+    $('storage-settings-result').dataset.state = state.storageError ? 'error' : '';
+  }
+  async function loadStorageSettings(force = false) {
+    if (!state.token || !state.home) return;
+    if (state.storageRequest) { if (force) state.storageRefreshPending = true; return; }
+    if (!force && state.storageSettings) return;
+    const request = {}, token = state.token;
+    state.storageRequest = request; state.storageError = '';
+    renderStorageSettings();
+    try {
+      const value = await api('/live/v2/storage');
+      if (state.token !== token || state.storageRequest !== request) return;
+      if (typeof value.output_root !== 'string' || !value.output_root) throw new Error('服务未返回有效保存位置');
+      state.storageSettings = value;
+    } catch (error) {
+      if (state.token === token && state.storageRequest === request) state.storageError = `保存位置读取失败：${error.message}。可点击“重新载入已保存的设置”重试。`;
+    } finally {
+      if (state.storageRequest === request) {
+        state.storageRequest = null;
+        const refresh = state.storageRefreshPending; state.storageRefreshPending = false;
+        renderStorageSettings();
+        if (refresh) loadStorageSettings(true);
+      }
+    }
   }
 
   function providerMessage(id, value, status = '') {
@@ -583,7 +621,7 @@
       $(`clear-${kind}-key`).disabled = busy || !editable || !saved || cleared;
     }
     if (!owner) providerMessage('service-settings-result', '只有工作区主持人可以修改服务设置。');
-    else if (settings && !settings.editable) providerMessage('service-settings-result', '当前运行方式未启用持久化设置，请使用桌面 App 或工作台启动入口。');
+    else if (settings && !settings.editable) providerMessage('service-settings-result', '当前运行方式未启用持久化设置，请使用真实交互桌面 App 或命令行启动入口。');
   }
   function fillServiceSettings(settings) {
     state.serviceSettings = settings;
@@ -815,7 +853,7 @@
   function renderSnapshot() {
     const snapshot = state.snapshot;
     const meeting = snapshot?.meeting;
-    text($('session-title'), meeting?.title || '会议工作台');
+    text($('session-title'), meeting?.title || '真实交互');
     const selected = Boolean(state.meetingId);
     const live = Boolean(meeting) && !meetingEnded();
     const research = researchAvailable();
@@ -900,13 +938,14 @@
     const recordings = meeting.recordings || [];
     const saved = recordings.filter(r => ['saved', 'partial'].includes(r.state));
     const recording = recordings.some(r => ['recording', 'copying'].includes(r.state));
+    const unavailable = recordings.some(r => r.state === 'unavailable');
     const missing = recordings.some(r => ['missing', 'failed', 'partial', 'copy_failed'].includes(r.state));
     const archiving = recordings.some(r => ['pending', 'converting', 'cleanup'].includes(r.archive_state));
     const archiveFailed = recordings.some(r => ['failed', 'cleanup_failed'].includes(r.archive_state));
     const summaryRunning = ['pending', 'running'].includes(meeting.summary?.state);
     const complete = saved.length > 0 && recordings.every(r => r.state === 'saved' && (!r.archive_state || r.archive_state === 'saved')) && files.transcript?.state === 'saved' && files.summary?.state === 'saved' && meeting.summary?.state === 'completed';
-    text($('archive-status'), ended ? complete ? '已归档' : missing ? '录音不完整' : archiveFailed ? '录音归档失败' : !saved.length ? '录音未保存' : archiving || summaryRunning ? '正在归档' : '资料已保存 · 请核对下方状态' : '会后自动归档');
-    text($('archive-guidance'), ended ? !saved.length ? '本场没有录音文件；此前未录下的音频无法从文字恢复。已保存文件可在下方查看。' : '录音和已保存的文档位于本场会议文件夹，状态见下方。' : '收听时同步保存原始音频；结束会议后自动保存完整转录并整理纪要。');
+    text($('archive-status'), unavailable ? '保存位置不可用' : ended ? complete ? '已归档' : missing ? '录音不完整' : archiveFailed ? '录音归档失败' : !saved.length ? '录音未保存' : archiving || summaryRunning ? '正在归档' : '资料已保存 · 请核对下方状态' : '会后自动归档');
+    text($('archive-guidance'), unavailable ? '原保存目录不可用，录音是否完整尚未核实；请连接原磁盘后重开应用。' : ended ? !saved.length ? '本场没有录音文件；此前未录下的音频无法从文字恢复。已保存文件可在下方查看。' : '录音和已保存的文档位于本场会议文件夹，状态见下方。' : '收听时同步保存原始音频；结束会议后自动保存完整转录并整理纪要。');
     const names = {pending:'等待生成 AI 总结', running:'正在整理 AI 总结', completed:'AI 总结已保存，请核对', failed:'AI 总结失败 · 已保留本机摘录', outcome_unknown:'AI 请求被中断 · 可重试', permission_revoked:'本场模型授权已关闭 · 已停止总结并保留本机摘录；重新授权后可重试', local_only:'本机摘录已保存 · 未启用 AI 总结'};
     if (!ended && meeting.permissions?.model) names.local_only = '本机摘录已保存 · 结束后整理纪要';
     const row = (title, status) => {
@@ -914,7 +953,7 @@
       const copy = element('div'); copy.append(element('h3', '', title), element('p', '', status));
       const actions = element('div', 'meeting-file-actions'); node.append(copy, actions); return {node, copy, actions};
     };
-    const audio = row('01  会议录音', recording ? '正在保存到本机' : saved.length ? `${saved.length} 份录音${saved.some(r => r.state === 'partial') ? ' · 部分录音被中断' : ' · 已保存'}` : ended ? '本场没有已保存的录音' : '开始收听或导入音频后保存');
+    const audio = row('01  会议录音', unavailable ? '保存位置不可用 · 录音完整性待核实' : recording ? '正在保存到本机' : saved.length ? `${saved.length} 份录音${saved.some(r => r.state === 'partial') ? ' · 部分录音被中断' : ' · 已保存'}` : ended ? '本场没有已保存的录音' : '开始收听或导入音频后保存');
     if (recordings.length) {
       const clips = element('ul', 'meeting-recordings');
       recordings.forEach((r, index) => {
@@ -922,8 +961,9 @@
         item.dataset.recordingState = r.state;
         const label = `${({system:'电脑声音',microphone:'麦克风',file:'导入原音频'})[r.source] || '录音'}${recordings.length > 1 ? ` ${index + 1}` : ''}`;
         if (!['saved', 'partial'].includes(r.state)) {
-          const reason = r.state === 'missing' ? r.frames_received === 0 ? '未收到音频数据，未生成录音文件' : '未生成录音文件或文件已缺失' : ({recording:'正在录音', copying:'正在保存导入音频', failed:'录音保存失败', copy_failed:'导入音频保存失败'})[r.state] || '录音尚未保存';
+          const reason = r.state === 'missing' ? r.frames_received === 0 ? '未收到音频数据，未生成录音文件' : '未生成录音文件或文件已缺失' : ({recording:'正在录音', copying:'正在保存导入音频', failed:'录音保存失败', copy_failed:'导入音频保存失败', unavailable:'保存位置不可用'})[r.state] || '录音尚未保存';
           item.append(element('strong', '', label), element('span', '', ` · ${reason}`));
+          if (r.storage_error) item.append(element('span', '', ` · ${readable(r.storage_error)}`));
           if (r.error) item.append(element('span', '', ` · ${readable(r.error)}`));
           clips.append(item); return;
         }
@@ -2026,7 +2066,7 @@
   $('stop-listening').addEventListener('click', () => nativePost('stopCapture', state.meetingId));
   $('check-model').addEventListener('click', () => nativePost('checkModel'));
   $('install-model').addEventListener('click', () => nativePost('installModel'));
-  $('reload-service-settings').addEventListener('click', () => loadServiceSettings(true));
+  $('reload-service-settings').addEventListener('click', () => { loadServiceSettings(true); loadStorageSettings(true); });
   $('service-settings-form').addEventListener('input', editedServiceSettings);
   $('service-settings-form').addEventListener('change', editedServiceSettings);
   $('service-model-provider').addEventListener('change', () => {
@@ -2082,6 +2122,8 @@
     } finally { state.settingsBusy = false; renderProviderSettings(); }
   });
   $('settings-open-folder').addEventListener('click', () => nativePost('openOutput'));
+  $('settings-choose-folder').addEventListener('click', () => nativePost('chooseOutputDirectory'));
+  window.addEventListener('zsjh-storage-changed', () => loadStorageSettings(true));
   $('theme-preference').addEventListener('change', event => {
     applyTheme(event.target.value);
     try { localStorage.setItem('wb_theme', themePreference); } catch { /* Native preferences are persisted by the host. */ }

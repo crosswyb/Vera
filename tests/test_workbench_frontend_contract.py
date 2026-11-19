@@ -51,11 +51,11 @@ class WorkbenchFrontendContractTests(unittest.TestCase):
     def test_browser_keeps_native_command_and_event_contract(self):
         swift = (ROOT / 'native/Sources/DesktopHost/DesktopHost.swift').read_text()
         commands = set(re.findall(r"nativePost\('([A-Za-z]+)'", self.js))
-        required = set('checkModel chooseAudioFile importAudioFile installModel openMeetingAudio openMicrophoneSettings openOutput requestState setAudioSource setThemePreference startCapture stopCapture'.split())
+        required = set('checkModel chooseAudioFile chooseOutputDirectory importAudioFile installModel openMeetingAudio openMicrophoneSettings openOutput requestState setAudioSource setThemePreference startCapture stopCapture'.split())
         self.assertFalse(required - commands)
         for command in commands:
             self.assertIn('"' + command + '"', swift)
-        for marker in ('zsjh-native-state', 'wb_access'):
+        for marker in ('zsjh-native-state', 'zsjh-storage-changed', 'wb_access'):
             self.assertIn(marker, self.js)
             self.assertIn(marker, swift)
         for marker in ('themePreference', '__ZSJH_THEME_PREFERENCE__'):
@@ -65,10 +65,76 @@ class WorkbenchFrontendContractTests(unittest.TestCase):
     def test_browser_retains_server_backed_operations(self):
         calls = re.findall(r"api\([`'](/live/v2/[^`']+)[`']", self.js)
         paths = {re.sub(r'\$\{[^}]+\}', '{}', call.partition('?')[0]) for call in calls}
-        required = {'/live/v2/' + p for p in ('home', 'meetings', 'settings', 'settings/test/{}', 'artifacts/{}', 'questions/{}', 'questions/{}/actions')}
+        required = {'/live/v2/' + p for p in ('home', 'meetings', 'settings', 'storage', 'settings/test/{}', 'artifacts/{}', 'questions/{}', 'questions/{}/actions')}
         required.add('/live/v2/meetings/{}')
         required |= {'/live/v2/meetings/{}/' + p for p in ('snapshot', 'segments', 'transcript', 'utterances', 'questions', 'permissions', 'controls', 'demo', 'deletion', 'summary', 'files/{}', 'files/retry')}
         self.assertFalse(required - paths)
+
+    def test_storage_refresh_ignores_stale_sessions_and_reloads_after_native_change(self):
+        """Exercise actual async loader: a picker event cannot be lost behind a GET."""
+        script = r"""
+const assert = require('node:assert/strict');
+const source = require('node:fs').readFileSync(process.argv[1], 'utf8');
+const loader = source.slice(source.indexOf('  async function loadStorageSettings('), source.indexOf('  function providerMessage('));
+const state = {token:'owner', home:{}, storageRequest:null, storageSettings:null, storageError:'', storageRefreshPending:false};
+const requests=[];
+const api = path => new Promise((resolve,reject) => { assert.equal(path,'/live/v2/storage'); requests.push({resolve,reject}); });
+const renderStorageSettings=()=>{};
+eval(loader + '; globalThis.load = loadStorageSettings;');
+(async()=>{
+  const first=load();
+  await load(true);
+  assert.equal(requests.length,1);
+  requests[0].resolve({output_root:'/old'});
+  await first;
+  assert.equal(requests.length,2);
+  requests[1].resolve({output_root:'/new'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(state.storageSettings.output_root,'/new');
+  const oldSession=load(true);
+  state.token='new-owner'; state.storageRequest=null; state.storageSettings=null;
+  const newSession=load(true);
+  requests[2].resolve({output_root:'/stale'});
+  await oldSession;
+  assert.equal(state.storageSettings,null);
+  requests[3].resolve({output_root:'/new-session'});
+  await newSession;
+  assert.equal(state.storageSettings.output_root,'/new-session');
+  const failed=load(true);
+  requests[4].reject(new Error('synthetic unavailable'));
+  await failed;
+  assert.match(state.storageError,/synthetic unavailable/);
+  assert.equal(state.storageSettings.output_root,'/new-session');
+  assert.equal(state.storageRequest,null);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')],
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_unavailable_recording_reports_storage_without_claiming_audio_loss(self):
+        script = r"""
+const assert=require('node:assert/strict');
+const source=require('node:fs').readFileSync(process.argv[1],'utf8');
+const render=source.slice(source.indexOf('  function renderMeetingFiles() {'),source.indexOf('  function renderMeetingMarkdown('));
+const element=(tag,cls='',value='')=>({tag,dataset:{},textContent:value,children:[],append(...nodes){this.children.push(...nodes);},prepend(...nodes){this.children.unshift(...nodes);},replaceChildren(...nodes){this.children=nodes;},addEventListener(){}});
+const nodes=new Map();const $=id=>{if(!nodes.has(id))nodes.set(id,element('div'));return nodes.get(id);};
+const text=(node,value)=>node.textContent=value;const readable=value=>value;const nativeAvailable=()=>false;
+const state={snapshot:{meeting:{id:'offline',state:'ended',recordings:[{id:'audio',source:'microphone',state:'unavailable',storage_error:'原保存目录不可用，录音是否完整尚未核实；请连接原磁盘后重开应用。'}]}},home:{}};
+eval(render+';renderMeetingFiles();');
+const collect=node=>[node.textContent,...node.children.map(collect)].join(' ');
+assert.equal($('archive-status').textContent,'保存位置不可用');
+assert.match($('archive-guidance').textContent,/录音是否完整尚未核实/);
+assert.match(collect($('meeting-files-list')),/请连接原磁盘后重开应用/);
+assert.doesNotMatch(collect($('meeting-files-list')),/本场没有已保存的录音|录音尚未保存/);
+state.snapshot.meeting.recordings[0]={id:'audio',source:'microphone',state:'missing',frames_received:0};
+eval(render+';renderMeetingFiles();');
+assert.equal($('archive-status').textContent,'录音不完整');
+assert.match(collect($('meeting-files-list')),/未收到音频数据，未生成录音文件/);
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')],
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_post_meeting_scan_progress_and_retry_controls(self):
         """Exercise the actual renderer with a minimal DOM and synthetic snapshots."""
