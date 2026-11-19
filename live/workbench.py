@@ -27,7 +27,14 @@ COORDINATOR_CONTEXT_CHARACTERS = 3000
 COORDINATOR_RETRY_DELAYS = (2, 5, 15)
 COORDINATOR_BATCH_SEGMENTS = 4
 COORDINATOR_CATCHUP_SEGMENTS = 16
+IMPORT_BATCH_CHARACTERS = 4000
+IMPORT_MIN_CHARACTERS = 3000
+IMPORT_MAX_SEGMENTS = 256
 TRANSCRIPT_PAGE_SIZE = 120
+
+
+def coordinator_lane(meeting):
+    return "realtime" if meeting.get("input_kind", "live") != "audio_file" and meeting["state"] == "active" else "background"
 
 
 def research_priority(question):
@@ -242,6 +249,8 @@ class Workbench(MeetingArchive):
                     "segment_count": len(visible_segments),
                     "questions": questions, "documents": docs,
                     "automation_progress": {"processed": processed, "pending": len(final_segments) - processed,
+                                            "pending_characters": sum(len(s["text"]) for s in final_segments if s["event_seq"] > m["coordinator_cursor"]),
+                                            "strategy": "import" if m.get("input_kind") == "audio_file" else "live",
                                             "held_questions": sum(self._automation_held(m, q) for q in questions)},
                     "activity": activity, "counts": counts, "capabilities": self.capabilities,
                     "output_directory": str(self.writer.path(m["directory"])) if m["directory"] else "已按期限清理"}
@@ -347,7 +356,7 @@ class Workbench(MeetingArchive):
                              stage="本场联网授权已变更，请确认后重试", updated_at=time.time())
                 self.store._put(db, "wb_question", q["id"], q)
             m.update(generation=m["generation"] + 1, coordinator_error=None, coordinator_continuations=0)
-            m["coordinator_state"] = "pending" if m["state"] == "active" and m["semantic_seq"] > m["coordinator_cursor"] else "idle"
+            m["coordinator_state"] = "pending" if m["semantic_seq"] > m["coordinator_cursor"] else "idle"
             self._event(db, m, "meeting.permissions", value.model_dump())
             self._save(db, m)
             return m
@@ -483,7 +492,7 @@ class Workbench(MeetingArchive):
 
     def _new_question(self, db, m, title, refs, origin="manual", public_query="", candidate=False,
                       original_target=None, anchor_ref=None):
-        require(m["state"] == "active", "会议已结束", 409)
+        require(m["state"] == "active" or (origin == "coordinator" and m["state"] == "ended"), "会议已结束", 409)
         self._refs(db, m, refs)
         title = title.strip()
         require(bool(title), "问题不能为空", 400)
@@ -589,7 +598,7 @@ class Workbench(MeetingArchive):
             m = self._meeting(db, principal, mid, True)
             require(action in {"pause_research", "resume_research", "retry_coordinator", "end"}, "未知会议操作", 400)
             require(m["state"] in RESEARCH_MEETING_STATES, "会议数据已清理，无法查证", 409)
-            if action in {"end", "retry_coordinator"}:
+            if action == "end":
                 require(m["state"] == "active", "会议已结束，可继续已有问题的查证", 409)
             if action == "retry_coordinator":
                 require(m["coordinator_state"] != "running", "问题识别正在执行，请等待本次结果", 409)
@@ -617,7 +626,7 @@ class Workbench(MeetingArchive):
                 # Scheduling controls do not invalidate paid work already in
                 # flight, its publication fence, or its committed input cursor.
                 m["research_paused"] = paused
-                if not paused and m["state"] == "active" and m["coordinator_state"] == "idle" and not m.get("coordinator_error"):
+                if not paused and m["coordinator_state"] == "idle" and not m.get("coordinator_error"):
                     m["coordinator_state"] = "pending" if m["semantic_seq"] > m["coordinator_cursor"] else "idle"
             for q in self._items(db, "wb_question", mid):
                 if action == "end" and q["state"] in ACTIVE | {"backlog"}:
@@ -689,7 +698,9 @@ class Workbench(MeetingArchive):
                 return None
             # Backlog is a display bound, not a barrier for an urgent request.
             qs = [q for q in eligible if q["state"] in {"queued", "backlog"}]
-            qs.sort(key=lambda q: (research_priority(q), -q["priority"], q["created_at"]))
+            qs.sort(key=lambda q: (research_priority(q) != 0,
+                                  coordinator_lane(meetings[q["meeting_id"]]) != "realtime" if research_priority(q) else False,
+                                  research_priority(q), -q["priority"], q["created_at"]))
             schedule_row = db.execute("SELECT data FROM records WHERE kind='wb_schedule' AND id=?", (principal["project_id"],)).fetchone()
             schedule = json.loads(schedule_row[0]) if schedule_row else {"priority_streak": 0}
             aged = [q for q in qs if research_priority(q) == 2 and time.time() - q["created_at"] >= 120]
@@ -697,8 +708,21 @@ class Workbench(MeetingArchive):
                 aged.sort(key=lambda q: q["created_at"])
                 aged_ids = {q["id"] for q in aged}
                 qs = aged + [q for q in qs if q["id"] not in aged_ids]
+            background_aged = [q for q in qs if research_priority(q) != 0
+                               and coordinator_lane(meetings[q["meeting_id"]]) == "background"
+                               and time.time() - q["created_at"] >= 120]
+            if schedule.get("realtime_streak", 0) >= 3 and background_aged:
+                oldest = min(background_aged, key=lambda q: q["created_at"])
+                qs = [q for q in qs if research_priority(q) == 0] + [oldest] + [q for q in qs if research_priority(q) != 0 and q["id"] != oldest["id"]]
+            realtime_open = any(coordinator_lane(m) == "realtime" and not m["research_paused"]
+                                and not self.blocked_reason(m) for m in meetings.values())
+            background_running = sum(coordinator_lane(meetings[q["meeting_id"]]) == "background" for q in running)
             for q in qs:
                 m = meetings[q["meeting_id"]]
+                # While a live meeting is open, imported automatic research may
+                # occupy only one slot. Manual requests remain explicit overrides.
+                if realtime_open and coordinator_lane(m) == "background" and background_running >= 1 and research_priority(q) != 0:
+                    continue
                 reason = self.blocked_reason(m, q)
                 if reason:
                     q["stage"] = reason
@@ -706,6 +730,7 @@ class Workbench(MeetingArchive):
                     continue
                 self._refs(db, m, q["source_refs"])
                 schedule["priority_streak"] = min(3, schedule["priority_streak"] + 1) if research_priority(q) < 2 else 0
+                schedule["realtime_streak"] = min(3, schedule.get("realtime_streak", 0) + 1) if coordinator_lane(m) == "realtime" else 0
                 self.store._put(db, "wb_schedule", principal["project_id"], schedule)
                 q.update(state="running", stage="searching", started_at=time.time(), lease_id=uid("lease"), error=None, error_details=None)
                 q["progress"] = {"generation": q["generation"], "version": q["version"],
@@ -990,11 +1015,16 @@ class Workbench(MeetingArchive):
             if publish:
                 self.archive_meeting(mid)
 
-    def coordinator_work(self, principal):
+    def coordinator_work(self, principal, lane=None):
         with self.store.transaction() as db:
             self.store._acl(db, principal, principal["project_id"], {"agent"})
-            for m in self.store._all(db, "wb_meeting"):
-                if m["project_id"] != principal["project_id"] or m["state"] != "active" or m["research_paused"] or m["coordinator_state"] not in {"pending", "retry_wait"}:
+            meetings = self.store._all(db, "wb_meeting")
+            # Within each independent lane, rotate meetings after each batch.
+            # Legacy/direct callers still prefer realtime when no lane is given.
+            meetings.sort(key=lambda m: (coordinator_lane(m) != "realtime" if lane is None else False,
+                                         m.get("last_coordinator_claim_at", 0), m["created_at"], m["id"]))
+            for m in meetings:
+                if (lane is not None and coordinator_lane(m) != lane) or m["project_id"] != principal["project_id"] or m["state"] not in RESEARCH_MEETING_STATES or m["research_paused"] or m["coordinator_state"] not in {"pending", "retry_wait"}:
                     continue
                 if self.blocked_reason(m):
                     continue
@@ -1002,7 +1032,14 @@ class Workbench(MeetingArchive):
                 if m["coordinator_state"] == "retry_wait" and time.time() < retry.get("next_at", 0):
                     continue
                 segments = sorted((s for s in self._items(db, "wb_segment", m["id"]) if s["type"] == "transcript.final"), key=lambda s: s["event_seq"])
-                if m["mode"] != "demo" and segments:
+                unread = [s for s in segments if s["event_seq"] > m["coordinator_cursor"]]
+                importing = m.get("input_kind") == "audio_file"
+                if importing and unread and m.get("audio_import", {}).get("state") == "processing":
+                    # Let short fragments coalesce, but do not hold a tail longer
+                    # than three seconds. EOF bypasses this wait entirely.
+                    if sum(len(s["text"]) for s in unread) < IMPORT_MIN_CHARACTERS and time.time() - unread[0]["received_at"] < 3:
+                        continue
+                elif not importing and m["state"] == "active" and m["mode"] != "demo" and segments:
                     debounce = self.capabilities.get("debounce_seconds", .8)
                     if time.time() - max(s["received_at"] for s in segments) < debounce and time.time() - m.get("pending_since", 0) < 3:
                         continue
@@ -1022,32 +1059,46 @@ class Workbench(MeetingArchive):
                         break
                     context.append(s)
                     context_size += len(s["text"])
-                unread = [s for s in segments if s["event_seq"] > m["coordinator_cursor"]]
                 catching_up = len(unread) >= 8 or bool(unread and time.time() - unread[0]["received_at"] >= 15)
-                batch_limit = COORDINATOR_CATCHUP_SEGMENTS if catching_up else COORDINATOR_BATCH_SEGMENTS
-                batch, size = [], context_size
+                batch_limit = IMPORT_MAX_SEGMENTS if importing else COORDINATOR_CATCHUP_SEGMENTS if catching_up else COORDINATOR_BATCH_SEGMENTS
+                # A dense imported batch may exceed the 12-action schema. Revisit
+                # it in small batches rather than exhausting continuations on the
+                # same large input. Already created questions remain in context.
+                if importing and m.get("coordinator_continuations", 0):
+                    batch_limit = COORDINATOR_BATCH_SEGMENTS
+                batch, size, new_size = [], context_size, 0
                 for s in unread:
-                    if len(batch) == batch_limit or size + len(s["text"]) > 12000:
+                    if len(batch) == batch_limit or size + len(s["text"]) > 12000 or (importing and batch and new_size >= IMPORT_BATCH_CHARACTERS):
                         break
                     batch.append(s)
                     size += len(s["text"])
+                    new_size += len(s["text"])
                 cursor = batch[-1]["event_seq"] if len(batch) < len(unread) else m["semantic_seq"]
                 if m["coordinator_state"] == "retry_wait":
                     self._event(db, m, "coordinator.retrying", {"attempt": retry["attempts"], "max_attempts": len(COORDINATOR_RETRY_DELAYS)})
                     retry["state"] = "running"
                 m["coordinator_state"] = "running"
+                m["last_coordinator_claim_at"] = time.time()
                 self._save(db, m)
                 return {"meeting": m, "cursor": cursor, "segments": context[::-1] + batch,
-                        "action_limit": 12 if len(batch) > COORDINATOR_BATCH_SEGMENTS else 4,
+                        "lane": coordinator_lane(m),
+                        "action_limit": 12 if importing or len(batch) > COORDINATOR_BATCH_SEGMENTS else 4,
                         "questions": sorted(self._items(db, "wb_question", m["id"]), key=lambda q: q["updated_at"])}
         return None
+
+    def validate_coordinator_request(self, principal, work):
+        """Recheck authority after waiting for a model slot, including correction calls."""
+        with self.store.transaction() as db:
+            m = self._meeting(db, principal, work["meeting"]["id"])
+            require(m["state"] in RESEARCH_MEETING_STATES and m["generation"] == work["meeting"]["generation"], "协调上下文已失效", 409)
+            require(not self.blocked_reason(m), "本场问题识别尚未授权", 403)
 
     def commit_decisions(self, principal, work, decisions):
         refresh_index = False
         with self.store.transaction() as db:
             m = self._meeting(db, principal, work["meeting"]["id"], True)
             self.store._acl(db, principal, m["project_id"], {"agent"})
-            require(m["state"] == "active"
+            require(m["state"] in RESEARCH_MEETING_STATES
                     and m["generation"] == work["meeting"]["generation"], "协调上下文已失效", 409)
             if m["coordinator_cursor"] >= work["cursor"]:
                 return  # This exact input was already committed.
@@ -1165,7 +1216,7 @@ class Workbench(MeetingArchive):
                 if exc.status == 404:
                     return
                 raise
-            if (m["state"] == "active" and m["generation"] == work["meeting"]["generation"]
+            if (m["state"] in RESEARCH_MEETING_STATES and m["generation"] == work["meeting"]["generation"]
                     and m["coordinator_cursor"] < work["cursor"]):
                 # A known, locally rejected result can be superseded by newer
                 # transcript revisions. Only pure detection has bounded recovery;

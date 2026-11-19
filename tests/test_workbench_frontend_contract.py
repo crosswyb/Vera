@@ -4,6 +4,7 @@ from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 
@@ -68,6 +69,56 @@ class WorkbenchFrontendContractTests(unittest.TestCase):
         required.add('/live/v2/meetings/{}')
         required |= {'/live/v2/meetings/{}/' + p for p in ('snapshot', 'segments', 'transcript', 'utterances', 'questions', 'permissions', 'controls', 'demo', 'deletion', 'summary', 'files/{}', 'files/retry')}
         self.assertFalse(required - paths)
+
+    def test_post_meeting_scan_progress_and_retry_controls(self):
+        """Exercise the actual renderer with a minimal DOM and synthetic snapshots."""
+        script = r"""
+const assert = require('node:assert/strict');
+const source = require('node:fs').readFileSync(process.argv[1], 'utf8');
+const render = source.slice(source.indexOf('  function renderSnapshot() {'), source.indexOf('  let filePreviewRequest'));
+const nodes = new Map();
+const $ = id => {
+  if (!nodes.has(id)) nodes.set(id, {dataset:{}, hidden:false, disabled:false, textContent:'', setAttribute(){}});
+  return nodes.get(id);
+};
+const text = (node, value) => node.textContent = value;
+const state = {meetingId:'test', route:'meeting', pendingButtons:new Set(), snapshot:{
+  meeting:{id:'test', title:'Synthetic', state:'ended', research_paused:true, coordinator_state:'idle'},
+  segments:[], questions:[], automation_progress:{processed:12, pending:3, held_questions:0}
+}};
+const meetingEnded = () => state.snapshot.meeting.state !== 'active';
+const researchAvailable = () => ['active','ended'].includes(state.snapshot.meeting.state);
+const meetingStates = {ended:'会议已结束'};
+const activeStates = new Set(['queued','running','paused']);
+const coordinatorIssue = meeting => meeting.coordinator_error_message || '';
+const calendarDate = () => '', time = () => '', retracted = () => false;
+const renderCapabilities=()=>{}, renderCapture=()=>{}, renderTranscripts=()=>{}, renderQuestions=()=>{}, renderDetail=()=>{}, renderActivity=()=>{}, renderMeetingFiles=()=>{};
+eval(render + '\nrenderSnapshot();');
+assert.equal($('research-control').disabled, false);
+assert.match($('automation-hint').textContent, /3 段转写待分析/);
+assert.equal($('automation-hint').hidden, false);
+assert.match($('automation-progress').textContent, /已分析 12 段 · 待分析 3 段/);
+state.snapshot.meeting.coordinator_error_message='Synthetic connection failure';
+state.snapshot.meeting.coordinator_state='failed';
+eval(render + '\nrenderSnapshot();');
+assert.equal($('coordinator-warning').hidden, false);
+assert.equal($('retry-coordinator').hidden, false);
+assert.equal($('retry-coordinator').disabled, true);
+state.snapshot.meeting.research_paused=false;
+eval(render + '\nrenderSnapshot();');
+assert.equal($('retry-coordinator').disabled, false);
+assert.match($('automation-status').textContent, /待重试/);
+state.snapshot.meeting.state='active';
+eval(render + '\nrenderSnapshot();');
+assert.equal($('retry-coordinator').disabled, false);
+state.snapshot.meeting.state='deleting';
+eval(render + '\nrenderSnapshot();');
+assert.equal($('research-control').disabled, true);
+assert.equal($('retry-coordinator').disabled, true);
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')],
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == '__main__':

@@ -107,7 +107,7 @@ class PostMeetingResearchTest(unittest.TestCase):
         self.assertEqual(len(after["documents"]), 24)
         self.assertTrue(all(d["state"] == "saved" for d in after["documents"]))
 
-    def test_resume_never_restarts_detector_or_reanalyses_old_transcript(self):
+    def test_resume_only_detects_unread_tail_without_reanalysing_committed_input(self):
         self.wb.utterance(self.owner, self.mid, Utterance(text="合成：请调研工作流", segment_id="s1"))
         detector = self.wb.coordinator_work(self.agent)
         self.wb.commit_decisions(self.agent, detector, Decisions(actions=[]))
@@ -115,13 +115,19 @@ class PostMeetingResearchTest(unittest.TestCase):
         late_detector = self.wb.coordinator_work(self.agent)
         self.question()
         ended = self.wb.control(self.owner, self.mid, "end")
+        with self.assertRaises(LiveError):
+            self.wb.commit_decisions(self.agent, late_detector, Decisions(actions=[]))
+        self.wb.control(self.owner, self.mid, "resume_research")
+        tail = self.wb.coordinator_work(self.agent)
+        self.assertEqual(tail["lane"], "background")
+        new = [s for s in tail["segments"] if s["event_seq"] > tail["meeting"]["coordinator_cursor"]]
+        self.assertEqual([s["text"] for s in new], ["合成：仍未分析的尾部发言"])
+        self.wb.commit_decisions(self.agent, tail, Decisions(actions=[]))
         for _ in range(3):
             self.wb.control(self.owner, self.mid, "resume_research")
             self.assertIsNone(self.wb.coordinator_work(self.agent))
-            self.assertEqual(self.snapshot()["meeting"]["coordinator_cursor"], ended["coordinator_cursor"])
+            self.assertEqual(self.snapshot()["meeting"]["coordinator_cursor"], ended["semantic_seq"])
             self.wb.control(self.owner, self.mid, "pause_research")
-        with self.assertRaises(LiveError):
-            self.wb.commit_decisions(self.agent, late_detector, Decisions(actions=[]))
         with self.assertRaises(LiveError):
             self.wb.control(self.owner, self.mid, "retry_coordinator")
         with self.assertRaises(LiveError):

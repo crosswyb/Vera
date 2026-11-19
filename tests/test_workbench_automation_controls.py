@@ -91,7 +91,8 @@ class AutomationControlsTest(unittest.TestCase):
         self.wb.control(self.owner, self.mid, "pause_research")
         self.wb.commit_decisions(self.agent, work, self.decisions(work, ["自动问题一", "自动问题二"]))
         snapshot = self.wb.snapshot(self.owner, self.mid)
-        self.assertEqual(snapshot["automation_progress"], {"processed": 1, "pending": 0, "held_questions": 2})
+        self.assertEqual(snapshot["automation_progress"], {"processed": 1, "pending": 0, "held_questions": 2,
+                                                        "pending_characters": 0, "strategy": "live"})
         self.assertIsNone(self.wb.claim(self.agent))
         question = snapshot["questions"][1]
         self.wb.action(self.owner, question["id"], QuestionAction(action="retry", expected_version=1))

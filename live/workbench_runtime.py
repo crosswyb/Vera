@@ -1,4 +1,4 @@
-"""One coordinator and two research slots in the API process; no nested agents."""
+"""Separate realtime/background detection lanes and two bounded research workers."""
 
 import json
 import os
@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime
 
 import requests
@@ -74,6 +75,10 @@ actions保留明确提出的后续行动；负责人、截止日期没有明说�
 转录可能不准确，存在歧义就在要点中明确待核对。每部分简洁，全部输出控制在1200个中文字左右。分段输入仅概括当前部分。
 """
 MODEL_SLOTS = threading.BoundedSemaphore(3)
+# Import detection, research and summaries cannot occupy the realtime reserve.
+# Acquire this before the shared semaphore so waiting background threads never
+# hold the remaining slot. Total model HTTP concurrency remains at most three.
+BACKGROUND_MODEL_SLOTS = threading.BoundedSemaphore(2)
 COORDINATOR_DETAILED_QUESTIONS = 50
 
 
@@ -93,11 +98,11 @@ class TextModel:
     def close(self):
         self.sessions.close()
 
-    def call(self, system, content, *, conversation_id=None, progress=None, detection=False, before_request=None):
+    def call(self, system, content, *, conversation_id=None, progress=None, detection=False, before_request=None, realtime=False):
         endpoint = self.config.base_url
         if progress:
             progress("model_queued", {})
-        with MODEL_SLOTS:
+        with (nullcontext() if realtime else BACKGROUND_MODEL_SLOTS), MODEL_SLOTS:
             if before_request:
                 before_request()
             payload = self.config.payload(system, content, summary=system.startswith(SUMMARY_SYSTEM), detection=detection)
@@ -181,7 +186,7 @@ class TextModel:
             except (KeyError, IndexError, TypeError):
                 raise ValueError("model response contract rejected") from None
 
-    def _structured(self, system, content, contract, validate=None, *, conversation_id=None, progress=None, detection=False, before_request=None):
+    def _structured(self, system, content, contract, validate=None, *, conversation_id=None, progress=None, detection=False, before_request=None, realtime=False):
         system += "\n输出必须符合以下JSON Schema，包含字段类型、长度和数量限制：\n" + json.dumps(contract.model_json_schema(), ensure_ascii=False)
         prompt = content
         for attempt in range(2):
@@ -191,6 +196,7 @@ class TextModel:
                     before_request()
                 raw = self.call(system, prompt, **({"conversation_id": conversation_id} if conversation_id else {}),
                                 **({"progress": progress} if progress else {}), **({"detection": True} if detection else {}),
+                                **({"realtime": True} if realtime else {}),
                                 **({"before_request": before_request} if before_request else {}))
                 if progress:
                     progress("model_validating", {})
@@ -210,7 +216,7 @@ class TextModel:
                 prompt = {**content, "previous_response": raw, "validation_feedback": issues,
                           "correction_instruction": "根据全部校验错误修正输出，仅返回符合Schema的JSON。查证引文优先从quote_options选择已有编号，不要重写原文或编造编号。不能降低证据状态来掩盖引用错误。"}
 
-    def decisions(self, work):
+    def decisions(self, work, *, before_request=None):
         content = {"recent_segments": [{"segment_id": s["id"], "revision": s["revision"], "text": s["text"], "truncated": s.get("truncated", False),
                                        "is_new": s.get("event_seq", work["cursor"]) > work["meeting"]["coordinator_cursor"]} for s in work["segments"]],
                    # Every question stays visible so a topic raised again late in a long
@@ -225,7 +231,8 @@ class TextModel:
                 raise ValueError("actions exceed this batch's action_limit")
             return value
         return self._structured(COORDINATOR_SYSTEM, content, Decisions, validate,
-                                conversation_id=work["meeting"].get("id"), detection=True)
+                                conversation_id=work["meeting"].get("id"), detection=True,
+                                realtime=work.get("lane") == "realtime", before_request=before_request)
 
     def answer(self, meeting, question, sources, *, progress=None):
         options = quote_catalog(sources)
@@ -318,12 +325,14 @@ class WorkbenchRuntime:
         self.demo_researcher = DemoResearcher()
         self.research_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wb-research")
         self.coordinator_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wb-coordinator")
+        self.background_coordinator_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wb-import-coordinator")
         self.summary_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wb-summary")
         self.audio_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wb-audio-archive")
         self.audio_job = None
         self.next_audio_check = 0
         self.research_jobs = set()
         self.coordinator_job = None
+        self.background_coordinator_job = None
         self.summary_job = None
         # Keep the task identity until its local outcome has been recorded.
         # A done Future can still contain a failed SQLite write.
@@ -379,6 +388,7 @@ class WorkbenchRuntime:
         self.wb.recover(publish=False)
         self.research_pool.shutdown(wait=False, cancel_futures=True)
         self.coordinator_pool.shutdown(wait=False, cancel_futures=True)
+        self.background_coordinator_pool.shutdown(wait=False, cancel_futures=True)
         self.summary_pool.shutdown(wait=False, cancel_futures=True)
         self.audio_pool.shutdown(wait=False, cancel_futures=True)
         if isinstance(self.model, TextModel):
@@ -415,9 +425,13 @@ class WorkbenchRuntime:
                     break
                 self.research_jobs.add(self._submit_worker(self.research_pool, "research", self._research, actor, work, self.researcher))
             if self.coordinator_job is None or self.coordinator_job.done():
-                work = self.wb.coordinator_work(actor)
+                work = self.wb.coordinator_work(actor, lane="realtime")
                 if work:
                     self.coordinator_job = self._submit_worker(self.coordinator_pool, "coordinator", self._coordinate, actor, work, self.model)
+            if self.background_coordinator_job is None or self.background_coordinator_job.done():
+                work = self.wb.coordinator_work(actor, lane="background")
+                if work:
+                    self.background_coordinator_job = self._submit_worker(self.background_coordinator_pool, "coordinator", self._coordinate, actor, work, self.model)
 
     def _submit_worker(self, pool, kind, function, actor, work, service):
         future = pool.submit(function, actor, work, service)
@@ -480,7 +494,13 @@ class WorkbenchRuntime:
             if not any(s.get("event_seq", work["cursor"]) > work["meeting"]["coordinator_cursor"] for s in work["segments"]):
                 decisions = Decisions(actions=[])
             else:
-                decisions = demo_decisions(work) if work["meeting"]["mode"] == "demo" else (model or self.model).decisions(work)
+                service = model or self.model
+                if work["meeting"]["mode"] == "demo":
+                    decisions = demo_decisions(work)
+                elif isinstance(service, TextModel):
+                    decisions = service.decisions(work, before_request=lambda: self.wb.validate_coordinator_request(actor, work))
+                else:
+                    decisions = service.decisions(work)
             if not self.stop_event.is_set():
                 self.wb.commit_decisions(actor, work, decisions)
         except Exception as exc:

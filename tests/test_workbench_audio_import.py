@@ -178,6 +178,7 @@ class AudioImportTest(unittest.TestCase):
     def test_revoking_permissions_fences_coordinator_and_running_results(self):
         self.begin()
         self.wb.audio(self.agent, self.mid, self.event())
+        self.finish()  # Release the deliberately coalesced short import tail.
         self.wb.permissions(self.owner, self.mid, MeetingPermissions(model=True, search=True))
         coordinator = self.wb.coordinator_work(self.agent)
         self.wb.question(self.owner, self.mid, NewQuestion(title="定义", public_query="workflow definition"))
@@ -210,7 +211,7 @@ class AudioImportTest(unittest.TestCase):
         try:
             with patch("requests.Session.post", side_effect=AssertionError("unexpected network")), patch("requests.Session.get", side_effect=AssertionError("unexpected network")):
                 runtime.tick()
-                runtime.coordinator_job.result(timeout=5)
+                runtime.background_coordinator_job.result(timeout=5)
                 q = self.wb.snapshot(self.owner, self.mid)["questions"][0]
                 from live.workbench_contracts import QuestionAction
                 self.wb.action(self.owner, q["id"], QuestionAction(action="approve", expected_version=1, public_query="workflow definition"))
