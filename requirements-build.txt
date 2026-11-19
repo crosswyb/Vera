@@ -1,0 +1,2 @@
+-r requirements-workbench.txt
+pyinstaller>=6.0,<7

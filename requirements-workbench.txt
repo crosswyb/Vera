@@ -1,0 +1,6 @@
+# V2 workbench backend only; Apple AudioCore is built separately with SwiftPM.
+Flask>=3.1.2,<4
+pydantic>=2.10,<3
+filelock>=3.16,<4
+requests>=2.32,<3
+python-dotenv>=1.0,<2

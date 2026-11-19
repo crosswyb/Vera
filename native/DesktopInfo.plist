@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>DesktopHost</string>
+  <key>CFBundleIdentifier</key><string>com.zsjh.workbench</string>
+  <key>CFBundleName</key><string>真实交互工作台</string>
+  <key>CFBundleDisplayName</key><string>真实交互工作台</string>
+  <key>CFBundleIconFile</key><string>AppIcon.icns</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>22</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSAudioCaptureUsageDescription</key><string>您开始收听后，真实交互工作台在本机保存会议录音并实时转写。</string>
+  <key>NSMicrophoneUsageDescription</key><string>您选择麦克风并开始收听后，真实交互工作台在本机保存录音并转写发言。</string>
+</dict></plist>

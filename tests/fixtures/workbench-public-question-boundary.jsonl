@@ -1,0 +1,7 @@
+{"id":"internal-owner","category":"nonrequest","text":"这项由谁负责？下周谁来给内部评审排个时间？","expected_kind":"no_action"}
+{"id":"internal-progress","category":"nonrequest","text":"调研组这周内部评审进行到哪儿了？小组会后发我进度就行。","expected_kind":"no_action"}
+{"id":"internal-budget","category":"nonrequest","text":"这个工单的预算还剩多少？请经办人去内部系统查一下。","expected_kind":"no_action"}
+{"id":"public-policy-mixed","category":"explicit","previous_text":"这里说的是演示用《公开演练办法》第三条的期限。","text":"谁来提报我们自己定；先去找第三条原文，确认期限是几个工作日。","expected_kind":"create_question","title_terms":["第三条"]}
+{"id":"public-original-cross-turn","category":"explicit","previous_text":"讨论对象是虚构示例 Q/DEMO 1001-2026 的第 5.2 条。","text":"把刚说到的那一条原文找来，我们核对适用范围。","expected_kind":"create_question","title_terms":["5.2"]}
+{"id":"public-official-definition","category":"explicit","text":"帮我找一下 W3C 对 Annotation Body 的官方定义，别用博客转述。","expected_kind":"create_question","title_terms":["Annotation"]}
+{"id":"public-quote-example","category":"nonrequest","text":"培训里拿“去查这条国标的原文”举例而已，这里没有真实查证任务。","expected_kind":"no_action"}
