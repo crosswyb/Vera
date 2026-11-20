@@ -321,3 +321,15 @@ button:focus-visible,summary:focus-visible{outline-offset:1px}
   .capture-source-field select{min-height:36px}.section-heading{flex-wrap:wrap}.meeting-view>.inline-notice{flex-wrap:wrap}.result-bar .detail-tabs{justify-content:flex-start}
 }
 @media(max-width:480px){#transcript-input{flex-basis:100%}.meeting-view{--gutter:13px}.meeting-command-bar .meeting-primary-actions{gap:4px}.question-detail-heading h2{font-size:18px}}
+
+/* Feishu settings follow the existing provider controls. Help opens below its label. */
+.feishu-section .feishu-help-row{position:relative;display:flex;align-items:center;gap:6px;margin:18px 0 5px}
+.feishu-help-row label,.feishu-help-row strong{font-size:14px;font-weight:550;margin:0}
+.feishu-help button{display:grid;place-items:center;min-width:28px;min-height:28px;padding:0;background:none;border:0;color:var(--muted);font-size:14px}
+.feishu-help button::first-letter{font-weight:600}
+.feishu-help button:hover,.feishu-help button:focus-visible,.feishu-help button[aria-expanded=true]{background:var(--selection);color:var(--text)}
+.feishu-help [role=tooltip]{position:absolute;left:0;top:100%;z-index:4;width:min(330px,100%);padding:10px 13px;background:var(--surface);border:1px solid var(--line);box-shadow:0 5px 20px #15182218;border-radius:8px;color:var(--text);font-size:13px;line-height:1.65;white-space:normal}
+.feishu-actions,.feishu-input-action,.feishu-job-head{display:flex;align-items:center;gap:10px}
+.feishu-actions{margin-top:12px;flex-wrap:wrap}.feishu-input-action input{flex:1}.feishu-input-action button{flex:none}.feishu-caption,#feishu-account{font-size:13px;line-height:1.65;color:var(--muted)}
+.feishu-caption:empty{display:none}.feishu-caption,#feishu-feedback,#feishu-chat-choice{margin-top:8px}.feishu-section a{color:var(--text);text-decoration:underline;text-underline-offset:3px;font-size:14px}
+#feishu-recent{margin-top:20px;color:var(--muted);font-size:14px}#feishu-jobs{list-style:none;margin:8px 0;padding:0}.feishu-job{padding:10px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}.feishu-job-head{justify-content:space-between}.feishu-job-head strong{font-weight:500;color:var(--text)}.feishu-job-head span{font-size:13px}.feishu-job-error{color:var(--danger);font-size:13px}.feishu-job button{margin-left:8px}

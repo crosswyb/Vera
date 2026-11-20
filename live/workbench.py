@@ -212,7 +212,7 @@ class Workbench(MeetingArchive, MeetingStorage):
                 m.update(state="delete_failed", deletion_error=error)
                 self._save(db, m)
             else:
-                for kind in ("wb_segment", "wb_question", "wb_document"):
+                for kind in ("wb_segment", "wb_question", "wb_document", "wb_feishu_job"):
                     db.execute("DELETE FROM records WHERE kind=? AND json_extract(data,'$.meeting_id')=?", (kind, mid))
                 db.execute("DELETE FROM events WHERE meeting=?", (mid,))
                 db.execute("DELETE FROM records WHERE kind='wb_meeting' AND id=?", (mid,))
@@ -925,6 +925,8 @@ class Workbench(MeetingArchive, MeetingStorage):
             q["stage"] = "已保存" if doc["state"] == "saved" else doc["error"]
             self.store._put(db, "wb_question", q["id"], q)
             self._event(db, m, "document." + doc["state"], {"document_id": did, "question_id": q["id"]})
+            if doc["state"] == "saved" and (sync := getattr(self, "feishu_sync", None)) is not None:
+                sync.enqueue_saved(db, m, q, doc)
             self._save(db, m)
         self.publish_index(doc["meeting_id"])
         return doc

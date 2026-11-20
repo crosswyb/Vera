@@ -31,6 +31,7 @@
     clearModelKey: false, clearSearchKey: false, manageTarget: null, deletionReady: false,
     snapshotReceivedAt: 0, serverOffset: 0, transcriptHistory: null, returnNote: null,
   };
+  const feishu = window.createFeishuSettings({api, state, $, element, text, safeURL});
   const questionStates = {
     candidate: '待确认', queued: '等待研究', running: '正在研究', completed: '任务完成',
     insufficient: '研究结束·证据不足', failed: '任务失败', cancelled: '已取消',
@@ -156,7 +157,7 @@
     }
     renderLibrary();
     renderSettings();
-    if (state.route === 'settings') { loadServiceSettings(); loadStorageSettings(); }
+    if (state.route === 'settings') { loadServiceSettings(); loadStorageSettings(); feishu.open(); }
     $('main').scrollTop = 0;
   }
   async function readRoute() {
@@ -439,6 +440,7 @@
     state.request = null;
     state.token = '';
     state.home = null;
+    feishu.reset();
     state.snapshot = null;
     state.meetingId = '';
     state.transcriptHistory = state.returnNote = null;

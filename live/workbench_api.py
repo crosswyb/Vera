@@ -30,6 +30,8 @@ def register_workbench(app, store):
     root = app.config.get("WORKBENCH_ROOT") or os.getenv("ZSJH_WB_OUTPUT_ROOT") or store.path.parent / "workbench-meetings"
     wb = Workbench(store, root, caps)
     wb.provider_settings = settings
+    from live.feishu_api import register_feishu
+    register_feishu(app, wb)
     app.extensions["workbench"] = wb
     app.extensions["workbench_settings"] = settings
     probe_slot = threading.BoundedSemaphore(1)

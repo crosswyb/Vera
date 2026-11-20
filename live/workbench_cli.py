@@ -101,6 +101,8 @@ def main():
     from live.workbench_runtime import WorkbenchRuntime
     runtime = WorkbenchRuntime.configured(wb).start()
     server = make_server("127.0.0.1", args.port, app, threaded=True)
+    feishu_worker = app.extensions["feishu_worker"]
+    feishu_worker.start()
     if args.desktop:
         credentials = json.loads(credentials_path.read_text())
         owner = next(m for m in credentials["members"] if m["role"] == "owner")
@@ -117,6 +119,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        feishu_worker.close()
         runtime.close()
         server.server_close()
 

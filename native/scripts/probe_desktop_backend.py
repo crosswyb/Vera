@@ -70,6 +70,12 @@ def probe(backend):
             settings = json.loads(data)
             assert status == 200 and settings["editable"] and "api_key" not in settings["model"]
             result["settings_get"] = status
+            status, data = request("/live/v2/feishu/settings")
+            sync = json.loads(data)
+            assert status == 200 and not sync["settings"]["enabled"] and sync["jobs"] == []
+            status, data = request("/static/workbench-feishu.js", authenticated=False)
+            assert status == 200 and b'createFeishuSettings' in data
+            result["feishu"] = "new workspace starts disabled, settings API and bundled frontend available"
             draft = {"revision": settings["revision"],
                      "model": {k: v for k, v in settings["model"].items() if k != "api_key_configured"},
                      "search": {k: v for k, v in settings["search"].items() if k not in {"api_key_configured", "effective_key_configured"}}}
