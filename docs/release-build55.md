@@ -35,7 +35,29 @@
 - 隔离浏览器用合成查证数据复现 build 54 隐藏耗时，并确认修复后答案顶部显示“总用时 2 分 5 秒”、刷新保持。两个现有布局均可显示，切到尚未执行的问题会清除前一任务耗时。
 - 全量离线入口为 `.venv-live/bin/python tools/verify_meeting_workbench.py --native`，详细结果在本机忽略目录 `outputs/review-build55/`。
 
-正式安装包必须使用 Developer ID、安全时间戳、Hardened Runtime、Apple 公证及票据装订。安装包验证结果以 `release-verification.json` 和本版最终发布记录为准；流程见 [正式发布说明](../native/RELEASING.md)。不将会议数据、服务凭据、签名私钥或本机诊断日志放入提交和发布附件。
+## 正式安装包复验
+
+- 源码提交：`57c8abc1f9bae2aa789b08267b193e1e25185621`。后续发布记录提交只修改文档，不改变安装包内的源码。
+- App 公证提交：`c672cafe-b024-4947-9b13-363396bcfbf4`，结果 Accepted。
+- DMG 公证提交：`732df17a-f7dc-4604-8c21-69cfa1229561`，结果 Accepted。
+- 已使用 Developer ID、安全时间戳、Hardened Runtime，完成 App 和 DMG 票据装订；两个 Gatekeeper 检查均 accepted。
+- 对最终归档独立执行 18 项命令检查，全部通过。只读挂载 DMG 后核验签名、公证票据、音频权限及冻结后端隔离运行；ZIP 的 737 个条目通过 CRC 校验，解包后的 144 个文件及链接与 DMG 内应用逐项一致。
+- 最终 DMG、ZIP 以及已提交源码和可达 Git 历史均通过本项目隐私检查；本次临时签名钥匙串已删除。
+
+SHA-256：
+
+```text
+6b0d0d817ca264b50619e8a57ef5170074e8afa36b87649adaac72dedeacc5c1  Vera-0.1.0-build55-apple-silicon.dmg
+5d05999f613cc11499958faab21b5a0ca4bbb5a2314fdc9321fe584e637ebca4  Vera-0.1.0-build55-apple-silicon.zip
+```
+
+分发核验摘要见附件 `release-verification.json`；流程见 [正式发布说明](../native/RELEASING.md)。仅发布 DMG、ZIP、校验和及核验摘要四个附件，不将会议数据、服务凭据、签名私钥或本机诊断日志放入提交和发布附件。
+
+## 本机升级验收
+
+已从 build 54 升级至正式归档中的 build 55，并从安装后的 App 启动。应用、后端和音频组件的进程关系正常，本机服务可以鉴权访问，页面脚本与本次源码一致。
+
+升级前后核对现有会议和问题标识、转写与文档内容、已存在录音文件的字节数及 SHA-256，确认保留；服务配置与访问凭据未改变，数据库完整性检查通过。旧 App 和本机状态留有回滚备份。此前失败的导入记录保持原状，可在原会议使用“继续导入”；验收没有擅自重传真实会议音频。
 
 ## 验证边界
 
