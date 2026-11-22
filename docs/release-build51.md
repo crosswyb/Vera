@@ -10,9 +10,7 @@
 
 私有仓库：https://github.com/crosswyb/ZSJH
 
-发布页：https://github.com/crosswyb/ZSJH/releases/tag/v0.1.0-build51
-
-下载 `ZSJHWorkbench-0.1.0-build51-apple-silicon.dmg`，打开后将“真实交互”拖入 Applications。ZIP 为同一应用的备用分发格式。首次配置见 [安装与首次使用](../native/DISTRIBUTION.md)。
+旧发布页与安装包在 Vera build 52 验证交付后下架。请使用 [build 52 发布记录](release-build52.md) 中的新版安装包。以下内容仅为历史验证记录。
 
 GitHub 仓库保持 Private，下载者需要相应仓库访问权限。Developer ID 签名和 Apple 公证不要求把项目源码公开。
 
