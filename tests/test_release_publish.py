@@ -147,10 +147,11 @@ class ReleasePublishTests(unittest.TestCase):
             command = [str(argument) for argument in arguments]
             commands.append(command)
             if command[0] == "ditto":
-                info = Path(command[-1]) / "Vera.app/Contents/Info.plist"
+                info = Path(command[-1]) / "真实交互.app/Contents/Info.plist"
                 info.parent.mkdir(parents=True)
                 info.write_bytes(plistlib.dumps({
-                    "CFBundleName": "Vera",
+                    "CFBundleName": "真实交互",
+                    "CFBundleDisplayName": "真实交互",
                     "CFBundleShortVersionString": self.receipt["version"],
                     "CFBundleIdentifier": "com.zsjh.workbench",
                     "CFBundleVersion": self.receipt["build"],
@@ -165,6 +166,63 @@ class ReleasePublishTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Verification command codesign failed"):
                 publisher.verify_archived_app(self.archives[1], self.receipt)
         self.assertEqual([command[0] for command in commands], ["ditto", "codesign"])
+
+    def test_chinese_app_bundle_matches_english_release_brand(self):
+        commands = []
+
+        def fake_run(arguments):
+            command = [str(argument) for argument in arguments]
+            commands.append(command)
+            if command[0] == "ditto":
+                info = Path(command[-1]) / "真实交互.app/Contents/Info.plist"
+                info.parent.mkdir(parents=True)
+                info.write_bytes(plistlib.dumps({
+                    "CFBundleName": "真实交互",
+                    "CFBundleDisplayName": "真实交互",
+                    "CFBundleShortVersionString": self.receipt["version"],
+                    "CFBundleIdentifier": "com.zsjh.workbench",
+                    "CFBundleVersion": self.receipt["build"],
+                    "ZSJHSourceRevision": self.receipt["source_revision"],
+                }))
+            return ""
+
+        with patch.object(publisher, "run", side_effect=fake_run):
+            publisher.verify_archived_app(self.archives[1], self.receipt)
+        self.assertEqual([command[0] for command in commands], ["ditto", "codesign", "xcrun", "spctl"])
+        self.assertTrue(all(command[-1].endswith("/真实交互.app") for command in commands[1:]))
+        self.assertTrue(all(artifact.name.startswith("Vera-") for artifact in self.archives))
+
+    def test_incorrect_bundle_or_visible_name_is_rejected_before_signature_checks(self):
+        cases = [("Vera.app", "真实交互", "真实交互", None),
+                 ("真实交互.app", "Vera", "真实交互", None),
+                 ("真实交互.app", "真实交互", "Vera", None),
+                 ("真实交互.app", "真实交互", "真实交互", "Vera.app")]
+        for bundle_name, product_name, display_name, extra_bundle in cases:
+            with self.subTest(bundle=bundle_name, name=product_name, display=display_name, extra=extra_bundle):
+                commands = []
+
+                def fake_run(arguments):
+                    command = [str(argument) for argument in arguments]
+                    commands.append(command)
+                    self.assertEqual(command[0], "ditto", "Wrong names must fail before signature commands")
+                    info = Path(command[-1]) / bundle_name / "Contents/Info.plist"
+                    info.parent.mkdir(parents=True)
+                    info.write_bytes(plistlib.dumps({
+                        "CFBundleName": product_name,
+                        "CFBundleDisplayName": display_name,
+                        "CFBundleShortVersionString": self.receipt["version"],
+                        "CFBundleIdentifier": "com.zsjh.workbench",
+                        "CFBundleVersion": self.receipt["build"],
+                        "ZSJHSourceRevision": self.receipt["source_revision"],
+                    }))
+                    if extra_bundle:
+                        (Path(command[-1]) / extra_bundle).mkdir()
+                    return ""
+
+                with patch.object(publisher, "run", side_effect=fake_run):
+                    with self.assertRaises(ValueError):
+                        publisher.verify_archived_app(self.archives[1], self.receipt)
+                self.assertEqual(len(commands), 1)
 
 
 if __name__ == "__main__":

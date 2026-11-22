@@ -90,7 +90,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private var speechTestError: String?
     private var speechLeaseTask: Task<Void, Never>?
     private var fileLease: SpeechLease?
-    private var activeEpoch: String?
+    private var captureInputsStopped = false
+    private var activeEpoch: String? { didSet { captureInputsStopped = false } }
     private var activeOutbox: URL?
     private var outboxTask: Task<Void, Never>?
     private var captureFinish: String?
@@ -209,6 +210,9 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         let appMenu = NSMenu()
         let rootItem = NSMenuItem()
         let menu = NSMenu()
+        let aboutItem = menu.addItem(withTitle: "关于真实交互", action: #selector(showAbout), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "退出真实交互", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         rootItem.submenu = menu; appMenu.addItem(rootItem)
         let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
@@ -225,6 +229,10 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         audioItem.submenu = audioMenu; appMenu.addItem(audioItem); NSApp.mainMenu = appMenu
         window.center(); window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func showAbout() {
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "真实交互 · Vera"])
     }
 
     private func buildStartupView() {
@@ -1351,7 +1359,9 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                     // A returned error cannot prove registration didn't commit.
                     // Persist a no-device-opened record and acknowledge it idempotently.
                     let writer = CaptureEventOutbox.Writer(directory: outbox, manifest: manifest)
-                    writer.seal(); await writer.flush()
+                    writer.seal()
+                    do { try await writer.flush() }
+                    catch { status = "收尾记录写入失败，请检查磁盘空间和目录权限后重试。" }
                     // If the API rejected registration, there is no epoch to close.
                     // An unavailable API leaves the journal available for replay.
                     if let current = try? await meetingSnapshot(manifest.meetingID),
@@ -1415,18 +1425,25 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             Task { await fileTranscriber?.cancel() }
             return
         }
+        captureFinish = nil
         healthTask?.cancel(); captureState = "stopping"; stopItem.isEnabled = false
         status = message
+        if let directory = activeOutbox, let manifest = try? CaptureEventOutbox.Manifest.read(from: directory) {
+            processActiveOutbox(manifest, directory: directory)
+        }
         sendHelper(["command": "stop"])
         stopWatchdog?.cancel()
         stopWatchdog = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(10)) } catch { return }
             guard let self, self.activeMeeting != nil else { return }
             self.captureFinish = "failed"
-            self.status = "录音或转写收尾未确认。保留本机记录，正在重试保存。"
-            if let directory = self.activeOutbox, (try? CaptureEventOutbox.Seal.read(from: directory)) == nil {
+            self.captureState = "error"
+            self.status = "录音或转写收尾未确认。本机记录已保留；请检查磁盘空间和目录权限，再点击“重试保存”。"
+            if !self.captureInputsStopped, let directory = self.activeOutbox,
+               (try? CaptureEventOutbox.Seal.read(from: directory)) == nil {
                 self.revokeSpeech()
-                // Give the audio component a final EOF to close its sources.
+                // A source that has not acknowledged Stop still needs EOF.
+                // A stopped helper must remain alive to retry a disk failure.
                 try? self.helperInput?.close(); self.helperInput = nil
             }
             self.publishNativeState()
@@ -1520,6 +1537,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             // until the latter so its tail cannot race a new capture.
             status = "正在保存转写…"
         case "audio.status" where event["state"] as? String == "stopped":
+            captureInputsStopped = true
             healthTask?.cancel(); captureState = "stopping"
         case "asr.status", "asr.gap", "asr.error":
             if let source = event["source"] as? String {
@@ -1534,9 +1552,17 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             let code = event["code"] as? String ?? type
             let messages = ["microphone_denied": "麦克风权限未开启。请打开系统设置，允许真实交互使用麦克风后重试。",
                             "device_changed": "音频设备已切换，收听已停止。请确认系统输入设备后重新开始。",
+                            "outbox_seal_failed": "录音已停止，但收尾记录写入失败。请检查磁盘空间和会议目录权限；本机文件已保留。",
                             "capture_failed": "音源启动失败。请检查麦克风是否可用、系统输入设备及录音权限后重试。"]
             captureProblem = messages[code] ?? "收听未完成（\(code)），请检查音源和系统权限后重试。"
-            if activeMeeting != nil { stopWithStatus("收听出现问题，正在停止…") }
+            if code == "outbox_seal_failed" {
+                // The inputs have already stopped. Sending Stop here would
+                // reset the helper's bounded seal attempts after a watchdog
+                // error; only the user's explicit save retry may do that.
+                healthTask?.cancel(); stopWatchdog?.cancel()
+                captureFinish = "failed"; captureFinishMeetingId = meeting
+                captureState = "error"; status = captureProblem! + " 修复后点击“重试保存”。"
+            } else if activeMeeting != nil { stopWithStatus("收听出现问题，正在停止…") }
             else { captureState = "error"; status = captureProblem! }
             publishNativeState()
         default: break
@@ -1565,8 +1591,9 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             try await postAudio(manifest.meetingID, data)
             try FileManager.default.removeItem(at: record)
         }
-        guard let seal = try? CaptureEventOutbox.Seal.read(from: directory),
-              try CaptureEventOutbox.pending(in: directory).isEmpty else { return nil }
+        guard FileManager.default.fileExists(atPath: directory.appendingPathComponent("seal.json").path) else { return nil }
+        let seal = try CaptureEventOutbox.Seal.read(from: directory)
+        guard try CaptureEventOutbox.pending(in: directory).isEmpty else { return nil }
         let body = try JSONSerialization.data(withJSONObject: ["capture_epoch": manifest.epoch,
             "saved": seal.saved, "no_audio": seal.saved && !seal.hadAudio])
         let data = try await request("/live/v2/meetings/\(manifest.meetingID)/capture/finish", body: body, speech: true)
@@ -1588,6 +1615,11 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                         guard activeEpoch == manifest.epoch else { return }
                         stopWatchdog?.cancel(); healthTask?.cancel(); revokeSpeech()
                         captureFinish = result; captureFinishMeetingId = manifest.meetingID
+                        if result == "failed" {
+                            captureState = "error"
+                            status = "部分录音尚未确认保存。本机记录已保留；请检查磁盘和目录后，再点击“重试保存”。"
+                            return
+                        }
                         pendingInterims.removeAll(); activeOutbox = nil; activeEpoch = nil; activeMeeting = nil
                         captureState = result == "failed" ? "error" : "stopped"
                         switch result {
@@ -1601,6 +1633,9 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                     delayed = false
                 } catch {
                     if !delayed, captureState == "listening" { status = "录音继续，转写等待保存…" }
+                    if captureState == "stopping" || captureState == "error" {
+                        status = "录音已停止，收尾保存尚未确认。请检查磁盘空间、目录权限和本机服务；正在重试。"
+                    }
                     delayed = true
                 }
                 do { try await Task.sleep(for: delayed ? .seconds(1) : .milliseconds(200)) } catch { return }

@@ -9,7 +9,7 @@ fi
 /bin/zsh "$task_native_dir/scripts/build-app.sh"
 /bin/zsh "$task_native_dir/scripts/build-icon.sh"
 task_bin_dir="$(swift build --package-path "$task_native_dir" -c release --show-bin-path)"
-task_app_dir="$task_native_dir/build/Vera.app"
+task_app_dir="$task_native_dir/build/真实交互.app"
 mkdir -p "$task_app_dir/Contents/MacOS" "$task_app_dir/Contents/Resources"
 cp "$task_native_dir/DesktopInfo.plist" "$task_app_dir/Contents/Info.plist"
 task_source_revision="$(git -C "$task_native_dir/.." rev-parse HEAD 2>/dev/null || print unknown)"

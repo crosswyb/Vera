@@ -78,11 +78,14 @@ def verify_archived_app(archive, receipt):
     with tempfile.TemporaryDirectory(prefix="vera-release-", suffix=".noindex") as temporary:
         root = Path(temporary)
         run(["ditto", "-x", "-k", archive, root])
-        app = root / "Vera.app"
+        app = root / "真实交互.app"
+        if {path.name for path in root.glob("*.app")} != {app.name}:
+            raise ValueError("The archive must contain only the Chinese-named Vera app")
         with (app / "Contents/Info.plist").open("rb") as stream:
             info = plistlib.load(stream)
         if (
-            info.get("CFBundleName") != "Vera"
+            info.get("CFBundleName") != "真实交互"
+            or info.get("CFBundleDisplayName") != "真实交互"
             or info.get("CFBundleShortVersionString") != receipt["version"]
             or info.get("CFBundleIdentifier") != "com.zsjh.workbench"
             or info.get("CFBundleVersion") != receipt["build"]

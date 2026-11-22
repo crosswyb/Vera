@@ -204,7 +204,7 @@ def probe(backend):
 def main():
     native = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", type=Path, default=native / "build/Vera.app/Contents/Resources/backend/zsjh-workbench-backend")
+    parser.add_argument("--backend", type=Path, default=native / "build/真实交互.app/Contents/Resources/backend/zsjh-workbench-backend")
     parser.add_argument("--output", type=Path, default=native / "build/desktop-frozen-check.json")
     args = parser.parse_args()
     result = probe(args.backend.resolve())

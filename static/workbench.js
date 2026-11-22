@@ -59,7 +59,7 @@
     serviceSettings: null, settingsRequest: null, settingsBusy: false, settingsDirty: false,
     storageSettings: null, storageRequest: null, storageRefreshPending: false, storageError: '',
     clearModelKey: false, clearSearchKey: false, manageTarget: null, deletionReady: false,
-    snapshotReceivedAt: 0, serverOffset: 0, transcriptHistory: null, returnNote: null,
+    snapshotReceivedAt: 0, serverOffset: 0, transcriptHistory: null, transcriptNavigationSequence: 0, returnNote: null,
   };
   const meetingSearch = {timer: null, controller: null, sequence: 0, previousFocus: null};
   applyLayout();
@@ -242,6 +242,7 @@
   }));
   function setRoute(route, updateHistory = true) {
     closeMeetingSearch();
+    if (route !== state.route) state.transcriptNavigationSequence += 1;
     state.route = ['meetings', 'materials', 'meeting', 'guide', 'settings'].includes(route) ? route : 'meetings';
     $('workspace').dataset.route = state.route;
     $('workspace').dataset.mobileNav = 'closed';
@@ -316,11 +317,25 @@
     meetingSearch.sequence += 1;
     const panel = $('meeting-search-popover');
     if (panel.matches(':popover-open')) panel.hidePopover();
-    $('library-search').setAttribute('aria-expanded', 'false');
     if (restoreFocus) {
       const previous = meetingSearch.previousFocus;
-      (previous?.isConnected ? previous : $('main')).focus({preventScroll: true});
+      const usable = previous?.isConnected && previous !== document.body && previous !== document.documentElement
+        && previous !== $('library-search') && !panel.contains(previous);
+      $('library-search').blur();
+      if (usable) previous.focus({preventScroll: true});
+      if (!usable || document.activeElement !== previous) $('main').focus({preventScroll: true});
     }
+  }
+  function closeMeetingSearchOnBlur(event) {
+    if (event?.relatedTarget) {
+      if (!event.relatedTarget.closest('.global-search, #meeting-search-popover')) closeMeetingSearch();
+      return;
+    }
+    // Some focus changes have no destination. Wait for the browser to finish
+    // focusing before deciding whether it left the input/results as a whole.
+    setTimeout(() => {
+      if (!document.activeElement?.closest('.global-search, #meeting-search-popover')) closeMeetingSearch();
+    }, 0);
   }
   function positionMeetingSearch() {
     const bounds = document.querySelector('.global-search').getBoundingClientRect();
@@ -344,7 +359,10 @@
     return node;
   }
   async function locateSearchSegment(segment, mid) {
-    const current = () => state.route === 'meeting' && mid === state.meetingId;
+    const sequence = ++state.transcriptNavigationSequence;
+    const history = state.transcriptHistory;
+    const current = () => state.route === 'meeting' && mid === state.meetingId
+      && sequence === state.transcriptNavigationSequence && history === state.transcriptHistory;
     const find = () => [...$('transcript-list').children].find(row => row.dataset.segmentId === segment.segment_id);
     if (!current()) return;
     $('follow-transcript').checked = false;
@@ -416,7 +434,6 @@
     const panel = $('meeting-search-popover');
     positionMeetingSearch();
     if (!panel.matches(':popover-open')) panel.showPopover();
-    $('library-search').setAttribute('aria-expanded', 'true');
     meetingSearch.controller?.abort();
     meetingSearch.sequence += 1;
     clearTimeout(meetingSearch.timer);
@@ -661,6 +678,7 @@
   }
   function logout(showMessage = true) {
     closeMeetingSearch();
+    state.transcriptNavigationSequence += 1;
     state.request?.controller.abort();
     state.request = null;
     state.token = '';
@@ -681,6 +699,7 @@
     $('service-model-key').value = ''; $('service-search-key').value = '';
     $('meeting-select').value = '';
     state.selection += 1;
+    state.transcriptNavigationSequence += 1;
     state.artifactCache.clear();
     state.artifactRequests.clear();
     rememberToken('');
@@ -1046,7 +1065,7 @@
     $('start-listening').disabled = !canStart || state.pendingButtons.has('start-listening');
     $('stop-listening').disabled = moving || !native?.canStop || state.pendingButtons.has('stop-listening');
     text($('start-listening').querySelector('span'), needsApple ? '安装中文模型' : '开始收听');
-    text($('stop-listening'), file ? '停止导入' : '暂停收听');
+    text($('stop-listening'), file ? '停止导入' : native?.captureState === 'error' && native?.canStop ? '重试保存' : '暂停收听');
     let guidance = input.help + ' 选择后点击“开始收听”。';
     if (synthetic) guidance = '这是一场示例会议，展示转写、查证与资料保存的完整流程。';
     else if (ended) guidance = '本场会议已结束，可继续回看转写与查证资料。';
@@ -1464,6 +1483,7 @@
   async function earlierTranscripts(focusPage = true) {
     const page = transcriptPage();
     if (!page?.has_more || !Number.isSafeInteger(page.next_before) || state.transcriptHistory?.loading) return;
+    state.transcriptNavigationSequence += 1;
     const mid = state.meetingId;
     const history = state.transcriptHistory ||= {epoch: page.revision_epoch, rows: new Map(), page, loading: false};
     visibleTranscripts(state.snapshot.segments);
@@ -2092,6 +2112,7 @@
   }
   function setMeetingTab(panel, updateURL = true) {
     const grid = $('work-grid');
+    if (grid.dataset.mobilePanel !== panel && panel !== 'transcript') state.transcriptNavigationSequence += 1;
     if (grid.dataset.leftPane !== panel && ['summary','files','transcript'].includes(panel)) filePreviewRequest++;
     grid.dataset.mobilePanel = panel;
     highlightQuestionNote();
@@ -2571,7 +2592,12 @@
   $('library-search').addEventListener('pointerdown', () => {
     if (document.activeElement !== $('library-search')) meetingSearch.previousFocus = document.activeElement;
   });
-  $('library-search').addEventListener('focus', openMeetingSearch);
+  $('library-search').addEventListener('focus', event => {
+    if (event.relatedTarget && !event.relatedTarget.closest('.global-search, #meeting-search-popover')) meetingSearch.previousFocus = event.relatedTarget;
+    openMeetingSearch();
+  });
+  document.querySelector('.global-search').addEventListener('focusout', closeMeetingSearchOnBlur);
+  $('meeting-search-popover').addEventListener('focusout', closeMeetingSearchOnBlur);
   $('library-search').addEventListener('keydown', event => {
     if (event.key !== 'ArrowDown' || !$('meeting-search-popover').matches(':popover-open')) return;
     event.preventDefault();
@@ -2789,11 +2815,14 @@
   });
   $('follow-transcript').addEventListener('change', () => {
     if (!$('follow-transcript').checked) return;
+    state.transcriptNavigationSequence += 1;
     if (state.transcriptHistory) { state.transcriptHistory = null; renderTranscripts(state.snapshot?.segments || [], true); }
     const viewport = transcriptViewport(); viewport.scrollTop = viewport.scrollHeight;
   });
   $('older-transcript').addEventListener('click', () => earlierTranscripts());
   $('latest-transcript').addEventListener('click', () => {
+    state.transcriptNavigationSequence += 1;
+    $('follow-transcript').checked = true;
     state.transcriptHistory = null;
     renderTranscripts(state.snapshot?.segments || [], true);
     $('transcript-list').focus({preventScroll:true});

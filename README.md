@@ -38,7 +38,7 @@ python3 -m venv .venv-live
 /bin/zsh native/scripts/package-distribution.sh
 ```
 
-`requirements-build.lock` 记录验证构建所用的依赖版本。App 产物为 `native/build/Vera.app`，分发包使用 `Vera-版本-build构建号-apple-silicon` 命名，位于 `native/build/distribution/`；都不提交源码仓库。
+`requirements-build.lock` 记录验证构建所用的依赖版本。App 产物为 `native/build/真实交互.app`，安装后显示“真实交互”；英文品牌为 Vera，分发包使用 `Vera-版本-build构建号-apple-silicon` 命名，位于 `native/build/distribution/`；都不提交源码仓库。
 
 上述构建命令产生临时签名的开发包。面向其他用户分发时，按 [正式发布流程](native/RELEASING.md) 对提交后的源码重建、签名、公证和验证，再上传发布附件。`outputs/` 中的现场调试资料不提交。
 

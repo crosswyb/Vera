@@ -2,11 +2,23 @@
 
 import json
 from pathlib import Path
+import plistlib
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
 from tools.collect_dependency_notices import collect_notices, is_notice_file
+
+
+class DesktopBrandingTests(unittest.TestCase):
+    def test_installed_name_is_chinese_and_existing_identity_is_preserved(self):
+        native = Path(__file__).resolve().parents[1] / "native"
+        with (native / "DesktopInfo.plist").open("rb") as stream:
+            info = plistlib.load(stream)
+        self.assertEqual(info["CFBundleName"], "真实交互")
+        self.assertEqual(info["CFBundleDisplayName"], "真实交互")
+        self.assertEqual(info["CFBundleIdentifier"], "com.zsjh.workbench")
+        self.assertEqual(info["CFBundleExecutable"], "DesktopHost")
 
 
 class DependencyNoticeTests(unittest.TestCase):

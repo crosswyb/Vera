@@ -101,9 +101,9 @@ class ModelService(BaseModel):
             payload["response_format"] = {"type": "json_object"}
         thinking = "disabled" if fast else self.thinking
         effort = self.reasoning_effort
-        if fast and detection:
+        if fast and detection and effort in {"high", "xhigh", "max"}:
             effort = "medium"
-        elif fast and effort in {"medium", "high", "xhigh", "max"}:
+        elif fast and routing and effort in {"medium", "high", "xhigh", "max"}:
             effort = "low"
         if self.provider == "deepseek":
             payload["thinking"] = {"type": thinking}
@@ -281,6 +281,11 @@ class ProviderSettings:
             if update.model.official_deepseek():
                 # Official root and /v1 use the same credential across model names.
                 selected = next((p for p in self.model_profiles if p.official_deepseek()), None)
+            if (selected is None and update.model.provider == self.current.model.provider
+                    and update.model.base_url == self.current.model.base_url):
+                # A new model name at the same service can use the current account.
+                # Keep complete paths distinct: gateways can route tenants by path.
+                selected = self.current.model
             model = ModelService(**update.model.model_dump(exclude={"api_key", "clear_api_key"}),
                                  api_key=self._key(update.model, selected))
             search = SearchService(**update.search.model_dump(exclude={"api_key", "clear_api_key"}),

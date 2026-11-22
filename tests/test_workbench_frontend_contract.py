@@ -144,6 +144,32 @@ eval(source + '; globalThis.waitForCapture = stopCaptureAndWait;');
             self.assertIn(marker, self.js)
             self.assertIn(marker, swift)
 
+    def test_unconfirmed_delivery_does_not_invent_an_audio_time_range(self):
+        script = r"""
+const assert = require('node:assert/strict');
+globalThis.window = {};
+globalThis.document = {createElement: () => ({})};
+require(process.argv[1]);
+const nodes = new Map();
+const $ = id => {
+  if (!nodes.has(id)) nodes.set(id, {addEventListener(){}, replaceChildren(...items){this.items=items;}});
+  return nodes.get(id);
+};
+const speech = window.createSpeechSettings({
+  api:async()=>{}, state:{}, $, text:(node, value)=>{node.textContent=value;},
+  audioTime:value=>`time:${value}`, renderRuntime:()=>{},
+});
+speech.renderMeeting({capture_epochs:{test:{gaps:[
+  {code:'delivery_incomplete'}, {source:'microphone', start_ms:1000, end_ms:2000},
+]}}}, false);
+const [unknown, timed] = $('speech-gap-items').items;
+assert.match(unknown.textContent, /部分转写未确认/);
+assert.doesNotMatch(unknown.textContent, /time:|00:00/);
+assert.match(timed.textContent, /time:1000–time:2000/);
+assert.match($('speech-gap-count').textContent, /2 处转写需要核对/);
+"""
+        subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench-speech.js')], check=True)
+
     def test_browser_retains_server_backed_operations(self):
         calls = re.findall(r"api\([`'](/live/v2/[^`']+)[`']", self.js)
         paths = {re.sub(r'\$\{[^}]+\}', '{}', call.partition('?')[0]) for call in calls}

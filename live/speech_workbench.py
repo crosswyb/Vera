@@ -115,12 +115,22 @@ class SpeechWorkbench:
                 for recording in recordings:
                     recording['state'] = 'missing'
                 state = 'no_audio'
-            elif value.saved and not value.no_audio and {r['source'] for r in recordings} == set(epoch['sources']):
+            elif not value.no_audio and {r['source'] for r in recordings} == set(epoch['sources']):
                 confirmed = [r for r in recordings if self._recording_still_present(meeting, r)]
                 empty = [r for r in recordings if self._recording_closed_without_audio(meeting, r)]
                 if confirmed and len(confirmed) + len(empty) == len(recordings):
-                    incomplete = empty or epoch['gaps'] or any(r['state'] == 'partial' for r in confirmed)
+                    # A journal failure does not invalidate independently closed,
+                    # identity-checked recordings. Preserve the warning instead
+                    # of fencing this otherwise saved meeting forever.
+                    if not value.saved:
+                        epoch['gaps'].extend({'source': r['source'], 'start_ms': None, 'end_ms': None,
+                                              'code': 'delivery_incomplete'} for r in confirmed)
+                    incomplete = not value.saved or empty or epoch['gaps'] or any(r['state'] == 'partial' for r in confirmed)
                     state = 'with_gaps' if incomplete else 'complete'
+                elif len(empty) == len(recordings) and not epoch.get('observed_audio'):
+                    # Every selected source explicitly closed before receiving
+                    # audio. Unknown/missing files alone never establish this.
+                    state = 'no_audio'
             epoch.update(state=state, finished_at=time.time())
             self._event(db, meeting, 'capture.finish', {'capture_epoch': value.capture_epoch, 'state': state})
             self._save(db, meeting)

@@ -31,7 +31,7 @@ final class LiveCaptureRecognition {
     private var recoveryLeaseHandler: UUID?
     private var results: Task<Void, Never>?
     private var finalize: Task<Void, Never>?
-    private var retryUsed = false
+    private var retryAttempts = 0
     private var stopping = false
     private var ready = false
     private var finishDeadline: ContinuousClock.Instant?
@@ -112,10 +112,9 @@ final class LiveCaptureRecognition {
         report(error)
         invalidate()
         guard !stopping, let speech else { pause(code: error.code); return }
-        let delay = retryAfter ?? (error == .rateLimited ? 1 : 0)
-        if !retryUsed, error.retryable, delay < 5, lease?.isValid == true {
-            retryUsed = true
-            let deadline = clock.now.advanced(by: .seconds(5))
+        let delay = max(retryAfter ?? 0, min(2, 0.5 * pow(2, Double(retryAttempts))))
+        if retryAttempts < 3, error.retryable, delay <= 5, lease?.isValid == true {
+            retryAttempts += 1
             onEvent("asr.status", provider, "connecting", error.code, "录音继续，正在重连语音服务。", nil)
             let token = generation
             connecting = Task { [weak self] in
@@ -124,7 +123,7 @@ final class LiveCaptureRecognition {
                 self.connecting = nil
                 self.lease?.removeHandler(self.recoveryLeaseHandler)
                 self.recoveryLeaseHandler = nil
-                self.startCloud(speech, deadline: deadline)
+                self.startCloud(speech, deadline: self.clock.now.advanced(by: .seconds(5)))
             }
             recoveryLeaseHandler = lease?.onRevoke { [weak self] in
                 guard let self, self.generation == token else { return }
@@ -289,7 +288,10 @@ final class LiveCaptureRecognition {
             open[value.segmentID] = value
         } else {
             open.removeValue(forKey: value.segmentID)
-            if value.type == "transcript.final" { confirmedThroughMS = max(confirmedThroughMS, value.endMS) }
+            if value.type == "transcript.final", value.endMS > confirmedThroughMS {
+                confirmedThroughMS = value.endMS
+                retryAttempts = 0
+            }
         }
         onChange(value, provider)
     }

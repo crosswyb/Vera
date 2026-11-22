@@ -249,6 +249,59 @@ class SpeechSessionTest(unittest.TestCase):
         self.assertEqual(self.end().status_code, 409)
         self.assertEqual(path.read_bytes(), b'truncated')
 
+    def test_incomplete_journal_with_verified_recording_finishes_with_explicit_gap(self):
+        self.assertEqual(self.capture(provider='apple_local').status_code, 200)
+        path = self.confirm_recording('system')
+        result = self.seal(saved=False).get_json()
+        self.assertEqual(result['state'], 'with_gaps')
+        self.assertEqual([gap['code'] for gap in result['gaps']], ['delivery_incomplete'])
+        self.assertEqual(self.seal(saved=False).get_json(), result)
+        self.assertEqual(self.end().status_code, 200)
+        self.assertTrue(path.is_file())
+
+    def test_incomplete_journal_does_not_bypass_unclosed_or_changed_recording(self):
+        self.assertEqual(self.capture(provider='apple_local', sources=('system', 'microphone')).status_code, 200)
+        system = self.confirm_recording('system')
+        self.assertEqual(self.seal(saved=False).get_json()['state'], 'failed')
+        self.assertEqual(self.end().status_code, 409)
+        self.confirm_recording('microphone')
+        system.write_bytes(b'changed after close')
+        self.assertEqual(self.seal(saved=False).get_json()['state'], 'failed')
+        self.assertEqual(self.end().status_code, 409)
+        system.unlink()
+        self.assertEqual(self.seal(saved=False).get_json()['state'], 'failed')
+        self.assertEqual(self.end().status_code, 409)
+
+    def test_incomplete_journal_accepts_only_explicitly_closed_empty_tracks(self):
+        self.assertEqual(self.capture(provider='apple_local', sources=('system', 'microphone')).status_code, 200)
+        self.assertEqual(self.seal(saved=False).get_json()['state'], 'failed')
+        for source in ('system', 'microphone'):
+            self.assertEqual(self.send(self.event('audio.recording', source=source, state='missing',
+                                                 frames_received=0, audio_end_ms=0)).status_code, 200)
+        self.assertEqual(self.seal(saved=False).get_json()['state'], 'no_audio')
+        self.assertEqual(self.end().status_code, 200)
+
+    def test_outbox_replay_after_acknowledgement_loss_is_idempotent(self):
+        self.assertEqual(self.capture(provider='apple_local').status_code, 200)
+        gap = self.event('asr.gap', code='connection', audio_start_ms=0, audio_end_ms=100)
+        self.assertEqual(self.send(gap).status_code, 200)
+        self.confirm_recording('system', seq=2)
+        self.assertEqual(self.seal().get_json()['state'], 'with_gaps')
+        self.assertEqual(self.send(gap).status_code, 200)
+        self.assertEqual(len(self.snapshot()['meeting']['capture_epochs']['run-1']['gaps']), 1)
+        conflicting = {**gap, 'code': 'another-error'}
+        self.assertEqual(self.send(conflicting).status_code, 409)
+
+    def test_explicit_empty_tracks_cannot_erase_observed_audio(self):
+        self.assertEqual(self.capture(provider='apple_local').status_code, 200)
+        final = self.event('transcript.final', segment_id='heard', revision=1,
+                           audio_start_ms=0, audio_end_ms=100, text='确认听到的合成内容')
+        self.assertEqual(self.send(final).status_code, 200)
+        self.assertEqual(self.send(self.event('audio.recording', seq=2, state='missing',
+                                             frames_received=0, audio_end_ms=0)).status_code, 200)
+        self.assertEqual(self.seal(saved=False).get_json()['state'], 'failed')
+        self.assertEqual(self.end().status_code, 409)
+
     def test_failed_recording_acknowledges_error_without_allowing_end(self):
         self.assertEqual(self.capture(provider='apple_local', sources=('system', 'microphone')).status_code, 200)
         path = self.confirm_recording('system')

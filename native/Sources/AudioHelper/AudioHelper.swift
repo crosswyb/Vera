@@ -103,6 +103,7 @@ private final class Host {
     private var probe: Task<Void, Never>?
     private var currentEpoch: String?
     private var probeID: String?
+    private var sealingTask: Task<Void, Never>?
 
     init() {
         core.onEvent = { [weak self] event in
@@ -112,9 +113,10 @@ private final class Host {
             if event.type == "audio.status", event.state == "stopped" {
                 // The core may report a startup error immediately after a
                 // failed stop. Schedule the seal after this delivery turns over.
-                Task { @MainActor [journal = self.outbox, lease = self.lease] in
-                    journal?.seal()
+                self.sealingTask?.cancel()
+                self.sealingTask = Task { @MainActor [weak self, journal = self.outbox, lease = self.lease] in
                     lease?.revoke()
+                    await self?.sealOutbox(journal, epoch: event.captureEpoch)
                 }
             }
         }
@@ -187,6 +189,7 @@ private final class Host {
                     core.reportError(code: "invalid_command", detail: "start requires meeting_id."); return
                 }
                 currentEpoch = command.captureEpoch
+                sealingTask?.cancel(); sealingTask = nil
                 let sources = command.sources ?? [command.source ?? .system]
                 if let directory = command.outbox, let epoch = command.captureEpoch {
                     outbox = CaptureEventOutbox.Writer(directory: URL(fileURLWithPath: directory, isDirectory: true),
@@ -257,9 +260,25 @@ private final class Host {
         lease?.revoke()
         probe?.cancel()
         await core.stop()
-        outbox?.seal()
-        await outbox?.flush()
+        await sealingTask?.value
         await writer.flush()
+    }
+
+    private func sealOutbox(_ journal: CaptureEventOutbox.Writer?, epoch: String) async {
+        guard let journal else { return }
+        for attempt in 0..<3 {
+            guard !Task.isCancelled, currentEpoch == epoch else { return }
+            journal.seal()
+            do {
+                try await journal.flush()
+                return
+            } catch {
+                core.reportError(code: "outbox_seal_failed",
+                    detail: "录音已停止，但收尾记录无法写入。请检查磁盘空间和会议目录权限；本机文件已保留。")
+                guard attempt < 2 else { return }
+                do { try await Task.sleep(for: .milliseconds(500 * (attempt + 1))) } catch { return }
+            }
+        }
     }
 }
 

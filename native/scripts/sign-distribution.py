@@ -68,7 +68,7 @@ def notarize(artifact, label, arguments, output):
 def main():
     native = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", type=Path, default=native / "build/Vera.app")
+    parser.add_argument("--app", type=Path, default=native / "build/真实交互.app")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--identity", required=True, help="Developer ID Application identity or SHA-1")
     parser.add_argument("--keychain", type=Path)
@@ -80,8 +80,8 @@ def main():
         info = plistlib.load(stream)
     if info.get("CFBundleIdentifier") != "com.zsjh.workbench":
         parser.error("Expected the Vera desktop app bundle")
-    if info.get("CFBundleName") != "Vera":
-        parser.error("The app must use the Vera product name")
+    if info.get("CFBundleName") != "真实交互" or info.get("CFBundleDisplayName") != "真实交互":
+        parser.error("The Vera app must use the Chinese application name")
     if output.exists() and any(output.iterdir()):
         parser.error("Choose an empty output directory; releases are never overwritten")
     output.mkdir(parents=True, exist_ok=True)
@@ -113,7 +113,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="signing-", suffix=".noindex", dir=output) as temporary:
         stage = Path(temporary)
-        app = stage / "Vera.app"
+        app = stage / "真实交互.app"
         run(["ditto", source, app])
         signing = ["codesign", "--force", "--sign", arguments.identity, "--options", "runtime", "--timestamp"]
         if arguments.keychain:

@@ -76,8 +76,8 @@ struct CloudASRSmoke {
         if try !condition() { throw NSError(domain: "CloudASRSmoke", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
 
-    private static func wait(_ message: String, until condition: () -> Bool) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    private static func wait(_ message: String, seconds: Double = 2, until condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
         while !condition(), .now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         try require(condition(), message)
     }
@@ -94,12 +94,14 @@ struct CloudASRSmoke {
 
     static func main() async throws {
         try await realtimeProtocol()
+        try await sealFailureRecovery()
         try await missingTail()
         try await retryAndRevoke()
+        try await boundedReconnects()
         try await backlogPauseContinuesRecording()
         try await bothSourcesStopConcurrently()
         try await fileRequests()
-        print("Cloud ASR fixtures passed: protocol and revisions, missing tail, isolated failure, retry and revocation, two recordings, file formats and chunk continuity.")
+        print("Cloud ASR fixtures passed: protocol and revisions, missing tail, durable seal retry, bounded reconnects and cancellation, two recordings, file formats and chunk continuity.")
     }
 
     private static func realtimeProtocol() async throws {
@@ -222,6 +224,104 @@ struct CloudASRSmoke {
         try require(caf.length == 9600, "CAFs must contain pre- and post-revocation frames")
     }
 
+    private static func boundedReconnects() async throws {
+        let directory = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var sockets: [FixtureSocket] = []
+        var states: [String] = []
+        var confirmed = 0
+        let lease = SpeechLease(seconds: 30)
+        let recognition = LiveCaptureRecognition(
+            config: .init(meetingID: "reconnects", recordingDirectory: directory, captureEpoch: "reconnects"),
+            speech: try liveConfig(), lease: lease,
+            makeSocket: { _ in let socket = FixtureSocket(); sockets.append(socket); return socket },
+            onEvent: { _, _, state, _, _, _ in if let state { states.append(state) } },
+            onChange: { change, _ in if change.type == "transcript.final" { confirmed += 1 } })
+        recognition.start()
+        recognition.receive(fixtureBuffer(), voiced: true)
+        for attempt in 0...3 {
+            try await wait("transient failure reconnect \(attempt)", seconds: 3) {
+                sockets.count == attempt + 1 && sockets[attempt].taskID != nil
+            }
+            try sockets[attempt].server("task-started")
+            try await wait("reconnect accepted PCM") { sockets[attempt].frames > 0 }
+            if attempt == 2 {
+                // Useful confirmed text resets the consecutive-failure budget.
+                try sockets[attempt].sentence("恢复后已确认", start: 0, end: 100, final: true, id: 1)
+                try await wait("useful result resets the retry budget") { confirmed == 1 }
+                recognition.receive(fixtureBuffer(), voiced: true)
+            }
+            sockets[attempt].close()
+        }
+        // Two more retries are available after the confirmed result above.
+        for attempt in 4...5 {
+            try await wait("retry budget after useful result \(attempt)", seconds: 3) {
+                sockets.count == attempt + 1 && sockets[attempt].taskID != nil
+            }
+            try sockets[attempt].server("task-started")
+            try await wait("retry accepted remaining PCM") { sockets[attempt].frames > 0 }
+            sockets[attempt].close()
+        }
+        try await wait("consecutive retries are bounded") { states.last == "paused" }
+        await recognition.finish(graceful: false, deadline: .now.advanced(by: .seconds(1)))
+        try require(sockets.count == 6, "transient failures exhausted too early or retried without a bound")
+
+        var stoppedSockets: [FixtureSocket] = []
+        var stoppedConnecting = 0
+        let stopped = LiveCaptureRecognition(
+            config: .init(meetingID: "stopped", recordingDirectory: directory, captureEpoch: "stopped"),
+            speech: try liveConfig(), lease: SpeechLease(seconds: 10),
+            makeSocket: { _ in let socket = FixtureSocket(); stoppedSockets.append(socket); return socket },
+            onEvent: { _, _, state, _, _, _ in if state == "connecting" { stoppedConnecting += 1 } }, onChange: { _, _ in })
+        stopped.start()
+        try await wait("connection before stop") { stoppedSockets.first?.taskID != nil }
+        stoppedSockets[0].close()
+        try await wait("reconnect is scheduled before stop") { stoppedConnecting == 2 }
+        await stopped.finish(graceful: false, deadline: .now.advanced(by: .seconds(1)))
+        try await Task.sleep(for: .milliseconds(650))
+        try require(stoppedSockets.count == 1, "stop did not cancel a scheduled reconnect")
+
+        var revokedSockets: [FixtureSocket] = []
+        var reconnects = 0
+        let revokedLease = SpeechLease(seconds: 10)
+        let revoked = LiveCaptureRecognition(
+            config: .init(meetingID: "revoked", recordingDirectory: directory, captureEpoch: "revoked"),
+            speech: try liveConfig(), lease: revokedLease,
+            makeSocket: { _ in let socket = FixtureSocket(); revokedSockets.append(socket); return socket },
+            onEvent: { _, _, state, _, _, _ in if state == "connecting" { reconnects += 1 } }, onChange: { _, _ in })
+        revoked.start()
+        try await wait("connection before lease revocation") { revokedSockets.first?.taskID != nil }
+        revokedSockets[0].close()
+        try await wait("reconnect is scheduled before lease revocation") { reconnects == 2 }
+        revokedLease.revoke()
+        try await Task.sleep(for: .milliseconds(650))
+        try require(revokedSockets.count == 1, "revocation did not cancel a scheduled reconnect")
+        await revoked.finish(graceful: false, deadline: .now.advanced(by: .seconds(1)))
+    }
+
+    private static func sealFailureRecovery() async throws {
+        let directory = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifest = CaptureEventOutbox.Manifest(meetingID: "seal", epoch: "seal", sources: [.system])
+        try manifest.write(to: directory)
+        let journal = CaptureEventOutbox.Writer(directory: directory, manifest: manifest, eventLimit: 0)
+        var event = AudioEvent(meetingID: "seal", captureEpoch: "seal", streamID: "system", seq: 1,
+                               type: "transcript.final", source: .system)
+        event.audioStartMS = 0; event.audioEndMS = 100; event.segmentID = "s1"; event.revision = 1; event.text = "合成"
+        journal.submit(event)
+        let seal = directory.appendingPathComponent("seal.json")
+        try FileManager.default.createDirectory(at: seal, withIntermediateDirectories: false)
+        journal.seal()
+        var failed = false
+        do { try await journal.flush() } catch { failed = true }
+        try require(failed, "seal write failure must propagate to the helper")
+        try FileManager.default.removeItem(at: seal)
+        journal.seal()
+        try await journal.flush()
+        try require(try CaptureEventOutbox.Seal.read(from: directory).saved, "seal retry did not recover")
+        try require(try CaptureEventOutbox.pending(in: directory).count == 1, "seal retry duplicated gap events")
+    }
+
     private static func backlogPauseContinuesRecording() async throws {
         let directory = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -251,7 +351,7 @@ struct CloudASRSmoke {
         try await wait("both recognizers received PCM before backlog") { sockets.allSatisfy { $0.frames == 1600 } }
         try sockets[1].sentence("积压前的临时结果", start: 0, end: nil, final: false, id: 1)
         try await wait("interim before backlog") { events.contains { $0.type == "transcript.interim" } }
-        await journal.flush()
+        try await journal.flush()
         // Leave prior events unacknowledged so the real writer is over its
         // final-text quota when this result arrives.
         try sockets[0].sentence("无法递交的最终结果", start: 0, end: 100, final: true, id: 1)
@@ -262,7 +362,7 @@ struct CloudASRSmoke {
         for _ in 0..<4 { system.play(buffer); microphone.play(buffer) }
         await core.stop()
         journal.seal()
-        await journal.flush()
+        try await journal.flush()
         try require(sockets.allSatisfy { $0.frames == 1600 }, "delivery pause sent more audio")
         try require(events.contains { $0.type == "transcript.retracted" && $0.source == .microphone }, "delivery pause left an interim active")
         let seal = try CaptureEventOutbox.Seal.read(from: outbox)

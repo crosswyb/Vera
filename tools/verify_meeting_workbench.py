@@ -41,7 +41,8 @@ def main():
                 ("tracked_diff_whitespace", ["git", "diff", "--check"])]
     if args.native:
         commands.extend([("native_framework_free_smoke", ["/bin/zsh", "native/scripts/smoke.sh"]),
-                         ("native_cloud_asr_stub", ["/bin/zsh", "native/scripts/test-cloud-asr.sh"])])
+                         ("native_cloud_asr_stub", ["/bin/zsh", "native/scripts/test-cloud-asr.sh"]),
+                         ("native_capture_finish_recovery", ["/bin/zsh", "native/scripts/test-capture-finish.sh"])])
     for name, command in commands:
         try:
             value = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=60)

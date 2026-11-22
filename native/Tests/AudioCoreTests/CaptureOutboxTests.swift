@@ -3,6 +3,31 @@ import XCTest
 @testable import AudioCore
 
 final class CaptureOutboxTests: XCTestCase {
+    func testSealWriteFailureIsReportedAndCanRetryWithoutDuplicatingGaps() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifest = CaptureEventOutbox.Manifest(meetingID: "meeting", epoch: "epoch", sources: [.system])
+        try manifest.write(to: directory)
+        let writer = CaptureEventOutbox.Writer(directory: directory, manifest: manifest, eventLimit: 0)
+        var final = AudioEvent(meetingID: "meeting", captureEpoch: "epoch", streamID: "system", seq: 1,
+                               type: "transcript.final", source: .system)
+        final.audioStartMS = 0; final.audioEndMS = 100; final.segmentID = "s1"; final.revision = 1; final.text = "合成"
+        writer.submit(final)
+        let sealURL = directory.appendingPathComponent("seal.json")
+        try FileManager.default.createDirectory(at: sealURL, withIntermediateDirectories: false)
+        writer.seal()
+        do {
+            try await writer.flush()
+            XCTFail("Failed seal write was reported as successful")
+        } catch { }
+        XCTAssertEqual(try CaptureEventOutbox.pending(in: directory).count, 1)
+        try FileManager.default.removeItem(at: sealURL)
+        writer.seal()
+        try await writer.flush()
+        XCTAssertTrue(try CaptureEventOutbox.Seal.read(from: directory).saved)
+        XCTAssertEqual(try CaptureEventOutbox.pending(in: directory).count, 1)
+    }
+
     func testBlockedDeliveryKeepsBothRecordingsAndSealsExplicitGaps() async throws {
         let parent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: parent) }
@@ -36,7 +61,7 @@ final class CaptureOutboxTests: XCTestCase {
             writer.submit(saved)
         }
         writer.seal()
-        await writer.flush()
+        try await writer.flush()
         let records = try CaptureEventOutbox.pending(in: outbox)
         let events = try records.map { try JSONDecoder().decode(AudioEvent.self, from: Data(contentsOf: $0)) }
         XCTAssertEqual(events.filter { $0.type == "transcript.final" }.count, 2)

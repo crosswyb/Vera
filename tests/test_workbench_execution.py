@@ -100,6 +100,24 @@ class ExecutionTest(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["json"]["reasoning_effort"], "max")
         self.assertEqual(post.call_args.kwargs["json"]["max_completion_tokens"], 65536)
 
+    def test_fast_profile_never_increases_explicit_lower_reasoning_effort(self):
+        cases = (("default", "default", "default"), ("none", "none", "none"),
+                 ("minimal", "minimal", "minimal"), ("low", "low", "low"),
+                 ("medium", "medium", "low"), ("high", "medium", "low"),
+                 ("xhigh", "medium", "low"), ("max", "medium", "low"))
+        for effort, detection_effort, routing_effort in cases:
+            config = ModelService(provider="openai_compatible", reasoning_effort=effort)
+            for kind, expected in (("detection", detection_effort), ("routing", routing_effort)):
+                with self.subTest(effort=effort, kind=kind):
+                    payload = config.payload("synthetic", {}, **{kind: True})
+                    if expected == "default":
+                        self.assertNotIn("reasoning_effort", payload)
+                    else:
+                        self.assertEqual(payload["reasoning_effort"], expected)
+            self.assertEqual(config.reasoning_effort, effort)
+            if effort != "default":
+                self.assertEqual(config.payload("synthetic", {})["reasoning_effort"], effort)
+
     def test_fast_native_deepseek_disables_thinking_but_generic_default_omits_vendor_fields(self):
         deepseek = ModelService(thinking="enabled", reasoning_effort="max", max_tokens=65536)
         payload = deepseek.payload("synthetic", {}, detection=True)
@@ -107,7 +125,7 @@ class ExecutionTest(unittest.TestCase):
         self.assertNotIn("reasoning_effort", payload)
         generic = ModelService(provider="openai_compatible").payload("synthetic", {}, detection=True)
         self.assertNotIn("thinking", generic)
-        self.assertEqual(generic["reasoning_effort"], "medium")
+        self.assertNotIn("reasoning_effort", generic)
 
     def test_old_settings_load_without_migration_and_fast_mode_is_public(self):
         saved = self.model().config.model_dump()

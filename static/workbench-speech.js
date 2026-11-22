@@ -468,13 +468,16 @@ window.createSpeechSettings = function ({api, state, $, text, nativeAvailable, p
     const importedGaps = job ? meeting?.transcription?.file?.gaps || [] : [];
     const gaps = [...captureGaps, ...importedGaps];
     $('speech-gaps').hidden = gaps.length === 0;
-    text($('speech-gap-count'), gaps.length ? `${gaps.length} 段转写缺失 · 查看录音时间` : '');
+    text($('speech-gap-count'), gaps.length ? `${gaps.length} 处转写需要核对 · 查看详情` : '');
     const signature = JSON.stringify(gaps);
     if (signature !== gapSignature) {
       gapSignature = signature;
       $('speech-gap-items').replaceChildren(...gaps.map(gap => {
         const item = document.createElement('li');
-        text(item, `${sourceLabels[gap.source] || '音频'} ${audioTime(gap.start_ms)}–${audioTime(gap.end_ms)}`);
+        const hasRange = Number.isFinite(gap.start_ms) && Number.isFinite(gap.end_ms);
+        const detail = gap.code === 'delivery_incomplete' ? '部分转写未确认，请结合原录音核对'
+          : hasRange ? `${audioTime(gap.start_ms)}–${audioTime(gap.end_ms)}` : '转写时间未确认，请结合原录音核对';
+        text(item, `${sourceLabels[gap.source] || '音频'} ${detail}`);
         return item;
       }));
     }

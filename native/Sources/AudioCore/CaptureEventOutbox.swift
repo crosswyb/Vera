@@ -60,6 +60,10 @@ public enum CaptureEventOutbox {
         private var saved = true
         private var hadAudio = false
         private var sealing = false
+        // Accessed only on the disk queue. A failed atomic publication can be
+        // retried without recording the coalesced gaps a second time.
+        private var sealedValue: Seal?
+        private var sealError: Error?
 
         public init(directory: URL, manifest: Manifest, eventLimit: Int = 768, queueLimit: Int = 128,
                     onBacklog: @escaping @Sendable () -> Void = {}) {
@@ -114,31 +118,43 @@ public enum CaptureEventOutbox {
         /// of the seal follows every queued event and any collapsed loss range.
         public func seal() {
             lock.lock()
-            guard !sealing else { lock.unlock(); return }
+            let firstSeal = !sealing
             sealing = true
             queue.async { [self] in
-                lock.lock()
-                let losses = dropped
-                var complete = saved
-                let recordedAudio = hadAudio
-                lock.unlock()
-                for (source, range) in losses {
-                    var gap = AudioEvent(meetingID: manifest.meetingID, captureEpoch: manifest.epoch,
-                                         streamID: "outbox-\(source.rawValue)-\(manifest.epoch)",
-                                         seq: 1, type: "asr.gap", source: source)
-                    gap.code = "delivery_backlog"
-                    gap.audioStartMS = range.lowerBound
-                    gap.audioEndMS = range.upperBound
-                    do { try record(gap) } catch { complete = false }
+                if firstSeal {
+                    lock.lock()
+                    let losses = dropped
+                    var complete = saved
+                    let recordedAudio = hadAudio
+                    lock.unlock()
+                    for (source, range) in losses {
+                        var gap = AudioEvent(meetingID: manifest.meetingID, captureEpoch: manifest.epoch,
+                                             streamID: "outbox-\(source.rawValue)-\(manifest.epoch)",
+                                             seq: 1, type: "asr.gap", source: source)
+                        gap.code = "delivery_backlog"
+                        gap.audioStartMS = range.lowerBound
+                        gap.audioEndMS = range.upperBound
+                        do { try record(gap) } catch { complete = false }
+                    }
+                    sealedValue = Seal(saved: complete, hadAudio: recordedAudio)
                 }
-                let seal = Seal(saved: complete, hadAudio: recordedAudio)
-                try? JSONEncoder().encode(seal).write(to: directory.appendingPathComponent("seal.json"), options: .atomic)
+                do {
+                    try JSONEncoder().encode(sealedValue).write(to: directory.appendingPathComponent("seal.json"), options: .atomic)
+                    sealError = nil
+                } catch {
+                    sealError = error
+                }
             }
             lock.unlock()
         }
 
-        public func flush() async {
-            await withCheckedContinuation { continuation in queue.async { continuation.resume() } }
+        public func flush() async throws {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                queue.async { [self] in
+                    if let sealError { continuation.resume(throwing: sealError) }
+                    else { continuation.resume() }
+                }
+            }
         }
 
         /// Called under lock. Coalesce loss intervals by source so a slow or

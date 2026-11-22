@@ -2,7 +2,7 @@
 
 正式分发使用 Developer ID Application 证书、Hardened Runtime、安全时间戳，以及 Apple 公证与票据装订。DMG/ZIP 分发不使用 Developer ID Installer 证书。本项目安装包、密钥、证书凭据、会议数据库和现场调试产物不放进 Git；安装包作为私有 GitHub 仓库的 Release 附件发布。
 
-产品英文名为 **Vera（薇拉）**，取意于 *veritas*（真实）。App 构建目录为 `native/build/Vera.app`，安装包统一使用 `Vera-版本-build构建号-apple-silicon` 前缀。应用界面保留“真实交互”；旧 bundle identifier 和本机资料目录用于兼容已有用户。
+产品英文名为 **Vera（薇拉）**，取意于 *veritas*（真实）。App 构建目录和归档内的应用均为 `真实交互.app`，安装后的应用名为“真实交互”；安装包统一使用 `Vera-版本-build构建号-apple-silicon` 前缀，磁盘卷名为 Vera。签名与发布入口检查中文应用名，防止包名再次分歧；旧 bundle identifier 和本机资料目录用于兼容已有用户。
 
 ## 发布前
 
@@ -18,8 +18,8 @@
 /bin/zsh tools/build_workbench_backend.sh
 /bin/zsh native/scripts/build-desktop.sh
 python3 native/scripts/sign-distribution.py \
-  --app native/build/Vera.app \
-  --output-dir native/build/releases/build53 \
+  --app native/build/真实交互.app \
+  --output-dir native/build/releases/build54 \
   --identity '<Developer ID Application 身份或 SHA-1>' \
   --keychain '<签名钥匙串绝对路径>' \
   --notary-profile '<已验证的 notarytool profile>'
@@ -44,9 +44,9 @@ App ZIP 公证成功后装订 App，再制作含已装订 App 的 DMG/ZIP。DMG 
 
 ```sh
 .venv-live/bin/python native/scripts/publish-release.py \
-  --release-dir native/build/releases/build53 \
+  --release-dir native/build/releases/build54 \
   --repo '<owner/repository>' \
-  --notes-file docs/release-build53.md
+  --notes-file docs/release-build54.md
 ```
 
 源码检查也由 GitHub Actions 执行；新的个人邮箱提交或本机路径进入历史时会报错。已经发布的历史信息需要改写历史并撤下旧包，新增一个清理提交不足以完成清除。

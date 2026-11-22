@@ -3,12 +3,12 @@
 <plist version="1.0"><dict>
   <key>CFBundleExecutable</key><string>DesktopHost</string>
   <key>CFBundleIdentifier</key><string>com.zsjh.workbench</string>
-  <key>CFBundleName</key><string>Vera</string>
+  <key>CFBundleName</key><string>真实交互</string>
   <key>CFBundleDisplayName</key><string>真实交互</string>
   <key>CFBundleIconFile</key><string>AppIcon.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>53</string>
+  <key>CFBundleVersion</key><string>54</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAudioCaptureUsageDescription</key><string>您开始收听后，真实交互在本机保存会议录音并实时转写。</string>

@@ -170,6 +170,33 @@ class ProviderSettingsTest(unittest.TestCase):
         self.assertEqual(self.save(draft).status_code, 400)
         self.assertFalse(self.path.exists())
 
+    def test_compatible_model_rename_preserves_key_for_same_service(self):
+        draft = self.draft()
+        draft["model"].update(provider="openai_compatible", base_url="https://gateway.example/tenant-a/v1",
+                              name="model-a", api_key="compatible-fixture-secret")
+        draft["search"]["use_model_key"] = False
+        self.assertEqual(self.save(draft).status_code, 200)
+
+        draft = self.draft()
+        draft["model"]["name"] = "model-b"
+        with patch("requests.Session.post", return_value=completion({"ok": True})) as post:
+            probe = self.client.post("/live/v2/settings/test/model", json=draft, headers=self.headers)
+        self.assertEqual(probe.status_code, 200, probe.get_json())
+        self.assertTrue(probe.get_json()["ok"])
+        self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer compatible-fixture-secret")
+        self.assertEqual(self.save(draft).status_code, 200)
+        self.assertEqual(ProviderSettings(self.path).current.model.api_key, "compatible-fixture-secret")
+
+        for different in ({"base_url": "https://gateway.example/tenant-b/v1"},
+                          {"base_url": "https://other.example/tenant-a/v1"}, {"provider": "deepseek"}):
+            with self.subTest(different=different):
+                changed = self.draft()
+                changed["model"].update(name="model-c", **different)
+                self.assertFalse(self.settings.preview(SettingsUpdate.model_validate(changed)).model.api_key)
+        draft = self.draft()
+        draft["model"].update(name="model-c", clear_api_key=True)
+        self.assertFalse(self.settings.preview(SettingsUpdate.model_validate(draft)).model.api_key)
+
     def test_saved_compatible_models_restore_private_options_and_probe_keys(self):
         url = "https://gateway.example/tenant-a/v1"
         for name in ("A", "B"):
@@ -193,8 +220,9 @@ class ProviderSettingsTest(unittest.TestCase):
         self.assertEqual(reopened.current.model.name, "B")
         candidate = reopened.preview(SettingsUpdate.model_validate(draft))
         self.assertEqual(candidate.model.api_key, "fixture-key-A")
-        for different in ({"base_url": "https://gateway.example/tenant-b/v1"}, {"name": "C"},
-                          {"provider": "deepseek"}):
+        renamed = {**draft, "model": {**draft["model"], "name": "C"}}
+        self.assertEqual(reopened.preview(SettingsUpdate.model_validate(renamed)).model.api_key, "fixture-key-B")
+        for different in ({"base_url": "https://gateway.example/tenant-b/v1"}, {"provider": "deepseek"}):
             with self.subTest(different=different):
                 changed = {**draft, "model": {**draft["model"], **different}}
                 self.assertFalse(reopened.preview(SettingsUpdate.model_validate(changed)).model.api_key)
