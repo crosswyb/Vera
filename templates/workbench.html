@@ -110,6 +110,7 @@
           <button type="button" data-layout="b" aria-pressed="false" aria-label="全景布局" title="全景：多栏并行，同屏查看转写、问题与回答"><svg aria-hidden="true"><use href="#i-columns"/></svg><span class="layout-name">全景</span></button>
         </div>
         <span id="layout-status" class="visually-hidden" role="status" aria-live="polite"></span>
+        <button id="update-available" type="button" class="text-button update-prompt" data-pref-go="general" hidden></button>
         <button data-route="guide" class="icon-button" aria-label="使用帮助"><svg><use href="#i-help"/></svg></button>
       </header>
       <main id="main" tabindex="-1">
@@ -134,7 +135,12 @@
           </div>
           <div id="import-progress" class="import-progress" hidden><div><span id="import-file-name"></span><span id="import-progress-label" role="status"></span></div><progress id="import-progress-bar" max="100" value="0" aria-label="音频转写进度"></progress><div class="import-tools"><button id="continue-import" hidden>继续导入</button><button id="restart-import" hidden>重新选择音频</button><button id="download-transcript">导出完整转写 .md</button></div></div>
           <div id="speech-meeting-status" class="inline-notice" hidden><span id="speech-meeting-state" role="status"></span><button id="revoke-speech" type="button" class="text-button" hidden>撤回音频上传授权</button></div>
-          <details id="speech-gaps" class="inline-notice" hidden><summary id="speech-gap-count"></summary><ul id="speech-gap-items" class="speech-gap-items"></ul></details>
+          <details id="speech-gaps" class="inline-notice" hidden>
+            <summary id="speech-gap-count"></summary>
+            <ul id="speech-gap-items" class="speech-gap-items"></ul>
+            <div class="speech-gap-actions"><button type="button" class="text-button" data-pref-go="audio">检查语音设置</button><button id="speech-gap-add-text" type="button" class="text-button" hidden>补充文字</button></div>
+            <p class="speech-gap-help">可打开已保存的原录音，按上述时段回听。会议进行中可手动补充文字，或会后导入录音重新转写。修复语音设置后，可暂停再重新收听。</p>
+          </details>
           <div id="research-warning" class="inline-notice" hidden><span id="research-warning-text"></span><div><button id="authorize-research" class="text-button" hidden>启用本场查证</button><button data-route="settings" class="text-button">前往设置 <svg><use href="#i-arrow"/></svg></button></div></div>
           <div id="coordinator-warning" class="inline-notice" role="status" hidden><span id="coordinator-warning-text"></span><button id="retry-coordinator" class="text-button">重试问题识别</button></div>
           <details id="detection-recovery" class="inline-notice" hidden><summary id="detection-recovery-summary"></summary><div id="detection-recovery-items"></div></details>
@@ -299,6 +305,13 @@
 
           </div>
           <div role="tabpanel" id="prefs-pane-general" aria-labelledby="prefs-tab-general" tabindex="0" hidden>
+          <section class="settings-section update-settings" aria-labelledby="update-settings-title">
+            <h2 id="update-settings-title">软件更新</h2>
+            <div class="setting-row"><div><h3 id="update-current-version">真实交互 · Vera</h3><p id="update-status" role="status" aria-live="polite">正在读取版本信息…</p></div><div class="update-actions"><button id="check-updates" type="button" disabled>检查更新</button><button id="open-update-release" type="button" hidden>打开发布页</button></div></div>
+            <p id="update-last-checked" class="setting-note"></p>
+            <p class="setting-note">启动后自动检查，运行期间每 6 小时检查一次。发现新版时会在顶部提示。请在会议和查证完成后下载并替换应用。</p>
+            <details id="update-release-notes" hidden><summary>新版发布说明</summary><pre id="update-notes"></pre></details>
+          </section>
           <section class="settings-section appearance-settings" aria-labelledby="appearance-title"><h2 id="appearance-title">外观</h2><div class="setting-row"><label for="theme-preference">主题</label><select id="theme-preference" aria-describedby="theme-help"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div><p id="theme-help" class="setting-note">立即生效，自动保存。</p><div class="setting-row"><label for="layout-preference">界面布局</label><select id="layout-preference" aria-describedby="layout-help"><option value="a">静阅</option><option value="b">全景</option></select></div><p id="layout-help" class="setting-note">静阅以舒展双栏呈现内容；全景在宽窗口同屏展示转写、问题与回答。也可从右上角随时切换，选择自动保存。</p></section>
           <section class="settings-section" aria-labelledby="storage-settings-title"><h2 id="storage-settings-title">保存与回看</h2><div class="setting-row storage-location"><div><h3>会议文件保存位置</h3><p id="settings-output-root" class="storage-path">正在读取保存位置…</p></div><div class="storage-actions"><button id="settings-open-folder" type="button" disabled>打开文件夹</button><button id="settings-choose-folder" type="button" aria-describedby="settings-output-help" disabled>选择文件夹</button></div></div><p id="settings-output-help" class="setting-note">修改后仅新建会议使用此位置，已有会议资料不移动。</p><p id="storage-settings-result" class="provider-result" role="status" aria-live="polite"></p><p id="settings-retention" class="setting-note"></p></section>
             <section class="settings-section provider-section" aria-labelledby="archive-settings-title">

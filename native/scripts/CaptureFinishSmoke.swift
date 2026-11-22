@@ -89,6 +89,21 @@ extension DesktopController {
                 try? FileManager.default.removeItem(at: directory)
             }
         }
+        let speech = completed.0
+        func speechEvent(_ type: String, _ fields: [String: String]) throws {
+            var event = fields
+            event["type"] = type; event["source"] = "system"
+            event["meeting_id"] = "meeting"; event["capture_epoch"] = "epoch-1"
+            speech.audioLine(try JSONSerialization.data(withJSONObject: event))
+        }
+        try speechEvent("asr.error", ["provider": "apple_local", "code": "speech_model_unavailable", "detail": "合成模型不可用"])
+        try require(speech.transcription["system"]?["state"] == "error" &&
+                    speech.transcription["system"]?["detail"] == "合成模型不可用", "native state discarded the ASR failure")
+        try speechEvent("asr.gap", ["code": "speech_model_unavailable"])
+        try require(speech.transcription["system"]?["state"] == "error", "gap erased the recognizer state")
+        try speechEvent("asr.status", ["provider": "apple_local", "state": "running"])
+        try require(speech.transcription["system"]?["code"] == nil && speech.transcription["system"]?["detail"] == nil,
+                    "recovery retained a stale failure")
         completed.0.stopWithStatus("fixture stop")
         try stopped(completed.0, epoch: "epoch-1")
         unfinished.0.stopWithStatus("fixture stop")

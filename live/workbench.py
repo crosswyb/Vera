@@ -299,7 +299,8 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                                             "needs_review": sum(t['state'] == 'needs_review' for t in recovery),
                                             "complete": processed == len(final_segments) and not recovery,
                                             "held_questions": sum(self._automation_held(m, q) for q in questions)},
-                    "activity": activity, "counts": counts, "capabilities": self.capabilities,
+                    "activity": activity, "speech_gaps": self._speech_gaps(db, m),
+                    "counts": counts, "capabilities": self.capabilities,
                     "output_directory": str(Path(m["output_root"]) / m["directory"]) if m["directory"] else "已按期限清理"}
 
     def _snapshot_failure_diagnostics(self, db, mid, questions):

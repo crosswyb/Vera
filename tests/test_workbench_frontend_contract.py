@@ -148,7 +148,7 @@ eval(source + '; globalThis.waitForCapture = stopCaptureAndWait;');
         script = r"""
 const assert = require('node:assert/strict');
 globalThis.window = {};
-globalThis.document = {createElement: () => ({})};
+globalThis.document = {createElement: () => ({children:[], append(...items){this.children.push(...items);}, addEventListener(){}})};
 require(process.argv[1]);
 const nodes = new Map();
 const $ = id => {
@@ -163,10 +163,62 @@ speech.renderMeeting({capture_epochs:{test:{gaps:[
   {code:'delivery_incomplete'}, {source:'microphone', start_ms:1000, end_ms:2000},
 ]}}}, false);
 const [unknown, timed] = $('speech-gap-items').items;
-assert.match(unknown.textContent, /部分转写未确认/);
-assert.doesNotMatch(unknown.textContent, /time:|00:00/);
-assert.match(timed.textContent, /time:1000–time:2000/);
-assert.match($('speech-gap-count').textContent, /2 处转写需要核对/);
+const allText = node => [node.textContent || '', ...(node.children || []).map(allText)].join(' ');
+assert.match(allText(unknown), /部分转写未确认/);
+assert.doesNotMatch(allText(unknown), /time:|00:00/);
+assert.match(allText(timed), /time:1000–time:2000/);
+assert.match($('speech-gap-count').textContent, /2 处转写缺失或中断/);
+assert.doesNotMatch($('speech-gap-count').textContent, /核对|校对|错词/);
+"""
+        subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench-speech.js')], check=True)
+
+    def test_speech_gap_shows_cause_chain_and_opens_the_matching_recording(self):
+        script = r"""
+const assert = require('node:assert/strict');
+globalThis.window = {};
+function node() {
+  return {children:[], listeners:{}, append(...items){this.children.push(...items);},
+    addEventListener(kind, fn){this.listeners[kind]=fn;}, replaceChildren(...items){this.children=items;}};
+}
+globalThis.document = {createElement: node};
+require(process.argv[1]);
+const nodes = new Map(), $ = id => {
+  if (!nodes.has(id)) nodes.set(id, node());
+  return nodes.get(id);
+};
+const gap = {capture_epoch:'broken', source:'system', start_ms:1000, end_ms:2000,
+  code:'speech_model_unavailable', provider:'apple_local', causes:[
+    {provider:'dashscope', code:'speech_input_overflow', detail:'待转写的音频积压，已停止当前识别。'},
+    {provider:'apple_local', code:'speech_model_unavailable', detail:'Apple 中文识别无法启动。'},
+  ]};
+const meeting = {id:'meeting', state:'active', capture_epochs:{broken:{gaps:[gap]}}, recordings:[
+  {id:'older', epoch:'old', source:'system', state:'saved'},
+  {id:'correct', epoch:'broken', source:'system', state:'saved'},
+]};
+const state = {home:{member:{role:'owner'}}, snapshot:{meeting, speech_gaps:[gap]}};
+const messages = [];
+const speech = window.createSpeechSettings({api:async()=>{}, state, $, nativeAvailable:()=>true,
+  postNative:message=>messages.push(message), text:(node, value)=>{node.textContent=value;},
+  audioTime:value=>`time:${value}`, renderRuntime:()=>{},
+});
+speech.renderMeeting(meeting, false);
+const allText = n => [n.textContent || '', ...n.children.map(allText)].join(' ');
+const item = $('speech-gap-items').children[0];
+assert.match(allText(item), /time:1000–time:2000/);
+assert.match(allText(item), /阿里云百炼.*音频积压.*Apple 中文识别.*无法启动/s);
+assert.match(allText(item), /speech_model_unavailable/);
+assert.doesNotMatch(allText(item), /识别文字需要校对|识别错了/);
+const play = item.children.find(child=>child.textContent === '打开原录音');
+assert.ok(play && !play.disabled);
+play.listeners.click();
+assert.deepEqual(messages, [{action:'openMeetingAudio', meetingId:'meeting', fileId:'correct'}]);
+// A recording saved after the first render must make playback available.
+meeting.recordings[1].state = 'recording';
+speech.renderMeeting(meeting, false);
+assert.ok($('speech-gap-items').children[0].children.find(n=>n.textContent === '打开原录音').disabled);
+meeting.recordings[1].state = 'saved';
+speech.renderMeeting(meeting, false);
+assert.equal($('speech-gap-items').children[0].children.find(n=>n.textContent === '打开原录音').disabled, false);
 """
         subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench-speech.js')], check=True)
 

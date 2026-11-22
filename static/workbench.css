@@ -432,3 +432,12 @@ button.prefs-step { display:flex; align-items:center; justify-content:space-betw
 #speech-cancel-test { margin-top:8px; }
 #speech-meeting-status span { overflow-wrap:anywhere; }
 .speech-gap-items { margin:8px 0 0; padding-inline-start:20px; }
+#speech-gaps { display:block; }
+.speech-gap-items li { padding:8px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+.speech-gap-items p { margin:0 0 4px; }
+.speech-gap-actions,.update-actions { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
+.speech-gap-help { margin:8px 0; font-size:12px; color:var(--muted); }
+.update-prompt { flex:none; font-size:12px; color:var(--accent); }
+.update-settings .setting-row { flex-wrap:wrap; }
+#update-release-notes { margin-top:16px; }
+#update-notes { font:inherit; white-space:pre-wrap; overflow-wrap:anywhere; margin:12px 0 0; }

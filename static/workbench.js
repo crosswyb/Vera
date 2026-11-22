@@ -780,7 +780,35 @@
     text($('capabilities'), parts.join(' · '));
     renderSettings();
   }
+  function renderUpdates() {
+    const desktop = nativeAvailable();
+    const update = state.native?.updates;
+    const checking = update?.state === 'checking';
+    const available = Boolean(update?.available);
+    text($('update-current-version'), update?.currentVersion
+      ? `真实交互 · Vera ${update.currentVersion}${Number.isInteger(update.currentBuild) ? `（build ${update.currentBuild}）` : ''}` : '真实交互 · Vera');
+    let status = '正在读取版本信息…';
+    if (!desktop) status = '请在桌面 App 中检查软件更新。';
+    else if (checking) status = '正在检查更新…';
+    else if (available) status = `发现新版 ${update.latestVersion}。${update.error ? `最近一次检查失败：${update.error}` : '可打开发布页下载。'}`;
+    else if (update?.state === 'current') status = `当前没有更新。最新正式版为 ${update.latestVersion}。`;
+    else if (update?.state === 'error') status = `未能检查更新：${update.error || '请稍后重试。'}`;
+    else if (update) status = '等待自动检查，可随时手动检查。';
+    text($('update-status'), status);
+    $('check-updates').disabled = !desktop || !update || checking;
+    text($('check-updates'), checking ? '正在检查…' : '检查更新');
+    $('open-update-release').hidden = !desktop || !available && update?.state !== 'error';
+    $('update-available').hidden = !desktop || !available;
+    text($('update-available'), available ? `发现新版 ${update.latestVersion}` : '');
+    text($('update-last-checked'), Number.isFinite(update?.checkedAt)
+      ? `上次成功检查：${new Date(update.checkedAt * 1000).toLocaleString('zh-CN')}` : '');
+    const notes = available ? update.notes || '此版本未提供发布说明，请打开发布页查看。' : '';
+    $('update-release-notes').hidden = !notes;
+    text($('update-notes'), notes);
+  }
+
   function renderSettings() {
+    renderUpdates();
     const cap = state.home?.capabilities || {};
     const native = state.native;
     const desktop = nativeAvailable();
@@ -2754,6 +2782,13 @@
   });
   $('open-meeting-folder').addEventListener('click', openMeetingFolder);
   $('open-files-folder').addEventListener('click', openMeetingFolder);
+  $('check-updates').addEventListener('click', () => nativePost('checkForUpdates'));
+  $('open-update-release').addEventListener('click', () => nativePost('openUpdateRelease'));
+  $('speech-gap-add-text').addEventListener('click', () => {
+    if ($('transcript-input').disabled) return;
+    setMeetingTab('transcript');
+    $('transcript-input').focus();
+  });
   window.addEventListener('zsjh-native-state', (event) => {
     state.native = event.detail;
     if (themeValues.has(state.native?.themePreference)) applyTheme(state.native.themePreference);

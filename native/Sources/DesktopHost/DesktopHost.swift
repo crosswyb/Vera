@@ -68,7 +68,11 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private let startupSpinner = NSProgressIndicator()
     private let startupExit = NSButton(title: "退出应用", target: nil, action: nil)
     private var startupFailed = false
-    private var checkingForUpdate = false
+    private let updates = VeraUpdateChecker(
+        version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知版本",
+        build: (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String).flatMap(Int.init))
+    private var updateTask: Task<Void, Never>?
+    private let updateItem = NSMenuItem(title: "检查更新…", action: nil, keyEquivalent: "")
     private var status = "正在启动…" { didSet { publishNativeState() } }
     private let startItem = NSMenuItem(title: "开始收听", action: nil, keyEquivalent: "")
     private let stopItem = NSMenuItem(title: "停止收听", action: nil, keyEquivalent: "")
@@ -214,7 +218,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         let menu = NSMenu()
         let aboutItem = menu.addItem(withTitle: "关于真实交互", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
-        menu.addItem(withTitle: "检查更新…", action: #selector(checkForUpdate(_:)), keyEquivalent: "").target = self
+        updateItem.target = self; updateItem.action = #selector(checkForUpdate(_:))
+        menu.addItem(updateItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出真实交互", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         rootItem.submenu = menu; appMenu.addItem(rootItem)
@@ -239,29 +244,46 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     @objc private func checkForUpdate(_ sender: NSMenuItem) {
-        guard !checkingForUpdate else { return }
-        checkingForUpdate = true
-        sender.title = "正在检查更新…"
+        checkForUpdates(showResult: true)
+    }
+
+    private func startUpdateChecks() {
+        guard updateTask == nil else { return }
+        updates.didChange = { [weak self] in self?.publishNativeState() }
+        updateTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, !self.closing else { return }
+                await self.updates.check(automatically: true)
+                do { try await Task.sleep(for: .seconds(VeraUpdateChecker.automaticInterval)) }
+                catch { return }
+            }
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard pageLoaded, !closing else { return }
+        Task { await updates.check(automatically: true) }
+    }
+
+    private func checkForUpdates(showResult: Bool) {
+        guard !updates.checking, !closing else { return }
         Task {
-            defer { checkingForUpdate = false; sender.title = "检查更新…" }
+            guard !updates.checking else { return }
+            await updates.check()
+            guard showResult, !closing else { return }
             let alert = NSAlert()
             var page: URL?
-            do {
-                let release = try await VeraRelease.latest()
-                guard let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
-                      let build = Int(current) else { throw VeraRelease.Failure.invalidRelease }
-                if release.build > build {
-                    alert.messageText = "发现新版 Vera"
-                    alert.informativeText = "当前 build \(build)，新版 \(release.tag_name)。请在会议和查证结束后退出应用，将新版拖入“应用程序”并选择替换。会议文件和设置保存在应用之外。"
-                    page = VeraRelease.releasesPage.appendingPathComponent("tag").appendingPathComponent(release.tag_name)
-                } else {
-                    alert.messageText = "当前没有更新"
-                    alert.informativeText = "已安装 build \(build)，最新正式版为 \(release.tag_name)。"
-                }
-            } catch {
+            if let failure = updates.failure {
                 alert.messageText = "未能检查更新"
-                alert.informativeText = error.localizedDescription
+                alert.informativeText = failure
                 page = VeraRelease.releasesPage
+            } else if let release = updates.latest, updates.available {
+                alert.messageText = "发现新版 Vera"
+                alert.informativeText = "当前 build \(updates.currentBuild ?? 0)，新版 \(release.tag_name)。可在设置 → 通用查看发布说明。请在会议和查证结束后退出应用，将新版拖入“应用程序”并选择替换。"
+                page = release.page
+            } else {
+                alert.messageText = "当前没有更新"
+                alert.informativeText = "已安装 build \(updates.currentBuild ?? 0)，最新正式版为 \(updates.latest?.tag_name ?? "未知")。"
             }
             if page != nil { alert.addButton(withTitle: "打开发布页"); alert.addButton(withTitle: "稍后") }
             else { alert.addButton(withTitle: "好") }
@@ -488,6 +510,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private func publishNativeState() {
+        updateItem.isEnabled = !updates.checking
+        updateItem.title = updates.checking ? "正在检查更新…" : "检查更新…"
         startItem.isEnabled = canStart; stopItem.isEnabled = canStop
         modelItem.isEnabled = hostReady
         installItem.isEnabled = hostReady && activeMeeting == nil && !beginningCapture
@@ -498,6 +522,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             "ready": hostReady, "captureState": captureState, "status": status,
             "themePreference": themePreference,
             "layoutPreference": layoutPreference,
+            "updates": updates.payload,
             "meetingId": activeMeeting.map { $0 as Any } ?? NSNull(), "modelState": modelState,
             "speechLiveProvider": speechLiveProvider, "speechFileProvider": speechFileProvider,
             "captureFinish": captureFinish as Any? ?? NSNull(),
@@ -533,6 +558,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         }
         startupSpinner.stopAnimation(nil)
         startupView.removeFromSuperview()
+        startUpdateChecks()
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
@@ -578,6 +604,10 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
               let action = body["action"] as? String else { return }
         switch action {
         case "requestState": publishNativeState()
+        case "checkForUpdates": checkForUpdates(showResult: false)
+        case "openUpdateRelease":
+            let page = updates.available ? updates.latest?.page ?? VeraRelease.releasesPage : VeraRelease.releasesPage
+            NSWorkspace.shared.open(page)
         case "refreshSpeechSettings": Task { try? await refreshSpeechConfiguration() }
         case "speechTest":
             guard let test = body["testId"] as? String, validMeetingID(test) else { return }
@@ -1583,9 +1613,12 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         case "asr.status", "asr.gap", "asr.error":
             if let source = event["source"] as? String {
                 var value = transcription[source] ?? [:]
-                if let state = event["state"] as? String { value["state"] = state }
+                if type != "asr.gap" {
+                    value["state"] = event["state"] as? String ?? event["status"] as? String ?? (type == "asr.error" ? "error" : "unknown")
+                    value["code"] = event["code"] as? String
+                    value["detail"] = event["detail"] as? String
+                }
                 if let provider = event["provider"] as? String { value["provider"] = provider }
-                if let code = event["code"] as? String { value["code"] = code }
                 transcription[source] = value
                 publishNativeState()
             }
@@ -1749,6 +1782,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 
     func applicationWillTerminate(_ notification: Notification) {
         closing = true; healthTask?.cancel(); stopWatchdog?.cancel()
+        updateTask?.cancel()
         outboxTask?.cancel(); speechLeaseTask?.cancel(); fileLease?.revoke()
         fileTask?.cancel()
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "workbench")

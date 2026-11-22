@@ -5,6 +5,18 @@ window.createSpeechSettings = function ({api, state, $, text, nativeAvailable, p
   const sourceLabels = {system: '电脑声音', microphone: '麦克风', file: '选定的音频文件'};
   const kinds = ['live', 'file'];
   const kindLabels = {live: '实时转写', file: '文件转写'};
+  const gapReasons = {
+    speech_input_overflow:'待转写的音频积压，识别已中断', speech_output_overflow:'转写结果积压，识别已中断',
+    speech_model_unavailable:'语音识别模型不可用或启动失败', speech_recognition_failed:'语音识别返回错误',
+    speech_finalization_failed:'语音识别无法保存最终文字', speech_finalization_incomplete:'末尾转写未完整保存',
+    speech_finalization_interrupted:'停止时仍有音频未完成转写', speech_inactive:'语音识别意外停止',
+    speech_input_failed:'无法向识别服务传入录音', speech_replay_window:'重连或切换服务时，部分音频超出可重放范围',
+    speech_timeout:'语音服务响应超时', speech_authentication_failed:'语音服务鉴权失败',
+    speech_quota_exhausted:'语音服务额度不足', speech_rate_limited:'语音服务请求受限',
+    speech_service_unavailable:'语音服务暂不可用', speech_authorization_ended:'音频上传授权已撤回或到期',
+    delivery_backlog:'转写记录积压，部分内容未能保存', delivery_incomplete:'部分转写未确认保存',
+    connection:'语音服务连接中断',
+  };
   const scopeSignatures = new Map();
   let defaults = null;
   let drafts = {};
@@ -455,7 +467,10 @@ window.createSpeechSettings = function ({api, state, $, text, nativeAvailable, p
       revoked:'音频上传已停止', unavailable:'转写暂不可用', stopped:'转写已停止'};
     const statuses = Object.entries(bySource).flatMap(([source, value]) => {
       const provider = label(value.provider);
-      return provider ? [`${sourceLabels[source] || '转写'} · ${provider}${bound && statusLabels[value.state || value.status] ? ' · ' + statusLabels[value.state || value.status] : ''}`] : [];
+      const status = value.state || value.status;
+      const details = bound && ['paused','error','unavailable'].includes(status)
+        ? [gapReasons[value.code], value.detail].filter(Boolean).join(' · ') : '';
+      return provider ? [[sourceLabels[source] || '转写', provider, bound ? statusLabels[status] : '', details].filter(Boolean).join(' · ')] : [];
     });
     const active = stoppingUpload ? '正在停止音频上传…' : currentRevocation?.error ? `撤回失败。${currentRevocation.error}` :
       auth?.state === 'revoked' && meeting?.state === 'active' ? '本场音频上传授权已撤回。' : '';
@@ -464,23 +479,44 @@ window.createSpeechSettings = function ({api, state, $, text, nativeAvailable, p
     text($('speech-meeting-state'), [active, ...statuses].filter(Boolean).join(' ｜ '));
     $('speech-meeting-status').hidden = !active && !statuses.length && !canRevoke;
     $('revoke-speech').hidden = !canRevoke || stoppingUpload;
-    const captureGaps = Object.values(meeting?.capture_epochs || {}).flatMap(epoch => epoch.gaps || []);
-    const importedGaps = job ? meeting?.transcription?.file?.gaps || [] : [];
-    const gaps = [...captureGaps, ...importedGaps];
+    const captureGaps = Object.entries(meeting?.capture_epochs || {}).flatMap(([epoch, value]) =>
+      (value.gaps || []).map(gap => ({...gap, capture_epoch:epoch})));
+    const importedGaps = job ? (meeting?.transcription?.file?.gaps || []).map(gap => ({...gap, capture_epoch:job.import_id})) : [];
+    const gaps = state.snapshot?.meeting?.id === meeting?.id && Array.isArray(state.snapshot?.speech_gaps)
+      ? state.snapshot.speech_gaps : [...captureGaps, ...importedGaps];
     $('speech-gaps').hidden = gaps.length === 0;
-    text($('speech-gap-count'), gaps.length ? `${gaps.length} 处转写需要核对 · 查看详情` : '');
-    const signature = JSON.stringify(gaps);
+    text($('speech-gap-count'), gaps.length ? `${gaps.length} 处转写缺失或中断 · 查看原因与影响时段` : '');
+    const recordings = meeting?.recordings || [];
+    const desktop = Boolean(nativeAvailable?.());
+    const signature = JSON.stringify([meeting?.id, gaps, desktop, recordings.map(r => [r.id, r.epoch, r.source, r.state])]);
     if (signature !== gapSignature) {
       gapSignature = signature;
       $('speech-gap-items').replaceChildren(...gaps.map(gap => {
         const item = document.createElement('li');
         const hasRange = Number.isFinite(gap.start_ms) && Number.isFinite(gap.end_ms);
-        const detail = gap.code === 'delivery_incomplete' ? '部分转写未确认，请结合原录音核对'
-          : hasRange ? `${audioTime(gap.start_ms)}–${audioTime(gap.end_ms)}` : '转写时间未确认，请结合原录音核对';
-        text(item, `${sourceLabels[gap.source] || '音频'} ${detail}`);
+        const range = hasRange ? `${audioTime(gap.start_ms)}–${audioTime(gap.end_ms)}` : '影响时段未确认';
+        const heading = document.createElement('p');
+        text(heading, `${sourceLabels[gap.source] || '音频'} ${range} · 此时段未获得完整转写`);
+        const reason = document.createElement('p');
+        const causes = gap.causes?.length ? gap.causes : [gap];
+        text(reason, causes.map(cause => [label(cause.provider), cause.detail || gapReasons[cause.code] || '未记录具体故障原因',
+          cause.code ? `（${cause.code}）` : ''].filter(Boolean).join(' · ')).join(' → '));
+        const play = document.createElement('button');
+        play.type = 'button'; play.className = 'text-button';
+        text(play, '打开原录音');
+        const recording = recordings.find(r => r.source === gap.source && r.epoch === gap.capture_epoch);
+        play.disabled = !desktop || !recording || !['saved','partial'].includes(recording.state);
+        if (!desktop) play.title = '请在桌面 App 中打开录音';
+        else if (play.disabled) play.title = '此段录音尚未保存或不可用';
+        else play.title = `打开录音后查看 ${range}`;
+        play.addEventListener('click', () => {
+          if (!play.disabled) postNative({action:'openMeetingAudio', meetingId:meeting.id, fileId:recording.id});
+        });
+        item.append(heading, reason, play);
         return item;
       }));
     }
+    $('speech-gap-add-text').hidden = !meeting || meeting.state !== 'active' || $('transcript-input').disabled;
   }
 
   $('speech-cloud-provider').addEventListener('change', () => { writeFields(); render(); });

@@ -300,6 +300,63 @@ class SpeechSessionTest(unittest.TestCase):
         self.assertEqual(self.end().status_code, 409)
         self.assertEqual(path.read_bytes(), b'truncated')
 
+    def test_snapshot_recovers_speech_failure_chain_from_persisted_events(self):
+        self.assertEqual(self.authorize().status_code, 200)
+        self.assertEqual(self.capture().status_code, 200)
+        events = [
+            self.event('asr.error', seq=1, provider='dashscope', code='speech_input_overflow',
+                       detail='待转写的音频积压，已停止当前识别。'),
+            self.event('asr.status', seq=2, provider='apple_local', state='connecting'),
+            self.event('asr.error', seq=3, provider='apple_local', code='speech_model_unavailable',
+                       detail='Apple 中文识别无法启动。'),
+            self.event('asr.status', seq=4, provider='apple_local', state='paused',
+                       code='speech_model_unavailable', detail='转写暂停，录音继续。'),
+            self.event('asr.gap', seq=5, provider='apple_local', code='speech_model_unavailable',
+                       audio_start_ms=100, audio_end_ms=900),
+        ]
+        for event in events:
+            response = self.send(event)
+            self.assertEqual(response.status_code, 200, response.get_json())
+        self.confirm_recording('system', seq=6)
+        self.assertEqual(self.seal().get_json()['state'], 'with_gaps')
+        # The stored gaps use the old shape. Diagnostics must work for existing
+        # meetings without rewriting their stored data or relying on 40 recent events.
+        with self.wb.store.transaction() as db:
+            current = self.wb.store._get(db, 'wb_meeting', self.mid)
+            for index in range(45):
+                self.wb._event(db, current, 'fixture.event', {'index': index})
+            self.wb._save(db, current)
+        snapshot = self.snapshot()
+        self.assertFalse(any(event['type'] == 'asr.error' for event in snapshot['activity']))
+        gap, = snapshot['speech_gaps']
+        self.assertEqual((gap['capture_epoch'], gap['source'], gap['start_ms'], gap['end_ms']),
+                         ('run-1', 'system', 100, 900))
+        self.assertEqual([(cause['provider'], cause['code'], cause['detail']) for cause in gap['causes']], [
+            ('dashscope', 'speech_input_overflow', events[0]['detail']),
+            ('apple_local', 'speech_model_unavailable', events[2]['detail']),
+        ])
+        stored_gap, = snapshot['meeting']['capture_epochs']['run-1']['gaps']
+        self.assertEqual(set(stored_gap), {'source', 'start_ms', 'end_ms', 'code'})
+
+    def test_speech_gap_causes_do_not_cross_sources_or_successful_recovery(self):
+        self.assertEqual(self.capture(provider='apple_local', sources=('system', 'microphone')).status_code, 200)
+        events = [
+            self.event('asr.error', seq=1, provider='apple_local', code='speech_input_failed', detail='电脑音源识别失败'),
+            self.event('asr.error', seq=1, source='microphone', provider='apple_local',
+                       code='speech_recognition_failed', detail='麦克风识别失败'),
+            self.event('asr.gap', seq=2, code='speech_input_failed', audio_start_ms=0, audio_end_ms=100),
+            self.event('asr.status', seq=3, provider='apple_local', state='running'),
+            self.event('asr.gap', seq=4, code='speech_finalization_interrupted', audio_start_ms=200, audio_end_ms=300),
+            self.event('asr.gap', seq=2, source='microphone', code='speech_recognition_failed',
+                       audio_start_ms=0, audio_end_ms=300),
+        ]
+        for event in events:
+            self.assertEqual(self.send(event).status_code, 200)
+        system, recovered, microphone = self.snapshot()['speech_gaps']
+        self.assertEqual([cause['detail'] for cause in system['causes']], ['电脑音源识别失败'])
+        self.assertEqual(recovered['causes'], [])
+        self.assertEqual([cause['detail'] for cause in microphone['causes']], ['麦克风识别失败'])
+
     def test_incomplete_journal_with_verified_recording_finishes_with_explicit_gap(self):
         self.assertEqual(self.capture(provider='apple_local').status_code, 200)
         path = self.confirm_recording('system')

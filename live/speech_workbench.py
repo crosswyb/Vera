@@ -1,5 +1,6 @@
 """Meeting audio upload scope, short-lived permissions, and capture completion."""
 
+import json
 import time
 
 from live.recording_archive import identity
@@ -12,6 +13,42 @@ CAPTURE_SAVED = {'complete', 'with_gaps', 'no_audio'}
 
 
 class SpeechWorkbench:
+    def _speech_gaps(self, db, meeting):
+        """Join saved gaps to their durable ASR events, including older meetings."""
+        gaps = [{**gap, 'capture_epoch': epoch_id}
+                for epoch_id, epoch in meeting.get('capture_epochs', {}).items()
+                for gap in epoch.get('gaps', [])]
+        job = meeting.get('audio_import')
+        if job:
+            gaps.extend({**gap, 'capture_epoch': job['import_id']}
+                        for gap in meeting.get('transcription', {}).get('file', {}).get('gaps', []))
+        if not gaps:
+            return []
+        bindings = {(gap['capture_epoch'], gap.get('source')) for gap in gaps}
+        failures, diagnostics = {}, {}
+        rows = db.execute("SELECT data FROM events WHERE meeting=? AND json_extract(data,'$.type') "
+                          "IN ('asr.error','asr.status','asr.gap') ORDER BY seq", (meeting['id'],))
+        for row in rows:
+            event = json.loads(row[0])
+            value = event['payload']
+            binding = (value.get('capture_epoch'), value.get('source'))
+            if binding not in bindings:
+                continue
+            causes = failures.setdefault(binding, [])
+            if event['type'] == 'asr.error':
+                cause = {key: value.get(key) for key in ('provider', 'code', 'detail')}
+                if not causes or causes[-1] != cause:
+                    causes.append(cause)
+            elif event['type'] == 'asr.status' and (value.get('state') or value.get('status')) in {
+                    'running', 'ready', 'recognizing', 'local', 'degraded'}:
+                causes.clear()
+            elif event['type'] == 'asr.gap':
+                key = (*binding, value.get('audio_start_ms'), value.get('audio_end_ms'), value.get('code'))
+                diagnostics[key] = {'provider': value.get('provider'), 'detail': value.get('detail'),
+                                    'causes': list(causes)}
+        return [{**gap, **diagnostics.get((gap['capture_epoch'], gap.get('source'), gap.get('start_ms'),
+                                          gap.get('end_ms'), gap.get('code')), {})} for gap in gaps]
+
     def speech_authorize(self, principal, mid, value):
         with self.store.transaction() as db:
             meeting = self._meeting(db, principal, mid, True)
