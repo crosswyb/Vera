@@ -109,6 +109,23 @@ class ReleasePrivacyTest(unittest.TestCase):
         self.assertNotIn(key, json.dumps(findings))
         self.assertNotIn("private-release-person", json.dumps(findings))
 
+    def test_macos_sidecars_are_metadata_and_still_block_private_content(self):
+        def appledouble(payload):
+            return (struct.pack(">II16sH", 0x00051607, 0x00020000, b"Mac OS X        ", 1)
+                    + struct.pack(">III", 9, 38, len(payload)) + payload)
+        archive = self.root / "release.zip"
+        metadata = {"__MACOSX/Vera.app/._speech-probe.wav": appledouble(b"safe Finder metadata"),
+                    "__MACOSX/Vera.app/._base_library.zip": appledouble(b"safe Finder metadata"),
+                    "__MACOSX/Vera.app/backend/._vera-backend": appledouble(b"safe Finder metadata")}
+        archive.write_bytes(self.zip_bytes(metadata))
+        self.assertFalse(privacy.audit_archive(archive))
+        metadata["__MACOSX/Vera.app/._base_library.zip"] = appledouble(self.private_path().encode())
+        archive.write_bytes(self.zip_bytes(metadata))
+        self.assertIn("local_home_path", self.categories(privacy.audit_archive(archive)))
+        metadata["__MACOSX/Vera.app/._base_library.zip"] = appledouble(b"safe")[:-1]
+        archive.write_bytes(self.zip_bytes(metadata))
+        self.assertIn("archive_unreadable", self.categories(privacy.audit_archive(archive)))
+
     def test_historical_deleted_private_content_remains_release_blocking(self):
         self.repository()
         path = self.write("old.txt", self.private_path())

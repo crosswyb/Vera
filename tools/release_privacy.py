@@ -18,6 +18,7 @@ import os
 import plistlib
 import re
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -215,7 +216,7 @@ class _Audit:
             self.add("archive_limit", location)
             return
         try:
-            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            with zipfile.ZipFile(io.BytesIO(data), metadata_encoding="utf-8") as archive:
                 self.scan_text(archive.comment, f"{location}!archive-metadata")
                 members = archive.infolist()
                 if sum(member.file_size for member in members) > MAX_ARCHIVE_BYTES:
@@ -237,6 +238,10 @@ class _Audit:
                     if stat.S_ISLNK(member.external_attr >> 16):
                         self.scan_link(content.decode("utf-8", errors="replace"), member.filename, member_location)
                         continue
+                    if member.filename.startswith("__MACOSX/") and PurePosixPath(member.filename).name.startswith("._"):
+                        self.scan_appledouble(content, member_location, depth=depth + 1,
+                                              third_party=_third_party(member.filename))
+                        continue
                     self.scan_bytes(content, member_location, depth=depth + 1,
                                     third_party=third_party or base_library or _third_party(member.filename),
                                     base_library=base_library)
@@ -244,6 +249,27 @@ class _Audit:
             # Decoders for ZIP's supported compression methods raise different
             # exception classes. Malformed release input must always fail closed.
             self.add("archive_unreadable", location)
+
+    def scan_appledouble(self, data: bytes, location: str, *, depth: int, third_party: bool) -> None:
+        # Apple copyfile's big-endian AppleDouble header stores Finder metadata
+        # and resource forks separately from the associated file's actual data.
+        self.scan_text(data, location, third_party=third_party)
+        if len(data) < 26 or data[:8] != bytes.fromhex("0005160700020000"):
+            self.add("archive_unreadable", location)
+            return
+        count = struct.unpack_from(">H", data, 24)[0]
+        header_end = 26 + 12 * count
+        if header_end > len(data):
+            self.add("archive_unreadable", location)
+            return
+        for index in range(count):
+            kind, start, size = struct.unpack_from(">III", data, 26 + 12 * index)
+            if start < header_end or start + size > len(data):
+                self.add("archive_unreadable", location)
+                return
+            if size:
+                self.scan_bytes(data[start:start + size], f"{location}!metadata-{kind}",
+                                depth=depth, third_party=third_party)
 
     def scan_frozen(self, data: bytes, location: str, *, depth: int) -> None:
         if depth >= 6:
@@ -458,7 +484,7 @@ def audit_archive(path: str | Path, *, private_terms: tuple[str, ...] = ()) -> l
     elif path.suffix.lower() == ".dmg" and sys.platform == "darwin":
         mounted = False
         with tempfile.TemporaryDirectory(prefix="vera-privacy-dmg-") as directory:
-            mount = Path(directory) / "volume"
+            mount = (Path(directory) / "volume").resolve()
             mount.mkdir()
             try:
                 result = subprocess.run(["hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-plist",
