@@ -116,7 +116,24 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
             return {"member": principal, "project": self.store._get(db, "project", principal["project_id"]),
                     "meetings": sorted(rows, key=lambda m: m["updated_at"], reverse=True),
                     "materials": sorted(materials, key=lambda d: d["created_at"], reverse=True),
-                    "capabilities": self.capabilities}
+                    "capabilities": self.capabilities,
+                    "update_readiness": self._update_readiness(meetings, questions.values(), documents)}
+
+    def _update_readiness(self, meetings, questions, documents):
+        reason = ""
+        by_id = {m['id']: m for m in meetings}
+        if any(m['state'] == 'active' for m in meetings):
+            reason = "请先结束进行中的会议或音频导入，再安装更新。"
+        elif any(m.get('coordinator_state') == 'running' or (
+                not m.get('research_paused') and m.get('coordinator_state') in {'pending', 'retry_wait'})
+                or m.get('summary', {}).get('state') in {'pending', 'running'} for m in meetings):
+            reason = "问题识别或会议总结尚未完成，请完成后再安装更新。"
+        elif any(q['state'] == 'running' or (q['state'] in {'queued', 'backlog', 'waiting_dependency'}
+                 and not self._automation_held(by_id[q['meeting_id']], q)) for q in questions):
+            reason = "查证任务尚未完成，请完成或暂停后再安装更新。"
+        elif any(d['state'] in {'pending', 'save_failed'} for d in documents):
+            reason = "还有文档未保存，请保存后再安装更新。"
+        return {'can_install': not reason, 'reason': reason}
 
     def create(self, principal, value):
         with self.store.transaction() as db:

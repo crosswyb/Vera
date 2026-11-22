@@ -307,9 +307,11 @@
           <div role="tabpanel" id="prefs-pane-general" aria-labelledby="prefs-tab-general" tabindex="0" hidden>
           <section class="settings-section update-settings" aria-labelledby="update-settings-title">
             <h2 id="update-settings-title">软件更新</h2>
-            <div class="setting-row"><div><h3 id="update-current-version">真实交互 · Vera</h3><p id="update-status" role="status" aria-live="polite">正在读取版本信息…</p></div><div class="update-actions"><button id="check-updates" type="button" disabled>检查更新</button><button id="open-update-release" type="button" hidden>打开发布页</button></div></div>
+            <div class="setting-row"><div><h3 id="update-current-version">真实交互 · Vera</h3><p id="update-status" role="status" aria-live="polite">正在读取版本信息…</p></div><div class="update-actions"><button id="check-updates" type="button" disabled>检查更新</button><button id="install-update" type="button" aria-describedby="update-install-blocked" hidden disabled>安装并重新打开</button></div></div>
+            <div id="update-download" class="update-download" hidden><progress id="update-download-progress" max="1" aria-label="更新下载进度"></progress><span id="update-download-detail"></span></div>
+            <p id="update-install-blocked" class="setting-note" role="status" hidden></p>
             <p id="update-last-checked" class="setting-note"></p>
-            <p class="setting-note">启动后自动检查，运行期间每 6 小时检查一次。发现新版时会在顶部提示。请在会议和查证完成后下载并替换应用。</p>
+            <p class="setting-note">启动后自动检查，运行期间每 6 小时检查一次。发现新版会自动下载，完成后再由你确认安装并重新打开应用。会议和查证期间可稍后安装。</p>
             <details id="update-release-notes" hidden><summary>新版发布说明</summary><pre id="update-notes"></pre></details>
           </section>
           <section class="settings-section appearance-settings" aria-labelledby="appearance-title"><h2 id="appearance-title">外观</h2><div class="setting-row"><label for="theme-preference">主题</label><select id="theme-preference" aria-describedby="theme-help"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div><p id="theme-help" class="setting-note">立即生效，自动保存。</p><div class="setting-row"><label for="layout-preference">界面布局</label><select id="layout-preference" aria-describedby="layout-help"><option value="a">静阅</option><option value="b">全景</option></select></div><p id="layout-help" class="setting-note">静阅以舒展双栏呈现内容；全景在宽窗口同屏展示转写、问题与回答。也可从右上角随时切换，选择自动保存。</p></section>
