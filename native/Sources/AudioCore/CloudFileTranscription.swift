@@ -166,6 +166,105 @@ struct CloudFileRequest {
     }
 
     static func text(from data: Data, provider: String) throws -> String {
+        var decoder = CloudFileResponse(provider: provider)
+        for byte in data { try decoder.append(byte) }
+        return try decoder.finish()
+    }
+}
+
+/// DashScope repeats cumulative text and sentence metadata in each SSE event.
+/// Bound one event and the final text, never the sum of the entire stream.
+struct CloudFileResponse {
+    static let maximumEventBytes = 2 * 1024 * 1024
+    static let maximumTextBytes = 2 * 1024 * 1024
+
+    private enum Format { case unknown, json, events }
+    private let provider: String
+    private var format = Format.unknown
+    private var buffer = Data()
+    private var eventData = Data()
+    private var eventBytes = 0
+    private var afterCR = false
+    private var done = false
+    private var latest: String?
+
+    init(provider: String) { self.provider = provider }
+
+    mutating func append(_ byte: UInt8) throws {
+        switch format {
+        case .unknown:
+            if buffer.isEmpty && [9, 10, 13, 32].contains(byte) { return }
+            buffer.append(byte)
+            // A UTF-8 BOM can itself span network reads.
+            if buffer.first == 0xef && buffer.count < 3 { return }
+            if buffer == Data([0xef, 0xbb, 0xbf]) { buffer.removeAll(); return }
+            if buffer.first == 0x7b || buffer.first == 0x5b {
+                format = .json
+            } else {
+                format = .events
+                let prefix = buffer
+                buffer.removeAll()
+                for value in prefix { try appendEventByte(value) }
+            }
+        case .json:
+            guard buffer.count < Self.maximumEventBytes else { throw CloudSpeechError.responseTooLarge }
+            buffer.append(byte)
+        case .events:
+            try appendEventByte(byte)
+        }
+    }
+
+    mutating func finish() throws -> String {
+        switch format {
+        case .json: try decode(buffer)
+        case .events:
+            // An unfinished event cannot acknowledge an audio chunk, even if
+            // earlier cumulative text was valid. Keep its resume point intact.
+            guard buffer.isEmpty && eventData.isEmpty else { throw CloudSpeechError.invalidResponse }
+        case .unknown: throw CloudSpeechError.invalidResponse
+        }
+        guard let latest else { throw CloudSpeechError.invalidResponse }
+        return latest.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private mutating func appendEventByte(_ byte: UInt8) throws {
+        if afterCR {
+            afterCR = false
+            if byte == 10 { return }
+        }
+        if byte == 10 || byte == 13 {
+            try finishLine()
+            afterCR = byte == 13
+        } else {
+            guard eventBytes < Self.maximumEventBytes else { throw CloudSpeechError.responseTooLarge }
+            eventBytes += 1
+            buffer.append(byte)
+        }
+    }
+
+    private mutating func finishLine() throws {
+        if buffer.isEmpty {
+            if !eventData.isEmpty {
+                guard !done else { throw CloudSpeechError.invalidResponse }
+                if eventData == Data("[DONE]".utf8) { done = true }
+                else { try decode(eventData) }
+                eventData.removeAll(keepingCapacity: true)
+            }
+            eventBytes = 0
+            return
+        }
+        guard let line = String(data: buffer, encoding: .utf8) else { throw CloudSpeechError.invalidResponse }
+        buffer.removeAll(keepingCapacity: true)
+        let fields = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard fields.first == "data" else { return }
+        var value = fields.count == 2 ? fields[1] : Substring()
+        if value.first == " " { value = value.dropFirst() }
+        if !eventData.isEmpty { eventData.append(10) }
+        eventData.append(contentsOf: value.utf8)
+        guard eventData.count <= Self.maximumEventBytes else { throw CloudSpeechError.responseTooLarge }
+    }
+
+    private mutating func decode(_ payload: Data) throws {
         struct Response: Decodable {
             struct Output: Decodable { let text: String? }
             let output: Output?
@@ -173,33 +272,17 @@ struct CloudFileRequest {
             let code: String?
             let message: String?
         }
-
-        func decode(_ payload: Data) throws -> String? {
-            guard let response = try? JSONDecoder().decode(Response.self, from: payload) else { return nil }
-            if let code = response.code, !code.isEmpty {
-                throw CloudSpeechError.classifiedProviderFailure(code: code, message: response.message ?? "")
-            }
-            return provider == "deepseek" ? response.text : response.output?.text
+        guard let response = try? JSONDecoder().decode(Response.self, from: payload) else {
+            throw CloudSpeechError.invalidResponse
         }
-
-        if let fullText = try decode(data) {
-            return fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let code = response.code, !code.isEmpty {
+            throw CloudSpeechError.classifiedProviderFailure(code: code, message: response.message ?? "")
         }
-
-        // Bailian's current recorded-ASR example returns cumulative output.text
-        // as Server-Sent Events. URLSession collects the stream into one Data.
-        var latest: String?
-        for line in String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline) {
-            let value = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard value.hasPrefix("data:") else { continue }
-            let payload = String(value.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-            if payload == "[DONE]" { continue }
-            guard let event = payload.data(using: .utf8) else { continue }
-            if let text = try decode(event) { latest = text }
-            else if let failure = CloudFileRequest.providerError(from: event) { throw failure }
+        if let failure = CloudFileRequest.providerError(from: payload) { throw failure }
+        if let text = provider == "deepseek" ? response.text : response.output?.text {
+            guard text.utf8.count <= Self.maximumTextBytes else { throw CloudSpeechError.responseTooLarge }
+            latest = text
         }
-        guard let latest else { throw CloudSpeechError.invalidResponse }
-        return latest.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -210,19 +293,18 @@ final class CloudFileRecognition {
     private let config: SpeechSessionConfig
     private let lease: SpeechLease?
     private let session: URLSession
-    private let request: Transport
+    private let transport: Transport?
     private var leaseHandler: UUID?
     private var cancelled = false
 
     init(config: SpeechSessionConfig, lease: SpeechLease?, requestSeconds: TimeInterval = 120,
-         transport: Transport? = nil) throws {
+         transport: Transport? = nil, session: URLSession? = nil) throws {
         _ = try config.request(kind: "file")
         try lease?.check()
         self.config = config
         self.lease = lease
-        let session = SpeechNetworkDelegate.ephemeral(requestSeconds: requestSeconds, resourceSeconds: requestSeconds)
-        self.session = session
-        request = transport ?? { try await session.data(for: $0) }
+        self.session = session ?? SpeechNetworkDelegate.ephemeral(requestSeconds: requestSeconds, resourceSeconds: requestSeconds)
+        self.transport = transport
         leaseHandler = lease?.onRevoke { [weak self] in self?.cancel() }
     }
 
@@ -241,15 +323,14 @@ final class CloudFileRecognition {
         let outgoing = try CloudFileRequest.build(config: config, pcm: samples)
         for attempt in 0...1 {
             try check()
-            let data: Data
-            let received: URLResponse
-            do { (data, received) = try await request(outgoing) }
+            let response: HTTPURLResponse
+            let text: String
+            do { (text, response) = try await receive(outgoing) }
             catch {
                 try check()
                 throw CloudSpeechError.openNetwork(error)
             }
             try check()
-            guard let response = received as? HTTPURLResponse else { throw CloudSpeechError.invalidResponse }
             if response.statusCode == 429 && attempt == 0 {
                 let delay = DashScopeRecognition.retryAfter(response) ?? 1
                 if delay <= 5 {
@@ -257,14 +338,59 @@ final class CloudFileRecognition {
                     continue
                 }
             }
-            guard (200..<300).contains(response.statusCode) else {
-                if let error = CloudFileRequest.providerError(from: data) { throw error }
-                throw CloudSpeechError.http(response.statusCode)
-            }
-            guard data.count <= 2 * 1024 * 1024 else { throw CloudSpeechError.invalidResponse }
-            return try CloudFileRequest.text(from: data, provider: config.provider)
+            guard (200..<300).contains(response.statusCode) else { throw CloudSpeechError.http(response.statusCode) }
+            return text
         }
         throw CloudSpeechError.rateLimited
+    }
+
+    private func receive(_ outgoing: URLRequest) async throws -> (String, HTTPURLResponse) {
+        if let transport {
+            let (data, received) = try await transport(outgoing)
+            try check()
+            guard let response = received as? HTTPURLResponse else { throw CloudSpeechError.invalidResponse }
+            if response.statusCode == 429 { return ("", response) }
+            guard (200..<300).contains(response.statusCode) else {
+                if let error = CloudFileRequest.providerError(from: Data(data.prefix(CloudFileResponse.maximumEventBytes))) { throw error }
+                throw CloudSpeechError.http(response.statusCode)
+            }
+            return (try CloudFileRequest.text(from: data, provider: config.provider), response)
+        }
+        let (bytes, received) = try await session.bytes(for: outgoing)
+        // Each concurrent request owns its task. Parse failure or cancellation
+        // closes only this response, while lease revocation closes the session.
+        defer { bytes.task.cancel() }
+        guard let response = received as? HTTPURLResponse else { throw CloudSpeechError.invalidResponse }
+        if response.statusCode == 429 { return ("", response) }
+        let text = try await Self.read(bytes, response: response, provider: config.provider)
+        return (text, response)
+    }
+
+    // Keep byte iteration off the main actor: AsyncBytes.next() must not cause
+    // an executor hop for every byte of each concurrent response.
+    private nonisolated static func read(_ bytes: URLSession.AsyncBytes, response: HTTPURLResponse,
+                                         provider: String) async throws -> String {
+        return try await withTaskCancellationHandler {
+            var decoder = CloudFileResponse(provider: provider)
+            var failureBody = Data()
+            let success = (200..<300).contains(response.statusCode)
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                if success { try decoder.append(byte) }
+                else {
+                    guard failureBody.count < CloudFileResponse.maximumEventBytes else { throw CloudSpeechError.http(response.statusCode) }
+                    failureBody.append(byte)
+                }
+            }
+            try Task.checkCancellation()
+            guard success else {
+                if let error = CloudFileRequest.providerError(from: failureBody) { throw error }
+                throw CloudSpeechError.http(response.statusCode)
+            }
+            return try decoder.finish()
+        } onCancel: {
+            bytes.task.cancel()
+        }
     }
 
     private func check() throws {

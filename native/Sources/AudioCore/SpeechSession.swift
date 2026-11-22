@@ -96,7 +96,7 @@ public final class SpeechLease {
 /// Neither a server-supplied message nor an underlying HTTP request is logged.
 enum CloudSpeechError: LocalizedError, Equatable {
     case invalidConfiguration, authorizationEnded, permission, quota, model
-    case unavailable, timeout, rateLimited, invalidAudio, invalidResponse
+    case unavailable, timeout, rateLimited, invalidAudio, invalidResponse, responseTooLarge
     case inputOverflow, outputOverflow, missingSample
     case providerFailure(code: String, message: String)
 
@@ -140,6 +140,7 @@ enum CloudSpeechError: LocalizedError, Equatable {
         case .rateLimited: return "speech_rate_limited"
         case .invalidAudio: return "speech_audio_invalid"
         case .invalidResponse: return "speech_response_invalid"
+        case .responseTooLarge: return "speech_response_too_large"
         case .inputOverflow: return "speech_input_overflow"
         case .outputOverflow: return "speech_output_overflow"
         case .missingSample: return "speech_sample_missing"
@@ -168,6 +169,7 @@ enum CloudSpeechError: LocalizedError, Equatable {
         case .rateLimited: return "语音服务请求过多，请稍后重试。"
         case .invalidAudio: return "语音服务无法处理这段音频，请检查音频格式、大小或时长。"
         case .invalidResponse: return "语音服务返回的结果不完整或格式无效。"
+        case .responseTooLarge: return "语音服务返回的单条结果或文本超过处理上限。"
         case .inputOverflow: return "待转写的音频积压，已停止当前识别。"
         case .outputOverflow: return "转写结果积压，已停止当前识别。"
         case .missingSample: return "缺少测试音频，请检查 App 安装包。"

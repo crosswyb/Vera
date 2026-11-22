@@ -69,6 +69,79 @@ private final class FixtureSource: CapturedAudioSource {
     func play(_ buffer: AVAudioPCMBuffer) { if active { onAudio?(buffer) } }
 }
 
+/// Drives URLSession.AsyncBytes without a network connection or credentials.
+private final class FixtureHTTPProtocol: URLProtocol, @unchecked Sendable {
+    struct Plan {
+        let body: Data
+        var status = 200
+        var contentType = "text/event-stream"
+        var frameBytes = 4093
+        var stall = false
+        var disconnect = false
+    }
+    private static let planLock = NSLock()
+    private static var plan = Plan(body: Data())
+    private static var delivered = 0
+    private static var stops = 0
+    private let deliveryLock = NSRecursiveLock()
+    private var stopped = false
+
+    static func install(_ plan: Plan) -> URLSession {
+        planLock.lock()
+        Self.plan = plan
+        delivered = 0
+        stops = 0
+        planLock.unlock()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FixtureHTTPProtocol.self]
+        return URLSession(configuration: configuration, delegate: SpeechNetworkDelegate(), delegateQueue: nil)
+    }
+
+    static var activity: (delivered: Int, stops: Int) {
+        planLock.lock()
+        defer { planLock.unlock() }
+        return (delivered, stops)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.planLock.lock()
+        let plan = Self.plan
+        Self.planLock.unlock()
+        let response = HTTPURLResponse(url: request.url!, statusCode: plan.status, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": plan.contentType])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        DispatchQueue.global().async {
+            for offset in stride(from: 0, to: plan.body.count, by: plan.frameBytes) {
+                self.deliveryLock.lock()
+                defer { self.deliveryLock.unlock() }
+                guard !self.stopped else { return }
+                let frame = plan.body.subdata(in: offset..<min(plan.body.count, offset + plan.frameBytes))
+                self.client?.urlProtocol(self, didLoad: frame)
+                Self.planLock.lock()
+                Self.delivered += frame.count
+                Self.planLock.unlock()
+            }
+            self.deliveryLock.lock()
+            defer { self.deliveryLock.unlock() }
+            guard !self.stopped, !plan.stall else { return }
+            if plan.disconnect { self.client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost)) }
+            else { self.client?.urlProtocolDidFinishLoading(self) }
+        }
+    }
+
+    override func stopLoading() {
+        deliveryLock.lock()
+        stopped = true
+        deliveryLock.unlock()
+        Self.planLock.lock()
+        Self.stops += 1
+        Self.planLock.unlock()
+    }
+}
+
 @main
 @MainActor
 struct CloudASRSmoke {
@@ -101,8 +174,9 @@ struct CloudASRSmoke {
         try await backlogPauseContinuesRecording()
         try await bothSourcesStopConcurrently()
         try await fileRequests()
+        try await fileStreaming()
         try await filePipeline()
-        print("Cloud ASR fixtures passed: protocol and revisions, missing tail, durable seal retry, bounded reconnects and cancellation, two recordings, file formats and chunk continuity.")
+        print("Cloud ASR fixtures passed: protocol and revisions, missing tail, durable seal retry, bounded reconnects and cancellation, two recordings, bounded streaming file responses and chunk continuity.")
     }
 
     private static func realtimeProtocol() async throws {
@@ -456,6 +530,14 @@ struct CloudASRSmoke {
         try require(try CloudFileRequest.text(from: flash, provider: "dashscope") == expected, "Flash returned only its last sentence")
         let deepseek = Data("{\"request_id\":\"test\",\"text\":\"\(expected)\",\"duration_ms\":1}".utf8)
         try require(try CloudFileRequest.text(from: deepseek, provider: "deepseek") == expected, "DeepSeek whole text parsing")
+        let large = try largeFileResponse(text: expected)
+        let largeWorker = try CloudFileRecognition(config: dashScope, lease: nil, transport: { request in
+            (large, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                                    headerFields: ["Content-Type": "text/event-stream"])!)
+        })
+        defer { largeWorker.close() }
+        let largeText = try await largeWorker.transcribe(samples)
+        try require(largeText == expected, "valid cumulative SSE over 2 MiB was rejected or duplicated text")
         let lease = SpeechLease(seconds: 5)
         var requests = 0
         let worker = try CloudFileRecognition(config: deepSeek, lease: lease, transport: { request in
@@ -493,6 +575,92 @@ struct CloudASRSmoke {
         if let last = chunker.finish() { chunks.append(last) }
         try require(chunks.map(\.count) == [29, 60, 5] && chunks.flatMap { $0 } == original && chunker.sentFrames == original.count,
                     "pause chunking dropped or duplicated PCM")
+    }
+
+    private static func fileStreaming() async throws {
+        let dashScope = try config("dashscope", "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")
+        let expected = "中文跨帧。第二句。"
+        let large = try largeFileResponse(text: expected)
+        let worker = try CloudFileRecognition(config: dashScope, lease: nil,
+                                             session: FixtureHTTPProtocol.install(.init(body: large)))
+        let started = ContinuousClock.now
+        let result = try await worker.transcribe([1, -1])
+        worker.close()
+        try require(result == expected && large.count > 2 * 1024 * 1024,
+                    "production AsyncBytes path rejected valid large SSE or appended cumulative text")
+        print("Streaming response: \(large.count) bytes, correct cumulative text, elapsed \(started.duration(to: .now))")
+        let concurrent = try CloudFileRecognition(config: dashScope, lease: nil,
+                                                 session: FixtureHTTPProtocol.install(.init(body: large)))
+        async let first = concurrent.transcribe([1])
+        async let second = concurrent.transcribe([2])
+        async let third = concurrent.transcribe([3])
+        let parallelTexts = try await [first, second, third]
+        concurrent.close()
+        try require(parallelTexts == [expected, expected, expected] && FixtureHTTPProtocol.activity.delivered == 3 * large.count,
+                    "parallel streaming requests mixed parser state or cancelled one another")
+
+        // Split every UTF-8 scalar, BOM, CRLF and SSE field across reads.
+        let split = Data("\u{feff}: heartbeat\r\nevent: result\r\ndata: {\"output\":\r\ndata: {\"text\":\"\(expected)\"}}\r\n\r\ndata: [DONE]\r\n\r\n".utf8)
+        let fragmented = try CloudFileRecognition(config: dashScope, lease: nil,
+                                                 session: FixtureHTTPProtocol.install(.init(body: split, frameBytes: 1)))
+        let splitText = try await fragmented.transcribe([1])
+        fragmented.close()
+        try require(splitText == expected, "network boundaries corrupted Chinese, CRLF or multiline SSE data")
+
+        let deepSeek = try config("deepseek", "https://api.deepseek.com/v1/tools/asr")
+        let json = Data("{\"text\":\"\(expected)\"}".utf8)
+        let plain = try CloudFileRecognition(config: deepSeek, lease: nil,
+                                            session: FixtureHTTPProtocol.install(.init(body: json, contentType: "application/json", frameBytes: 1)))
+        let plainText = try await plain.transcribe([1])
+        plain.close()
+        try require(plainText == expected, "streaming transport broke DeepSeek JSON")
+
+        let prefix = Data("data: {\"output\":{\"text\":\"临时文本\"}}\n\n".utf8)
+        let cases: [(String, FixtureHTTPProtocol.Plan, CloudSpeechError)] = [
+            ("malformed event after valid text", .init(body: prefix + Data("data: {broken}\n\n".utf8)), .invalidResponse),
+            ("invalid UTF-8 after valid text", .init(body: prefix + Data("data: ".utf8) + Data([0xc3, 0x28, 10, 10])), .invalidResponse),
+            ("truncated event after valid text", .init(body: prefix + Data("data: {\"output\":".utf8)), .invalidResponse),
+            ("provider failure after valid text", .init(body: prefix + Data("data: {\"code\":\"InvalidApiKey\",\"message\":\"bad\"}\n\n".utf8)),
+             .classifiedProviderFailure(code: "InvalidApiKey", message: "bad")),
+            ("HTTP provider failure", .init(body: Data("{\"code\":\"InvalidApiKey\",\"message\":\"bad\"}".utf8), status: 401),
+             .providerFailure(code: "InvalidApiKey", message: "bad")),
+            ("HTTP rate limit", .init(body: Data(), status: 429), .rateLimited),
+            ("oversized single event", .init(body: Data("data: ".utf8) + Data(repeating: 120, count: CloudFileResponse.maximumEventBytes)), .responseTooLarge),
+            ("oversized JSON", .init(body: Data("{\"text\":\"".utf8) + Data(repeating: 120, count: CloudFileResponse.maximumEventBytes)), .responseTooLarge),
+            ("network disconnect after valid text", .init(body: prefix, disconnect: true), .unavailable),
+        ]
+        for (name, plan, expectedError) in cases {
+            let failing = try CloudFileRecognition(config: dashScope, lease: nil, session: FixtureHTTPProtocol.install(plan))
+            defer { failing.close() }
+            do {
+                _ = try await failing.transcribe([1])
+                try require(false, "accepted \(name)")
+            } catch let error as CloudSpeechError {
+                try require(error == expectedError, "wrong error for \(name): \(error.code)")
+            }
+        }
+
+        for revoke in [false, true] {
+            let lease = SpeechLease(seconds: 30)
+            let stalled = try CloudFileRecognition(config: dashScope, lease: lease,
+                                                  session: FixtureHTTPProtocol.install(.init(body: prefix, stall: true)))
+            let task = Task { try await stalled.transcribe([1]) }
+            try await wait("stream did not start") { FixtureHTTPProtocol.activity.delivered > 0 }
+            let cancellationStart = ContinuousClock.now
+            if revoke { lease.revoke() } else { task.cancel() }
+            do {
+                _ = try await task.value
+                try require(false, "cancelled stream committed temporary text")
+            } catch is CancellationError {
+                try require(!revoke, "revocation lost its authorization error")
+            } catch CloudSpeechError.authorizationEnded {
+                try require(revoke, "task cancellation became an authorization error")
+            }
+            try await wait("stream task was not cancelled") { FixtureHTTPProtocol.activity.stops > 0 }
+            try require(cancellationStart.duration(to: .now) < .seconds(1), "stream cancellation waited for the network timeout")
+            stalled.close()
+        }
+        print("Streaming failures passed: bounded events/JSON, malformed and truncated tails, HTTP/provider errors, disconnect, cancellation and lease revocation.")
     }
 
     private static func filePipeline() async throws {
@@ -553,15 +721,17 @@ struct CloudASRSmoke {
                     "a later successful chunk advanced past the failed middle chunk")
 
         var resumedEvents: [AudioEvent] = []
+        let resumedBody = try largeFileResponse(text: "恢复合成片段")
         let resumed = FileTranscription(cloudTransport: { request in
-            (Data("{\"output\":{\"text\":\"恢复合成片段\"}}".utf8),
+            (resumedBody,
              HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
         })
         resumed.onEvent = { resumedEvents.append($0) }
         try await resumed.run(url: audio, meetingID: "synthetic-meeting", epoch: "fixture-file", speech: config,
                               lease: SpeechLease(seconds: 30), startMS: 180000, revision: 2, initialSequence: 17)
         try require(resumedEvents.map(\.seq) == [18, 19, 20, 21] &&
-                    resumedEvents.filter { $0.type == "transcript.final" }.map { $0.audioStartMS ?? -1 } == [180000, 360000],
+                    resumedEvents.filter { $0.type == "transcript.final" }.map { $0.audioStartMS ?? -1 } == [180000, 360000] &&
+                    resumedEvents.filter { $0.type == "transcript.final" }.allSatisfy { $0.text == "恢复合成片段" },
                     "resume reused old event IDs or restarted from the beginning of the recording")
         let alreadyRecognized = FileTranscription(cloudTransport: { _ in
             throw NSError(domain: "UnexpectedUploadAtEOF", code: 1)
@@ -591,5 +761,21 @@ struct CloudASRSmoke {
         } catch is CancellationError { }
         try require(cancellationStart.duration(to: .now) < .seconds(1), "cancelling a file import waited for an entire network timeout")
         print("File pipeline recovery passed: middle failure preserves checkpoint, resume keeps sequence and audio offset, cancellation stops pending requests.")
+    }
+
+    private static func largeFileResponse(text: String) throws -> Data {
+        // Large sentence metadata and repeated cumulative text are legitimate.
+        // The entire stream exceeds 2 MiB; individual events stay small.
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "output": ["text": text, "sentence": String(repeating: "m", count: 65536)],
+        ])
+        var stream = Data()
+        for _ in 0..<36 {
+            stream.append(Data("data: ".utf8))
+            stream.append(payload)
+            stream.append(Data("\n\n".utf8))
+        }
+        stream.append(Data("data: [DONE]\n\n".utf8))
+        return stream
     }
 }
