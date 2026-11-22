@@ -1,6 +1,6 @@
 # 真实交互 0.1.0 · build 51
 
-历史记录。本版本由隐私整改后的 Vera build 52 取代，不再分发旧安装包。
+历史记录。本版本由隐私整改后的 Vera build 53 取代，不再分发旧安装包。
 
 发布验证日期：2026-11-22。适用 Apple Silicon，最低 macOS 26。
 
@@ -10,7 +10,7 @@
 
 私有仓库：https://github.com/crosswyb/ZSJH
 
-旧发布页与安装包在 Vera build 52 验证交付后下架。请使用 [build 52 发布记录](release-build52.md) 中的新版安装包。以下内容仅为历史验证记录。
+旧发布页与安装包在 Vera build 53 验证交付后下架。请使用 [build 53 发布记录](release-build53.md) 中的新版安装包。以下内容仅为历史验证记录。
 
 GitHub 仓库保持 Private，下载者需要相应仓库访问权限。Developer ID 签名和 Apple 公证不要求把项目源码公开。
 
