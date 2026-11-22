@@ -20,4 +20,13 @@ jobs:
       - name: Verify privacy gate regressions
         run: python -m unittest tests.test_release_privacy
       - name: Check tracked content and complete history
+        if: github.event_name == 'push'
         run: python tools/release_privacy.py --source-root . --git-ref HEAD
+      - name: Check merged files and both contributing histories
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python tools/release_privacy.py --source-root . --git-ref "$BASE_SHA"
+          python tools/release_privacy.py --source-root . --git-ref "$HEAD_SHA"
