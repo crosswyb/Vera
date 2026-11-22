@@ -68,6 +68,15 @@ class ReleasePrivacyTest(unittest.TestCase):
         self.assertNotIn("private-release-person", serialized)
         self.assertIn("Contents/MacOS/DesktopHost", serialized)
 
+    def test_hosted_runner_identity_does_not_disable_personal_path_or_dictionary_checks(self):
+        with patch.object(privacy.Path, "home", return_value=Path("/home") / "runner"):
+            audit = privacy._Audit(private_terms=("Synthetic Private Meeting",))
+        audit.scan_bytes(b"def background_runner(): pass", "live/jobs.py")
+        self.assertFalse(audit.findings)
+        audit.scan_bytes(self.private_path().encode(), "live/jobs.py")
+        audit.scan_bytes(b"Synthetic Private Meeting", "live/meeting.py")
+        self.assertTrue({"local_home_path", "private_term"} <= self.categories(audit.findings))
+
     def test_python_cache_and_raw_pyc_are_rejected_and_still_content_scanned(self):
         self.write("Contents/Resources/backend/__pycache__/private.pyc", self.private_path())
         self.write("Contents/Resources/copied.pyc", b"cached")

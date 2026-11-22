@@ -19,7 +19,7 @@
 /bin/zsh native/scripts/build-desktop.sh
 python3 native/scripts/sign-distribution.py \
   --app native/build/Vera.app \
-  --output-dir native/build/releases/build52 \
+  --output-dir native/build/releases/build53 \
   --identity '<Developer ID Application 身份或 SHA-1>' \
   --keychain '<签名钥匙串绝对路径>' \
   --notary-profile '<已验证的 notarytool profile>'
@@ -44,9 +44,9 @@ App ZIP 公证成功后装订 App，再制作含已装订 App 的 DMG/ZIP。DMG 
 
 ```sh
 .venv-live/bin/python native/scripts/publish-release.py \
-  --release-dir native/build/releases/build52 \
+  --release-dir native/build/releases/build53 \
   --repo '<owner/repository>' \
-  --notes-file docs/release-build52.md
+  --notes-file docs/release-build53.md
 ```
 
 源码检查也由 GitHub Actions 执行；新的个人邮箱提交或本机路径进入历史时会报错。已经发布的历史信息需要改写历史并撤下旧包，新增一个清理提交不足以完成清除。

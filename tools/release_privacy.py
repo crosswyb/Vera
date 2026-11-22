@@ -112,7 +112,11 @@ class _Audit:
         self.private_terms = private_terms
         self.findings: list[dict[str, str]] = []
         self._seen: set[tuple[str, str]] = set()
-        self.home_user = Path.home().name
+        # Hosted CI and root accounts are infrastructure identities. Matching
+        # every occurrence of "runner" would reject ordinary function names;
+        # explicit personal paths and the private dictionary are still scanned.
+        home_user = Path.home().name
+        self.home_user = "" if home_user in {"runner", "root"} else home_user
 
     def add(self, category: str, location: str) -> None:
         # Archive member names can themselves contain private values.
