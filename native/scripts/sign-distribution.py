@@ -78,6 +78,14 @@ def main():
         info = plistlib.load(stream)
     if info.get("CFBundleIdentifier") != "com.zsjh.workbench":
         parser.error("Expected the ZSJH desktop app bundle")
+    forbidden_names = {"credentials.json", "providers.json", "workbench.env"}
+    for path in source.rglob("*"):
+        if (
+            path.name == ".env" or path.name.startswith(".env.")
+            or path.name in forbidden_names
+            or path.suffix.lower() in {".sqlite3", ".sqlite", ".db", ".p12", ".p8", ".key"}
+        ):
+            parser.error("The app contains local state or signing credentials; nothing was uploaded")
     if output.exists() and any(output.iterdir()):
         parser.error("Choose an empty output directory; releases are never overwritten")
     output.mkdir(parents=True, exist_ok=True)
