@@ -324,6 +324,44 @@ assert.equal($('retry-coordinator').disabled, true);
                                 text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_completed_research_keeps_final_elapsed_time_visible(self):
+        script = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const start = source.indexOf('  function researchDuration(');
+const end = source.indexOf('  function renderResearchProgress(', start);
+const render = source.slice(start, end);
+const nodes = new Map();
+const $ = id => {
+  if (!nodes.has(id)) nodes.set(id, {hidden:false, textContent:''});
+  return nodes.get(id);
+};
+const text = (node, value) => node.textContent = value;
+const state = {serverOffset:0, snapshotReceivedAt:Date.now()};
+const question = {state:'running', progress:{started_at:Date.now()/1000-125}};
+const selectedQuestion = () => question;
+eval(render + '; globalThis.renderClock = renderResearchClock;');
+renderClock();
+assert.match($('research-elapsed').textContent, /^已用时 2 分 5 秒$/);
+question.state = 'completed';
+question.progress.finished_at = question.progress.started_at + 125;
+question.updated_at = question.progress.finished_at + 3600;
+renderClock();
+assert.equal($('research-elapsed').textContent, '总用时 2 分 5 秒');
+const realNow = Date.now;
+Date.now = () => realNow() + 60000;
+renderClock();
+Date.now = realNow;
+assert.equal($('research-elapsed').textContent, '总用时 2 分 5 秒');
+delete question.progress.finished_at;
+renderClock();
+assert.equal($('research-elapsed').textContent, '');
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')],
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

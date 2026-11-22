@@ -418,6 +418,11 @@ class WorkbenchTest(unittest.TestCase):
             self.assertTrue(self.wb.artifact(self.owner, snapshot["documents"][0]["id"])["document"]["on_disk"])
         finally:
             runtime.close()
+            # Production shutdown is bounded; the fixture must wait for local
+            # background file writers before removing its temporary directory.
+            for pool in (runtime.research_pool, runtime.coordinator_pool, runtime.background_coordinator_pool,
+                         runtime.detection_recovery_pool, runtime.summary_pool, runtime.audio_pool):
+                pool.shutdown(wait=True, cancel_futures=True)
 
     def decision(self, work, kind, q=None, title="工作流如何定义"):
         s = work["segments"][-1]

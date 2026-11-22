@@ -183,6 +183,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "真实交互"
+        window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 980, height: 680)
         let root = NSView()
         window.contentView = root
@@ -1184,6 +1185,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             var epoch = UUID().uuidString
             var startMS = 0
             var revision = 1
+            var initialSequence = 0
             do {
                 guard try await selectedMeeting() == meeting else { throw DesktopError(message: "会议已切换，请重新导入。") }
                 try await validateCaptureMeeting(meeting, inputKind: "audio_file")
@@ -1222,6 +1224,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                       let relative = job["original_path"] as? String else { throw DesktopError(message: "音频归档位置不可用。") }
                 if let resumeFrom = job["resume_from_ms"] as? Int { startMS = max(0, resumeFrom) }
                 if let resumeCount = job["resume_count"] as? Int { revision = max(1, resumeCount + 1) }
+                if let lastSequence = job["last_event_seq"] as? Int { initialSequence = max(0, lastSequence) }
                 let destination = try meetingFileURL(relative, meeting: registeredMeeting)
                 activeInput = "audio_file"; captureProblem = nil
                 captureFinish = nil; captureFinishMeetingId = meeting
@@ -1262,7 +1265,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                     fileLease = lease
                     renewSpeechLease(meeting: meeting, epoch: epoch, kind: "file", sources: [.file])
                     try await worker.run(url: destination, meetingID: meeting, epoch: epoch, speech: config,
-                                        lease: lease, startMS: startMS, revision: revision)
+                                        lease: lease, startMS: startMS, revision: revision, initialSequence: initialSequence)
                 }
                 try Task.checkCancellation()
                 captureState = "stopping"; status = "正在保存完整转写…"
@@ -1677,7 +1680,13 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         if !pageLoaded { showStartupFailure(message) }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        window?.makeKeyAndOrderFront(nil)
+        sender.activate(ignoringOtherApps: true)
+        return true
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard activeMeeting != nil || beginningCapture else { return .terminateNow }

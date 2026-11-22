@@ -119,6 +119,10 @@ class SpeechSessionTest(unittest.TestCase):
             type='audio.recording', source='file', occurred_at=self.now, state='saved',
             audio_end_ms=120000, frames_received=1920000))
         self.wb.audio(agent, mid, AudioEvent(
+            meeting_id=mid, capture_epoch='resume-file', stream_id='file-resume-file', seq=1,
+            type='transcript.final', source='file', occurred_at=self.now, segment_id='chunk-0-0',
+            revision=1, text='已确认的合成转写。', audio_start_ms=0, audio_end_ms=60000))
+        self.wb.audio(agent, mid, AudioEvent(
             meeting_id=mid, capture_epoch='resume-file', stream_id='file-resume-file', seq=2,
             type='import.progress', source='file', occurred_at=self.now, audio_end_ms=60000))
         self.wb.finish_import(agent, mid, AudioImportFinish(import_id='resume-file', state='failed', error='网络中断'))
@@ -148,6 +152,41 @@ class SpeechSessionTest(unittest.TestCase):
         self.assertNotIn('failed_at_ms', completed['audio_import'])
         self.assertNotIn('resume_from_ms', completed['audio_import'])
 
+    def test_resumed_native_sequence_continues_after_last_acknowledged_event(self):
+        mid, agent, _ = self._failed_file_import()
+        # Old imports have persisted transcript events but no sequence checkpoint.
+        with self.wb.store.transaction() as db:
+            meeting = self.wb.store._get(db, 'wb_meeting', mid)
+            meeting['audio_import'].pop('last_event_seq', None)
+            self.wb.store._put(db, 'wb_meeting', mid, meeting)
+        job = self.wb.resume_import(agent, mid, AudioImportResume(import_id='resume-file'))['audio_import']
+        sequence = job.get('last_event_seq', 0) + 1
+        self.wb.audio(agent, mid, AudioEvent(
+            meeting_id=mid, capture_epoch='resume-file', stream_id='file-resume-file', seq=sequence,
+            type='transcript.final', source='file', occurred_at=self.now, segment_id='chunk-60000-0',
+            revision=2, text='继续识别的合成转写。', audio_start_ms=60000, audio_end_ms=120000))
+        self.assertEqual(self.wb.transcript(self.owner, mid)['segment_count'], 2)
+
+    def test_resume_preserves_partial_transcript_and_saves_complete_version(self):
+        mid, agent, _ = self._failed_file_import()
+        first = self.wb.snapshot(self.owner, mid)['meeting']['audio_import']['transcript_path']
+        writer = self.wb.writer_for(self.wb.snapshot(self.owner, mid)['meeting'])
+        partial = writer.path(first).read_bytes()
+        self.wb.resume_import(agent, mid, AudioImportResume(import_id='resume-file'))
+        self.wb.audio(agent, mid, AudioEvent(
+            meeting_id=mid, capture_epoch='resume-file', stream_id='file-resume-file', seq=3,
+            type='transcript.final', source='file', occurred_at=self.now, segment_id='chunk-60000-0',
+            revision=2, text='恢复后的合成转写。', audio_start_ms=60000, audio_end_ms=120000))
+        self.wb.audio(agent, mid, AudioEvent(
+            meeting_id=mid, capture_epoch='resume-file', stream_id='file-resume-file', seq=4,
+            type='import.progress', source='file', occurred_at=self.now, audio_end_ms=120000))
+        result = self.wb.finish_import(agent, mid, AudioImportFinish(import_id='resume-file', state='completed'))
+        job = result['audio_import']
+        self.assertEqual(job['transcript_state'], 'saved')
+        self.assertNotEqual(job['transcript_path'], first)
+        self.assertEqual(writer.path(first).read_bytes(), partial)
+        self.assertIn('恢复后的合成转写', writer.path(job['transcript_path']).read_text())
+
     def test_file_import_resume_rejects_local_provider_and_missing_original(self):
         meeting = self.wb.create(self.owner, NewMeeting(title='本机文件', input_kind='audio_file'))
         mid = meeting['id']
@@ -157,6 +196,18 @@ class SpeechSessionTest(unittest.TestCase):
         self.wb.begin_import(agent, mid, job)
         with self.assertRaises(Exception):
             self.wb.resume_import(agent, mid, AudioImportResume(import_id='local-file'))
+
+    def test_resume_can_finalize_an_import_already_acknowledged_through_eof(self):
+        mid, agent, _ = self._failed_file_import()
+        self.wb.resume_import(agent, mid, AudioImportResume(import_id='resume-file'))
+        self.wb.audio(agent, mid, AudioEvent(
+            meeting_id=mid, capture_epoch='resume-file', stream_id='file-resume-file', seq=3,
+            type='import.progress', source='file', occurred_at=self.now, audio_end_ms=120000))
+        self.wb.finish_import(agent, mid, AudioImportFinish(import_id='resume-file', state='failed', error='收尾请求中断'))
+        job = self.wb.resume_import(agent, mid, AudioImportResume(import_id='resume-file'))['audio_import']
+        self.assertEqual(job['resume_from_ms'], 120000)
+        completed = self.wb.finish_import(agent, mid, AudioImportFinish(import_id='resume-file', state='completed'))
+        self.assertEqual(completed['audio_import']['transcript_state'], 'saved')
 
     def test_scope_checks_native_token_provider_destination_and_sources(self):
         self.assertEqual(self.authorize(provider='deepseek').status_code, 400)

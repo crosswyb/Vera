@@ -101,6 +101,7 @@ struct CloudASRSmoke {
         try await backlogPauseContinuesRecording()
         try await bothSourcesStopConcurrently()
         try await fileRequests()
+        try await filePipeline()
         print("Cloud ASR fixtures passed: protocol and revisions, missing tail, durable seal retry, bounded reconnects and cancellation, two recordings, file formats and chunk continuity.")
     }
 
@@ -492,5 +493,103 @@ struct CloudASRSmoke {
         if let last = chunker.finish() { chunks.append(last) }
         try require(chunks.map(\.count) == [29, 60, 5] && chunks.flatMap { $0 } == original && chunker.sentFrames == original.count,
                     "pause chunking dropped or duplicated PCM")
+    }
+
+    private static func filePipeline() async throws {
+        let directory = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let audio = directory.appendingPathComponent("synthetic.wav")
+        try SpeechPCM.wav(Array(repeating: Int16(600), count: 420 * SpeechPCM.rate)).write(to: audio)
+        let config = try config("dashscope", "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")
+        var active = 0
+        var maximumActive = 0
+        var requests = 0
+        var ends: [Int] = []
+        var texts: [String] = []
+        let worker = FileTranscription(cloudTransport: { request in
+            requests += 1
+            let index = requests
+            active += 1
+            maximumActive = max(maximumActive, active)
+            defer { active -= 1 }
+            // Force later requests to finish first. Publication must still
+            // follow audio order and advance only the contiguous checkpoint.
+            try await Task.sleep(for: .milliseconds(index == 1 ? 300 : index == 2 ? 150 : 50))
+            return (Data("{\"output\":{\"text\":\"合成片段\(index)\"}}".utf8),
+                    HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        })
+        worker.onEvent = { event in
+            if event.type == "transcript.final" { texts.append(event.text ?? "") }
+            if event.type == "import.progress" { ends.append(event.audioEndMS ?? -1) }
+        }
+        let started = ContinuousClock.now
+        try await worker.run(url: audio, meetingID: "synthetic-meeting", epoch: "fixture-file", speech: config,
+                             lease: SpeechLease(seconds: 30))
+        print("File pipeline: 420 seconds synthetic audio, \(requests) requests, maximum concurrency \(maximumActive), elapsed \(started.duration(to: .now))")
+        try require(requests == 3 && maximumActive == 3, "DashScope file imports still use short serial requests")
+        try require(texts == ["合成片段1", "合成片段2", "合成片段3"] && ends == [180000, 360000, 420000],
+                    "out-of-order ASR completion reordered text or skipped a checkpoint")
+
+        var failureRequests = 0
+        var failureEnds: [Int] = []
+        var failureTexts: [String] = []
+        let failing = FileTranscription(cloudTransport: { request in
+            failureRequests += 1
+            let index = failureRequests
+            try await Task.sleep(for: .milliseconds(index == 2 ? 80 : 10))
+            return (Data("{\"output\":{\"text\":\"合成片段\(index)\"}}".utf8),
+                    HTTPURLResponse(url: request.url!, statusCode: index == 2 ? 503 : 200, httpVersion: nil, headerFields: nil)!)
+        })
+        failing.onEvent = { event in
+            if event.type == "import.progress" { failureEnds.append(event.audioEndMS ?? -1) }
+            if event.type == "transcript.final" { failureTexts.append(event.text ?? "") }
+        }
+        do {
+            try await failing.run(url: audio, meetingID: "synthetic-meeting", epoch: "fixture-file", speech: config,
+                                  lease: SpeechLease(seconds: 30))
+            try require(false, "failed middle chunk was marked as completed")
+        } catch CloudSpeechError.unavailable { }
+        try require(failureRequests == 3 && failureEnds == [180000] && failureTexts == ["合成片段1"],
+                    "a later successful chunk advanced past the failed middle chunk")
+
+        var resumedEvents: [AudioEvent] = []
+        let resumed = FileTranscription(cloudTransport: { request in
+            (Data("{\"output\":{\"text\":\"恢复合成片段\"}}".utf8),
+             HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        })
+        resumed.onEvent = { resumedEvents.append($0) }
+        try await resumed.run(url: audio, meetingID: "synthetic-meeting", epoch: "fixture-file", speech: config,
+                              lease: SpeechLease(seconds: 30), startMS: 180000, revision: 2, initialSequence: 17)
+        try require(resumedEvents.map(\.seq) == [18, 19, 20, 21] &&
+                    resumedEvents.filter { $0.type == "transcript.final" }.map { $0.audioStartMS ?? -1 } == [180000, 360000],
+                    "resume reused old event IDs or restarted from the beginning of the recording")
+        let alreadyRecognized = FileTranscription(cloudTransport: { _ in
+            throw NSError(domain: "UnexpectedUploadAtEOF", code: 1)
+        })
+        var eofEvents = 0
+        alreadyRecognized.onEvent = { _ in eofEvents += 1 }
+        try await alreadyRecognized.run(url: audio, meetingID: "synthetic-meeting", epoch: "fixture-file", speech: config,
+                                        lease: SpeechLease(seconds: 30), startMS: 420000, revision: 3, initialSequence: 21)
+        try require(eofEvents == 0, "finalizing an EOF checkpoint uploaded or published recognized audio again")
+
+        var cancelledRequests = 0
+        let cancellation = FileTranscription(cloudTransport: { request in
+            cancelledRequests += 1
+            try await Task.sleep(for: .seconds(30))
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        })
+        let cancelledRun = Task { @MainActor in
+            try await cancellation.run(url: audio, meetingID: "synthetic-meeting", epoch: "fixture-file", speech: config,
+                                       lease: SpeechLease(seconds: 30))
+        }
+        try await wait("parallel requests did not start", until: { cancelledRequests == 3 })
+        let cancellationStart = ContinuousClock.now
+        cancelledRun.cancel()
+        do {
+            try await cancelledRun.value
+            try require(false, "cancelled file import completed")
+        } catch is CancellationError { }
+        try require(cancellationStart.duration(to: .now) < .seconds(1), "cancelling a file import waited for an entire network timeout")
+        print("File pipeline recovery passed: middle failure preserves checkpoint, resume keeps sequence and audio offset, cancellation stops pending requests.")
     }
 }

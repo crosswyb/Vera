@@ -365,8 +365,15 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
             duration = int(job.get("duration_ms") or recording.get("duration_ms") or 0)
             require(duration > 0, "音频时长记录无效，无法恢复", 409)
             start_ms = int(job.get("failed_at_ms") or job.get("processed_ms") or 0)
-            require(0 <= start_ms < duration, "没有可继续的音频片段", 409)
+            require(0 <= start_ms <= duration, "音频断点超出范围", 409)
+            # Older clients restarted this stream at seq=1, colliding with
+            # durable transcript events. Also recover their sequence watermark.
+            saved_seq = db.execute("""SELECT MAX(CAST(json_extract(data,'$.payload.seq') AS INTEGER))
+                FROM events WHERE meeting=? AND json_extract(data,'$.payload.capture_epoch')=?
+                AND json_extract(data,'$.payload.stream_id')=?""",
+                (mid, value.import_id, "file-" + value.import_id)).fetchone()[0] or 0
             job.update(state="processing", processed_ms=start_ms, resume_from_ms=start_ms,
+                       last_event_seq=max(int(job.get("last_event_seq") or 0), saved_seq),
                        resume_count=int(job.get("resume_count") or 0) + 1,
                        started_at=time.time(), error="", last_error="", lease_until=0, **speech)
             m["capture"] = {"status": "importing", "source": "file", "updated_at": time.time()}
@@ -383,6 +390,7 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
             if value.state == "completed" and job.get("provider") in {"dashscope", "deepseek"}:
                 require(job["processed_ms"] >= job["duration_ms"], "仍有音频片段未确认，不能完成导入", 409)
             job.update(state=value.state, error=value.error, finished_at=time.time())
+            attempt = int(job.get("resume_count") or 0)
             if value.state != "completed":
                 job["failed_at_ms"] = job["processed_ms"]
                 job["last_error"] = value.error
@@ -402,10 +410,15 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
             self._event(db, m, "import." + value.state, {})
             self._save(db, m)
         transcript = self.transcript(principal, mid)
-        path = m["directory"] + "/transcript-" + value.import_id + ".md"
+        suffix = f"-r{attempt}" if attempt else ""
+        path = m["directory"] + "/transcript-" + value.import_id + suffix + ".md"
         with self.store.transaction() as db:
             # File publication shares the meeting deletion transaction fence.
             m = self._meeting(db, principal, mid, True)
+            job = m.get("audio_import", {})
+            if (job.get("import_id") != value.import_id or int(job.get("resume_count") or 0) != attempt
+                    or job.get("state") != value.state):
+                return m
             try:
                 self.writer_for(m).write(path, transcript["content"])
                 save_state = "saved"
@@ -483,6 +496,8 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                 job = m.get("audio_import", {})
                 require(m.get("input_kind") == "audio_file" and job.get("import_id") == value.capture_epoch
                         and job.get("state") == "processing", "不是当前音频导入任务", 409)
+                if value.stream_id == "file-" + value.capture_epoch:
+                    job["last_event_seq"] = max(int(job.get("last_event_seq") or 0), value.seq)
                 if value.type.startswith("transcript."):
                     require(value.audio_end_ms <= job["duration_ms"], "转写时间超出音频范围", 400)
             elif not manual:

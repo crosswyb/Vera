@@ -53,7 +53,12 @@ public final class FileTranscription {
     private var cloud: CloudFileRecognition?
     private var running = false
     private var cancelled = false
+    private var cloudTransport: CloudFileRecognition.Transport?
     public init() {}
+
+    init(cloudTransport: @escaping CloudFileRecognition.Transport) {
+        self.cloudTransport = cloudTransport
+    }
 
     public func cancel() async {
         cancelled = true
@@ -63,15 +68,21 @@ public final class FileTranscription {
 
     public func run(url: URL, meetingID: String, epoch: String,
                     speech: SpeechSessionConfig? = nil, lease: SpeechLease? = nil,
-                    startMS: Int = 0, revision: Int = 1) async throws {
+                    startMS: Int = 0, revision: Int = 1, initialSequence: Int = 0) async throws {
         guard !running else { throw AudioCoreError.alreadyRunning }
         running = true
-        defer { running = false }
+        let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                            reason: "正在转写导入音频")
+        defer {
+            ProcessInfo.processInfo.endActivity(activity)
+            running = false
+        }
         let info = try await AudioFileInfo.inspect(url)
         if let speech, speech.provider != "apple_local" {
             guard let lease else { throw CloudSpeechError.authorizationEnded }
             try await runCloud(url: url, info: info, meetingID: meetingID, epoch: epoch,
-                               config: speech, lease: lease, startMS: startMS, revision: revision)
+                               config: speech, lease: lease, startMS: startMS, revision: revision,
+                               initialSequence: initialSequence)
             return
         }
         let status = await LocalSpeechModels.status(locale: "zh-CN")
@@ -153,17 +164,22 @@ public final class FileTranscription {
     }
 
     private func runCloud(url: URL, info: AudioFileInfo, meetingID: String, epoch: String,
-                          config: SpeechSessionConfig, lease: SpeechLease, startMS: Int, revision: Int) async throws {
+                          config: SpeechSessionConfig, lease: SpeechLease, startMS: Int, revision: Int,
+                          initialSequence: Int) async throws {
         try Task.checkCancellation()
         guard !cancelled else { throw CancellationError() }
-        let worker = try CloudFileRecognition(config: config, lease: lease)
+        let worker = try CloudFileRecognition(config: config, lease: lease, transport: cloudTransport)
         cloud = worker
         defer { worker.close(); cloud = nil }
         let decoder = try await FileAudioDecoder.open(AVURLAsset(url: url))
         defer { decoder.cancel() }
         let pcm = SpeechPCM()
-        var chunker = CloudAudioChunker()
-        var sequence = 0
+        let parallelRequests = config.provider == "dashscope" ? 3 : 1
+        var chunker = CloudAudioChunker(minimumSeconds: config.provider == "dashscope" ? 120 : 20,
+                                       maximumSeconds: config.provider == "dashscope" ? 180 : 60)
+        var sequence = max(0, initialSequence)
+        var pending: [(task: Task<String, Error>, frames: Int, endFrame: Int, last: Bool)] = []
+        defer { for chunk in pending { chunk.task.cancel() } }
         let requestedStartMS = max(0, min(startMS, info.durationMS))
         let startFrame = Int((Double(requestedStartMS) * Double(SpeechPCM.rate) / 1000).rounded())
         var remainingPrefixFrames = startFrame
@@ -181,16 +197,19 @@ public final class FileTranscription {
             try await onEvent?(progress)
             publishedMS = offset
         }
-        func submit(_ samples: [Int16], through endFrame: Int, last: Bool = false) async throws {
+        func publishFirst() async throws {
+            guard let chunk = pending.first else { return }
+            let text = try await withTaskCancellationHandler {
+                try await chunk.task.value
+            } onCancel: {
+                chunk.task.cancel()
+            }
             try Task.checkCancellation()
             try lease.check()
             guard !cancelled else { throw CancellationError() }
-            guard Self.milliseconds(endFrame) <= info.durationMS + 250 else { throw CloudSpeechError.invalidAudio }
-            // Do not upload chunks of digital silence.
-            let text = samples.allSatisfy { $0 == 0 } ? "" : try await worker.transcribe(samples)
-            let absoluteEndFrame = startFrame + endFrame
-            let start = min(info.durationMS, Self.milliseconds(absoluteEndFrame - samples.count))
-            let end = last ? info.durationMS : min(info.durationMS, Self.milliseconds(absoluteEndFrame))
+            let absoluteEndFrame = startFrame + chunk.endFrame
+            let start = min(info.durationMS, Self.milliseconds(absoluteEndFrame - chunk.frames))
+            let end = chunk.last ? info.durationMS : min(info.durationMS, Self.milliseconds(absoluteEndFrame))
             let chunkStartMS = start
             for index in stride(from: 0, to: text.unicodeScalars.count, by: 4500) {
                 try Task.checkCancellation()
@@ -206,6 +225,21 @@ public final class FileTranscription {
             }
             try lease.check()
             if end < info.durationMS { try await publishProgress(end) }
+            pending.removeFirst()
+        }
+        func submit(_ samples: [Int16], through endFrame: Int, last: Bool = false) async throws {
+            try Task.checkCancellation()
+            try lease.check()
+            guard !cancelled else { throw CancellationError() }
+            guard Self.milliseconds(startFrame + endFrame) <= info.durationMS + 250 else { throw CloudSpeechError.invalidAudio }
+            let task = Task { @MainActor in
+                // No audio upload is needed for chunks of digital silence.
+                samples.allSatisfy { $0 == 0 } ? "" : try await worker.transcribe(samples)
+            }
+            pending.append((task, samples.count, endFrame, last))
+            // Bound requests AND completed-but-unpublished chunks. Waiting for
+            // the oldest acknowledgement preserves a contiguous resume point.
+            if pending.count >= parallelRequests { try await publishFirst() }
         }
         func feed(_ samples: [Int16]) async throws {
             var input = samples
@@ -224,27 +258,32 @@ public final class FileTranscription {
                 }
             }
         }
-        while let buffer = try decoder.nextBuffer() {
+        try await withTaskCancellationHandler {
+            while let buffer = try decoder.nextBuffer() {
+                try Task.checkCancellation()
+                try lease.check()
+                guard !cancelled else { throw CancellationError() }
+                try await feed(pcm.samples(buffer))
+                await Task.yield()
+            }
+            try await feed(pcm.drain())
+            guard remainingPrefixFrames == 0 else { throw CloudSpeechError.invalidAudio }
+            let lastChunk = chunker.finish()
+            let decodedMS = Self.milliseconds(startFrame + chunker.sentFrames)
+            // The resampler may round a few frames. Larger metadata/decoded duration
+            // differences must not turn missing audio into an acknowledged interval.
+            guard decodedMS > 0, abs(info.durationMS - decodedMS) <= 250 else {
+                throw CloudSpeechError.invalidAudio
+            }
+            if let lastChunk { try await submit(lastChunk, through: chunker.sentFrames, last: true) }
+            while !pending.isEmpty { try await publishFirst() }
             try Task.checkCancellation()
             try lease.check()
             guard !cancelled else { throw CancellationError() }
-            try await feed(pcm.samples(buffer))
-            await Task.yield()
+            if publishedMS < info.durationMS { try await publishProgress(info.durationMS) }
+        } onCancel: {
+            Task { @MainActor in worker.cancel() }
         }
-        try await feed(pcm.drain())
-        guard remainingPrefixFrames == 0 else { throw CloudSpeechError.invalidAudio }
-        let lastChunk = chunker.finish()
-        let decodedMS = Self.milliseconds(startFrame + chunker.sentFrames)
-        // The resampler may round a few frames. Larger metadata/decoded duration
-        // differences must not turn missing audio into an acknowledged interval.
-        guard decodedMS > 0, abs(info.durationMS - decodedMS) <= 250 else {
-            throw CloudSpeechError.invalidAudio
-        }
-        if let lastChunk { try await submit(lastChunk, through: chunker.sentFrames, last: true) }
-        try Task.checkCancellation()
-        try lease.check()
-        guard !cancelled else { throw CancellationError() }
-        if publishedMS < info.durationMS { try await publishProgress(info.durationMS) }
     }
 
     private static func milliseconds(_ frames: Int) -> Int {

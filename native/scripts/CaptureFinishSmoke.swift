@@ -5,6 +5,29 @@ extension DesktopController {
         func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
             if try condition() == false { throw DesktopError(message: message) }
         }
+        let lifecycle = DesktopController()
+        try require(!lifecycle.applicationShouldTerminateAfterLastWindowClosed(NSApp),
+                    "closing the last window terminates background transcription and research")
+        lifecycle.window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 80, height: 80),
+                                    styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        lifecycle.window.isReleasedWhenClosed = false
+        lifecycle.activeMeeting = "synthetic-background-import"
+        lifecycle.captureState = "importing"
+        var backgroundTicks = 0
+        lifecycle.fileTask = Task { @MainActor in
+            while !Task.isCancelled {
+                backgroundTicks += 1
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        lifecycle.window.close()
+        try await Task.sleep(for: .milliseconds(40))
+        try require(backgroundTicks > 0 && lifecycle.fileTask?.isCancelled == false && !lifecycle.quitting,
+                    "closing the window cancelled the active import")
+        try require(lifecycle.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false) && lifecycle.window.isVisible,
+                    "Dock reopen did not restore the retained window")
+        lifecycle.fileTask?.cancel()
+        lifecycle.window.close()
         let core = AudioCore()
         var stopAcknowledgements = 0
         core.onEvent = { event in

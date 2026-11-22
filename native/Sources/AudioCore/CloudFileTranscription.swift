@@ -132,7 +132,10 @@ struct CloudFileRequest {
     }
 
     static func build(config: SpeechSessionConfig, pcm: [Int16]) throws -> URLRequest {
-        guard !pcm.isEmpty, pcm.count <= 120 * SpeechPCM.rate else { throw CloudSpeechError.invalidAudio }
+        // DashScope Flash permits five minutes. Keep inline WAV/base64 below
+        // the stricter 10 MB input limit, including older qwen3-asr variants.
+        let maximumSeconds = config.provider == "dashscope" ? 180 : 120
+        guard !pcm.isEmpty, pcm.count <= maximumSeconds * SpeechPCM.rate else { throw CloudSpeechError.invalidAudio }
         let wav = SpeechPCM.wav(pcm)
         var request = try config.request(kind: "file")
         request.httpMethod = "POST"
@@ -151,11 +154,13 @@ struct CloudFileRequest {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("enable", forHTTPHeaderField: "X-DashScope-SSE")
             let content = ["type": "input_audio", "input_audio": ["data": "data:audio/wav;base64," + wav.base64EncodedString()]] as [String: Any]
-            request.httpBody = try JSONSerialization.data(withJSONObject: [
+            let body = try JSONSerialization.data(withJSONObject: [
                 "model": config.model,
                 "input": ["messages": [["role": "user", "content": [content]]]],
                 "parameters": ["format": "wav", "sample_rate": "16000"],
             ])
+            guard body.count <= 10_000_000 else { throw CloudSpeechError.invalidAudio }
+            request.httpBody = body
         }
         return request
     }

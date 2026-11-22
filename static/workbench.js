@@ -1750,12 +1750,12 @@
   function renderResearchClock() {
     const question = selectedQuestion();
     const progress = question?.progress;
-    if (!question || $('research-progress').hidden) return;
+    if (!question || $('research-progress').hidden) { text($('research-elapsed'), ''); return; }
     const running = question.state === 'running';
     const now = (Date.now() - state.serverOffset) / 1000;
     const started = progress?.started_at || question.started_at;
-    const end = running ? now : progress?.finished_at || question.updated_at;
-    text($('research-elapsed'), started ? `${running ? '已用时' : '用时'} ${researchDuration(end - started)}` : '');
+    const end = running ? now : progress?.finished_at;
+    text($('research-elapsed'), started && end ? `${running ? '已用时' : '总用时'} ${researchDuration(end - started)}` : '');
     const model = progress?.model || {};
     const since = model.last_response_at || model.request_started_at || progress?.stage_started_at || started || now;
     const quiet = Math.max(0, now - since);
@@ -1895,6 +1895,9 @@
     const hasAnswer = ['completed', 'insufficient'].includes(question.state) && Boolean(result.brief?.short_answer || result.answer);
     const page = document.querySelector('.reading-page');
     page.dataset.hasAnswer = String(hasAnswer);
+    const elapsed = $('research-elapsed');
+    if (hasAnswer) document.querySelector('.detail-badges').insertBefore(elapsed, $('view-original'));
+    else document.querySelector('.research-status').append(elapsed);
     const answerAnchor = hasAnswer ? document.querySelector('.question-detail-heading') : $('research-progress');
     if (answerAnchor.nextElementSibling !== $('answer-panel')) answerAnchor.after($('answer-panel'));
     $('view-original').hidden = !hasAnswer || !(sourceItems.length || safeURL(result.original_evidence?.url));
