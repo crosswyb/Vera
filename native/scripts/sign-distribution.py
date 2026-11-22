@@ -9,9 +9,11 @@ application. Credentials and release binaries stay outside the source tree.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 import tempfile
 
 
@@ -66,7 +68,7 @@ def notarize(artifact, label, arguments, output):
 def main():
     native = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", type=Path, default=native / "build/ZSJHWorkbench.app")
+    parser.add_argument("--app", type=Path, default=native / "build/Vera.app")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--identity", required=True, help="Developer ID Application identity or SHA-1")
     parser.add_argument("--keychain", type=Path)
@@ -77,18 +79,31 @@ def main():
     with (source / "Contents/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
     if info.get("CFBundleIdentifier") != "com.zsjh.workbench":
-        parser.error("Expected the ZSJH desktop app bundle")
-    forbidden_names = {"credentials.json", "providers.json", "workbench.env"}
-    for path in source.rglob("*"):
-        if (
-            path.name == ".env" or path.name.startswith(".env.")
-            or path.name in forbidden_names
-            or path.suffix.lower() in {".sqlite3", ".sqlite", ".db", ".p12", ".p8", ".key"}
-        ):
-            parser.error("The app contains local state or signing credentials; nothing was uploaded")
+        parser.error("Expected the Vera desktop app bundle")
+    if info.get("CFBundleName") != "Vera":
+        parser.error("The app must use the Vera product name")
     if output.exists() and any(output.iterdir()):
         parser.error("Choose an empty output directory; releases are never overwritten")
     output.mkdir(parents=True, exist_ok=True)
+    project = native.parent
+    build_python = Path(os.environ.get("ZSJH_BUILD_PYTHON", project / ".venv-live/bin/python"))
+    if not build_python.is_file():
+        build_python = Path(sys.executable)
+    privacy_command = [build_python, project / "tools/release_privacy.py"]
+    run([
+        *privacy_command, "--source-root", project, "--git-ref", "HEAD", "--app", source,
+        "--output", output / "privacy-before-signing.json",
+    ])
+    revision = subprocess.run(
+        ["git", "-C", str(project), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "-C", str(project), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if dirty or info.get("ZSJHSourceRevision") != revision:
+        parser.error("Commit the source and rebuild the app before signing")
     identity_args = ["security", "find-identity", "-v", "-p", "codesigning"]
     if arguments.keychain:
         identity_args.append(str(arguments.keychain))
@@ -98,7 +113,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="signing-", suffix=".noindex", dir=output) as temporary:
         stage = Path(temporary)
-        app = stage / "真实交互.app"
+        app = stage / "Vera.app"
         run(["ditto", source, app])
         signing = ["codesign", "--force", "--sign", arguments.identity, "--options", "runtime", "--timestamp"]
         if arguments.keychain:
@@ -120,6 +135,7 @@ def main():
             run([*signing, "--entitlements", native / "Signing.entitlements", helper])
         run([*signing, "--entitlements", native / "Signing.entitlements", app])
         run(["codesign", "--verify", "--deep", "--strict", app])
+        run([*privacy_command, "--app", app, "--output", output / "privacy-signed-app.json"])
 
         submission_zip = stage / "application-for-notarization.zip"
         run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, submission_zip])
@@ -129,7 +145,7 @@ def main():
         run(["spctl", "--assess", "--type", "execute", "--verbose=2", app])
 
         run(["/bin/zsh", native / "scripts/package-distribution.sh", app, output])
-        name = f"ZSJHWorkbench-{info['CFBundleShortVersionString']}-build{info['CFBundleVersion']}-apple-silicon"
+        name = f"Vera-{info['CFBundleShortVersionString']}-build{info['CFBundleVersion']}-apple-silicon"
         dmg = output / f"{name}.dmg"
         disk_signing = ["codesign", "--force", "--sign", arguments.identity, "--timestamp"]
         if arguments.keychain:
@@ -140,6 +156,11 @@ def main():
         run(["xcrun", "stapler", "validate", dmg])
         run(["spctl", "--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=2", dmg])
         run(["hdiutil", "verify", "-quiet", dmg])
+        for suffix in ("dmg", "zip"):
+            run([
+                *privacy_command, "--archive", output / f"{name}.{suffix}",
+                "--output", output / f"privacy-final-{suffix}.json",
+            ])
         checksums = []
         for suffix in ("dmg", "zip"):
             artifact = output / f"{name}.{suffix}"
@@ -148,6 +169,7 @@ def main():
             checksums.append(f"{digest}  {artifact.name}")
         (output / f"{name}.SHA256SUMS.txt").write_text("\n".join(checksums) + "\n")
         receipt = {
+            "product": "Vera",
             "version": info["CFBundleShortVersionString"],
             "build": info["CFBundleVersion"],
             "source_revision": info.get("ZSJHSourceRevision"),
@@ -158,6 +180,7 @@ def main():
             "dmg_stapled": True,
             "gatekeeper_app": "accepted",
             "gatekeeper_dmg": "accepted",
+            "privacy_gate": "passed",
         }
         (output / "release-verification.json").write_text(
             json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"

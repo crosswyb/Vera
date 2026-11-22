@@ -1,5 +1,7 @@
 # 真实交互 0.1.0 · build 51
 
+历史记录。本版本由隐私整改后的 Vera build 52 取代，不再分发旧安装包。
+
 发布验证日期：2026-11-22。适用 Apple Silicon，最低 macOS 26。
 
 本版整理并提交了 build 25 之后的应用改动，包括云端语音设置、问题识别与恢复、查证回答呈现、会内搜索和双布局。它是本项目首次完成 Developer ID Application 签名、Apple 公证与票据装订的正式分发包。
@@ -16,7 +18,7 @@ GitHub 仓库保持 Private，下载者需要相应仓库访问权限。Develope
 
 ## 正式签名与公证结果
 
-签名身份：`Developer ID Application: Developer ID Holder (DGXVX49662)`。
+签名类型：Developer ID Application。证书身份属于签名中的公开元数据，不在发布文档中重复列出。
 
 App 运行代码构建自提交 `8ef93cc672946c91208ab045f59b02cf0a20fb64`，已写入包内 `ZSJHSourceRevision`。后续发布提交仅完善发布前的私有文件拦截和此记录，未更改应用运行代码。
 

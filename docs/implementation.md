@@ -40,10 +40,10 @@ DesktopHost（macOS App）启动随包提供的 Python 后端与 AudioHelper。A
 
 ```sh
 .venv-live/bin/python tools/verify_meeting_workbench.py --native
-.venv-live/bin/python native/scripts/probe_desktop_backend.py --backend native/build/ZSJHWorkbench.app/Contents/Resources/backend/zsjh-workbench-backend --output .zsjh/release/backend.json
-.venv-live/bin/python tools/probe_workbench_execution.py --backend native/build/ZSJHWorkbench.app/Contents/Resources/backend/zsjh-workbench-backend --output .zsjh/release/execution.json
-.venv-live/bin/python tools/probe_research_progress.py --backend native/build/ZSJHWorkbench.app/Contents/Resources/backend/zsjh-workbench-backend --output .zsjh/release/progress.json --post-meeting
-.venv-live/bin/python tools/probe_detection_strategies.py --backend native/build/ZSJHWorkbench.app/Contents/Resources/backend/zsjh-workbench-backend --output .zsjh/release/detection-strategies.json
+.venv-live/bin/python native/scripts/probe_desktop_backend.py --backend native/build/Vera.app/Contents/Resources/backend/zsjh-workbench-backend --output .zsjh/release/backend.json
+.venv-live/bin/python tools/probe_workbench_execution.py --backend native/build/Vera.app/Contents/Resources/backend/zsjh-workbench-backend --output .zsjh/release/execution.json
+.venv-live/bin/python tools/probe_research_progress.py --backend native/build/Vera.app/Contents/Resources/backend/zsjh-workbench-backend --output .zsjh/release/progress.json --post-meeting
+.venv-live/bin/python tools/probe_detection_strategies.py --backend native/build/Vera.app/Contents/Resources/backend/zsjh-workbench-backend --output .zsjh/release/detection-strategies.json
 ```
 
 这些探针只使用独立临时工作区和合成服务，不读取真实会议或发送实际云请求。语义样本位于 `tests/fixtures/`；离线通过不代表模型识别质量、原文命中率或真实会议价值已验收。第二台 Mac、长会设备恢复和腾讯会议内双向发声仍需独立验收。

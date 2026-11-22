@@ -24,7 +24,8 @@
     "package": "Werkzeug",
     "version": "3.1.9",
     "notices": [
-      "Werkzeug/werkzeug-3.1.9.dist-info/licenses/LICENSE.txt"
+      "Werkzeug/werkzeug-3.1.9.dist-info/licenses/LICENSE.txt",
+      "Werkzeug/werkzeug/debug/shared/ICON_LICENSE.md"
     ]
   },
   {
