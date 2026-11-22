@@ -149,6 +149,22 @@ class ResearchProgressTest(unittest.TestCase):
         self.assertTrue(payloads[0]["stream"])
         self.assertEqual((payloads[0]["max_tokens"], payloads[0]["reasoning_effort"]), (8192, "max"))
 
+    def test_stream_deadline_after_http_200_retries_and_publishes_once(self):
+        from itertools import chain, repeat
+        work = self.wb.claim(self.agent)
+        self.model.config = self.model.config.model_copy(update={'timeout_seconds': 180})
+        final = [sse({'content': json.dumps(ANSWER)}), sse(finish='stop'), b'data: [DONE]\n\n']
+        with patch('live.workbench_runtime.time') as clock, patch('requests.Session.post',
+                side_effect=[Response([sse({'reasoning_content': '推理中'})]), Response(final)]) as post:
+            clock.monotonic.side_effect = chain([0, 180.022, 180.022], repeat(181))
+            self.runtime._research(self.agent, work)
+        q = self.question()
+        self.assertEqual(post.call_count, 2)
+        self.search.search.assert_called_once()
+        self.assertEqual(q['state'], 'completed')
+        self.assertEqual(q['progress']['model']['timeout_retry'], 'sent')
+        self.assertEqual(len(self.wb.snapshot(self.owner, self.mid)['documents']), 1)
+
     def test_provider_returning_json_is_accepted_without_second_request(self):
         body = json.dumps({"choices": [{"message": {"content": json.dumps(ANSWER)}, "finish_reason": "stop"}]}).encode()
         events = []
@@ -209,12 +225,12 @@ class ResearchProgressTest(unittest.TestCase):
         self.wb.stage(self.agent, work, "synthesizing")
         before = len(self.wb.snapshot(self.owner, self.mid)["activity"])
         for n in range(100):
-            self.progress(work, "model_delta", phase="answering", answer_chars=n, draft="字" * 500,
+            self.progress(work, "model_delta", phase="answering", answer_chars=n, draft="字" * 1500,
                           reasoning_content="private-fixture", api_key="fixture-secret")
         q = self.question()
         self.assertEqual(len(self.wb.snapshot(self.owner, self.mid)["activity"]), before)
         self.assertLessEqual(len(q["progress"]["events"]), 16)
-        self.assertEqual(len(q["progress"]["model"]["draft"]), 80)
+        self.assertEqual(len(q["progress"]["model"]["draft"]), 1024)
         self.assertNotIn("fixture-secret", json.dumps(q))
         self.assertNotIn("private-fixture", json.dumps(q))
 

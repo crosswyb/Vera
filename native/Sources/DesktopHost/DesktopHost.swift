@@ -80,6 +80,22 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private var port = 0
     private var ownerToken = ""
     private var agentToken = ""
+    private var speechToken = ""
+    private var speechLiveProvider = "apple_local"
+    private var speechFileProvider = "apple_local"
+    private var speechLiveReady = false
+    private var speechFileReady = false
+    private var speechRevision = 0
+    private var speechTestID: String?
+    private var speechTestError: String?
+    private var speechLeaseTask: Task<Void, Never>?
+    private var fileLease: SpeechLease?
+    private var activeEpoch: String?
+    private var activeOutbox: URL?
+    private var outboxTask: Task<Void, Never>?
+    private var captureFinish: String?
+    private var captureFinishMeetingId: String?
+    private var transcription: [String: [String: String]] = [:]
     private var backendFailureKind = ""
     private var activeMeeting: String? { didSet { publishNativeState() } }
     private var lastMeeting: String?
@@ -87,6 +103,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private var modelState = "unknown" { didSet { publishNativeState() } }
     private var fileModelState = "unknown" { didSet { publishNativeState() } }
     private var themePreference = UserDefaults.standard.string(forKey: "themePreference") ?? "system"
+    private var layoutPreference = UserDefaults.standard.string(forKey: "layoutPreference") == "b" ? "b" : "a"
     private var beginningCapture = false { didSet { publishNativeState() } }
     private var captureGeneration = 0
     private var pageLoaded = false
@@ -94,9 +111,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private var selectedInput = LiveAudioInput(rawValue: UserDefaults.standard.string(forKey: "liveAudioInput") ?? "system") ?? .system
     private var sourceLevels: [String: Float] = [:]
     private var sourceFrames: [String: UInt64] = [:]
-    private var meetingFinished = false
-    private var pending: [(String, Data)] = []
-    private var posting = false
+    private var pendingInterims: [String: (String, Data)] = [:]
+    private var postingInterims = false
     private var bridgeFailed = false
     private var closing = false
     private var quitting = false
@@ -149,6 +165,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 showStartupProgress("正在连接音频组件…")
                 try launchHelper()
                 showStartupProgress("正在加载应用…")
+                try? await refreshSpeechConfiguration()
+                replaySavedCaptures()
                 loadWorkbench()
                 status = "未在收听"
                 checkModel()
@@ -350,6 +368,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
               let owner = value["owner_token"] as? String, !owner.isEmpty,
               let agent = value["agent_token"] as? String, !agent.isEmpty else { return }
         port = candidate; ownerToken = owner; agentToken = agent
+        speechToken = value["speech_token"] as? String ?? ""
         completeReady(nil)
     }
 
@@ -363,14 +382,20 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         completeReady(DesktopError(message: "本机服务已退出。"))
         let exitCode = backend?.isRunning == false ? "退出码 \(backend!.terminationStatus)" : ""
         let detail = [backendFailureKind, exitCode].filter { !$0.isEmpty }.joined(separator: " · ")
-        failBridge(detail.isEmpty ? "本机服务已停止，收听已停止。" : "本机服务已停止（\(detail)），尚未收听。")
+        if activeMeeting != nil, activeInput == "live" {
+            status = "本机服务中断。录音继续，转写等待保存。"
+            revokeSpeech()
+        } else {
+            failBridge(detail.isEmpty ? "本机服务已停止。" : "本机服务已停止（\(detail)）。")
+        }
         startItem.isEnabled = false
     }
 
     private func loadWorkbench() {
         let encoded = String(data: try! JSONSerialization.data(withJSONObject: [ownerToken]), encoding: .utf8)!
         let theme = String(data: try! JSONSerialization.data(withJSONObject: [themePreference]), encoding: .utf8)!
-        let script = "if(location.origin==='http://127.0.0.1:\(port)' && location.pathname==='/workbench'){sessionStorage.setItem('wb_access',\(encoded)[0]);window.__ZSJH_THEME_PREFERENCE__=\(theme)[0];}"
+        let layout = String(data: try! JSONSerialization.data(withJSONObject: [layoutPreference]), encoding: .utf8)!
+        let script = "if(location.origin==='http://127.0.0.1:\(port)' && location.pathname==='/workbench'){sessionStorage.setItem('wb_access',\(encoded)[0]);window.__ZSJH_THEME_PREFERENCE__=\(theme)[0];window.__ZSJH_LAYOUT_PREFERENCE__=\(layout)[0];}"
         webView.configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         webView.load(URLRequest(url: URL(string: "http://127.0.0.1:\(port)/workbench")!))
     }
@@ -395,8 +420,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private var canStart: Bool {
-        hostReady && pageLoaded && modelState == "installed" && activeMeeting == nil
-            && !beginningCapture && !posting && pending.isEmpty
+        hostReady && pageLoaded && activeMeeting == nil && !beginningCapture
+            && (speechLiveProvider == "apple_local" ? modelState == "installed" : speechLiveReady)
     }
 
     private var canStop: Bool {
@@ -404,8 +429,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private var canImport: Bool {
-        hostReady && pageLoaded && fileModelState == "installed" && activeMeeting == nil
-            && !beginningCapture && !posting && pending.isEmpty
+        hostReady && pageLoaded && activeMeeting == nil && !beginningCapture
+            && (speechFileProvider == "apple_local" ? fileModelState == "installed" : speechFileReady)
     }
 
     private func applyThemePreference(_ value: String) {
@@ -425,7 +450,13 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         let payload: [String: Any] = [
             "ready": hostReady, "captureState": captureState, "status": status,
             "themePreference": themePreference,
+            "layoutPreference": layoutPreference,
             "meetingId": activeMeeting.map { $0 as Any } ?? NSNull(), "modelState": modelState,
+            "speechLiveProvider": speechLiveProvider, "speechFileProvider": speechFileProvider,
+            "captureFinish": captureFinish as Any? ?? NSNull(),
+            "captureFinishMeetingId": captureFinishMeetingId as Any? ?? NSNull(),
+            "speechTestError": speechTestError as Any? ?? NSNull(),
+            "transcription": transcription,
             "canStart": canStart, "canStop": canStop,
             "canSelectSource": hostReady && activeMeeting == nil && !beginningCapture,
             "canImport": canImport, "fileModelState": fileModelState,
@@ -496,13 +527,32 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "workbench", message.webView === webView, isWorkbench(webView.url),
               isWorkbenchFrame(message.frameInfo), let body = message.body as? [String: Any],
-              body.count <= 5, Set(body.keys).isSubset(of: ["action", "meetingId", "fileId", "audioSource", "themePreference"]),
+              body.count <= 5, Set(body.keys).isSubset(of: ["action", "meetingId", "fileId", "audioSource", "themePreference", "layoutPreference", "testId"]),
               let action = body["action"] as? String else { return }
         switch action {
         case "requestState": publishNativeState()
+        case "refreshSpeechSettings": Task { try? await refreshSpeechConfiguration() }
+        case "speechTest":
+            guard let test = body["testId"] as? String, validMeetingID(test) else { return }
+            startSpeechProbe(test)
+        case "cancelSpeechTest":
+            if let test = body["testId"] as? String, test == speechTestID {
+                sendHelper(["command": "cancel_speech_probe", "test_id": test])
+            }
+        case "revokeSpeech":
+            if let meeting = body["meetingId"] as? String, meeting == activeMeeting {
+                // The backend remains the authority. Promptly recheck the
+                // lease rather than trusting the page to grant credentials.
+                revokeSpeech()
+            }
         case "setThemePreference":
             guard let preference = body["themePreference"] as? String, ["system", "light", "dark"].contains(preference) else { return }
             applyThemePreference(preference)
+            publishNativeState()
+        case "setLayoutPreference":
+            guard let preference = body["layoutPreference"] as? String, ["a", "b"].contains(preference) else { return }
+            layoutPreference = preference
+            UserDefaults.standard.set(preference, forKey: "layoutPreference")
             publishNativeState()
         case "setAudioSource":
             guard let raw = body["audioSource"] as? String, let input = LiveAudioInput(rawValue: raw) else { return }
@@ -513,10 +563,18 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 NSWorkspace.shared.open(url)
             }
         case "chooseAudioFile": chooseAudioFile()
+        case "useMeetingAudio":
+            guard let meeting = body["meetingId"] as? String, validMeetingID(meeting),
+                  let file = body["fileId"] as? String, activeMeeting == nil, !beginningCapture else { return }
+            useMeetingAudio(meeting: meeting, fileID: file)
         case "importAudioFile":
             guard let id = body["meetingId"] as? String, validMeetingID(id),
                   let fileID = body["fileId"] as? String, fileID == selectedAudio?.id else { return }
             beginFileImport(meeting: id, fileID: fileID)
+        case "resumeAudioImport":
+            guard let id = body["meetingId"] as? String, validMeetingID(id),
+                  let fileID = body["fileId"] as? String, fileID == selectedAudio?.id else { return }
+            beginFileImport(meeting: id, fileID: fileID, resume: true)
         case "startCapture", "stopCapture":
             guard let id = body["meetingId"] as? String, validMeetingID(id), pageLoaded else { return }
             if action == "startCapture" {
@@ -833,7 +891,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         LineReader(output.fileHandleForReading).start(line: { [weak self] value in deliverToMain { self?.audioLine(value) } },
             ended: { [weak self] in Task { @MainActor in
                 guard let self, !self.closing, self.helper?.isRunning == true else { return }
-                self.failBridge("音频事件通道中断，收听已停止。")
+                self.status = "音频显示连接中断，录音与关键事件仍在本机保存。"
             } })
     }
 
@@ -843,6 +901,15 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         data.append(10)
         do { try input.write(contentsOf: data) }
         catch { failBridge("音频控制通道不可用，收听已停止。") }
+    }
+
+    private func formatDuration(_ milliseconds: Int) -> String {
+        let total = max(0, milliseconds / 1000)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let seconds = total % 60
+        return hours > 0 ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%02d:%02d", minutes, seconds)
     }
 
     private func validMeetingID(_ id: String) -> Bool {
@@ -859,19 +926,147 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         return id
     }
 
-    private func request(_ path: String, body: Data? = nil, method: String? = nil, owner: Bool = false) async throws -> Data {
+    private func request(_ path: String, body: Data? = nil, method: String? = nil, owner: Bool = false,
+                         speech: Bool = false) async throws -> Data {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
         request.setValue("Bearer " + (owner ? ownerToken : agentToken), forHTTPHeaderField: "Authorization")
+        if speech {
+            guard !speechToken.isEmpty else { throw DesktopError(message: "语音组件尚未连接。") }
+            request.setValue(speechToken, forHTTPHeaderField: "X-ZSJH-Speech-Token")
+        }
         if let body { request.httpMethod = "POST"; request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if let method { request.httpMethod = method }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw DesktopError(message: "会议服务响应无效。") }
         guard (200...299).contains(http.statusCode) else {
-            if owner, let error = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            if owner || speech, let error = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let message = error["error"] as? String { throw DesktopError(message: message) }
             throw HTTPFailure(status: http.statusCode)
         }
         return data
+    }
+
+    private func refreshSpeechConfiguration() async throws {
+        let data = try await request("/live/v2/settings", owner: true)
+        guard let settings = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = settings["speech"] as? [String: Any],
+              let revision = settings["revision"] as? Int, revision >= speechRevision else { return }
+        speechRevision = revision
+        speechLiveProvider = value["live_provider"] as? String ?? "apple_local"
+        speechFileProvider = value["file_provider"] as? String ?? "apple_local"
+        let statuses = value["verification"] as? [String: [String: [String: Any]]] ?? [:]
+        speechLiveReady = statuses[speechLiveProvider]?["live"]?["status"] as? String == "passed"
+        speechFileReady = statuses[speechFileProvider]?["file"]?["status"] as? String == "passed"
+        publishNativeState()
+    }
+
+    private func startSpeechProbe(_ testID: String) {
+        guard hostReady, speechTestID == nil else { return }
+        speechTestID = testID; speechTestError = nil
+        Task {
+            do {
+                let path = "/live/v2/settings/speech/tests/\(testID)"
+                let test = try await request(path, owner: true)
+                guard let info = try JSONSerialization.jsonObject(with: test) as? [String: Any],
+                      let kind = info["kind"] as? String, ["live", "file"].contains(kind) else {
+                    throw DesktopError(message: "找不到待执行的转写测试。")
+                }
+                let data = try await request(path + "/session", body: Data("{}".utf8), owner: true, speech: true)
+                guard var candidate = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let sampleVersion = candidate.removeValue(forKey: "sample_version") as? String else {
+                    throw DesktopError(message: "语音测试配置不完整，请重新安装应用。")
+                }
+                sendHelper(["command": "speech_probe", "test_id": testID, "kind": kind,
+                            "speech": candidate, "sample_version": sampleVersion])
+                try? await Task.sleep(for: .seconds(30))
+                if speechTestID == testID {
+                    sendHelper(["command": "cancel_speech_probe", "test_id": testID])
+                    speechTestID = nil; speechTestError = "语音转写测试超时。"; publishNativeState()
+                }
+            } catch {
+                speechTestID = nil; speechTestError = error.localizedDescription
+                publishNativeState()
+            }
+        }
+    }
+
+    private func finishSpeechProbe(_ event: [String: Any]) {
+        guard let testID = event["test_id"] as? String, speechTestID == testID else { return }
+        var report = event
+        report.removeValue(forKey: "type")
+        report.removeValue(forKey: "test_id")
+        Task {
+            defer { if speechTestID == testID { speechTestID = nil }; publishNativeState() }
+            do {
+                let body = try JSONSerialization.data(withJSONObject: report)
+                _ = try await request("/live/v2/settings/speech/tests/\(testID)/result", body: body, owner: true, speech: true)
+            } catch { speechTestError = error.localizedDescription }
+        }
+    }
+
+    private func speechSession(meeting: String, epoch: String, kind: String,
+                               sources: [AudioSourceKind]) async throws -> [String: Any] {
+        let body = try speechRequest(epoch: epoch, kind: kind, sources: sources)
+        let issuedAt = ContinuousClock.now
+        let data = try await request("/live/v2/meetings/\(meeting)/speech-session", body: body, speech: true)
+        guard var result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let seconds = result["lease_seconds"] as? Double else {
+            throw DesktopError(message: "云端转写授权响应无效。")
+        }
+        result["lease_expires_uptime"] = ProcessInfo.processInfo.systemUptime + max(0, seconds - secondsSince(issuedAt))
+        result["lease_seconds"] = max(0, seconds - secondsSince(issuedAt))
+        return result
+    }
+
+    private func speechRequest(epoch: String, kind: String, sources: [AudioSourceKind]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["task_id": epoch, "kind": kind, "sources": sources.map(\.rawValue)])
+    }
+
+    private func secondsSince(_ start: ContinuousClock.Instant) -> Double {
+        let elapsed = start.duration(to: .now).components
+        return Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+    }
+
+    private func renewSpeechLease(meeting: String, epoch: String, kind: String, sources: [AudioSourceKind]) {
+        speechLeaseTask?.cancel()
+        speechLeaseTask = Task { [weak self] in
+            var consecutiveFailures = 0
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self, self.activeMeeting == meeting, self.activeEpoch == epoch else { return }
+                let issuedAt = ContinuousClock.now
+                do {
+                    let body = try self.speechRequest(epoch: epoch, kind: kind, sources: sources)
+                    let response = try await self.request("/live/v2/meetings/\(meeting)/speech-session/lease", body: body, speech: true)
+                    guard !Task.isCancelled, self.activeEpoch == epoch else { return }
+                    let value = try JSONSerialization.jsonObject(with: response) as? [String: Any]
+                    guard let seconds = value?["lease_seconds"] as? Double else { throw DesktopError(message: "语音续租响应无效。") }
+                    let remaining = max(0, seconds - self.secondsSince(issuedAt))
+                    consecutiveFailures = 0
+                    if kind == "live" {
+                        self.sendHelper(["command": "speech_lease", "capture_epoch": epoch,
+                                         "lease_expires_uptime": ProcessInfo.processInfo.systemUptime + remaining])
+                    } else { self.fileLease?.renew(seconds: remaining) }
+                } catch {
+                    guard !Task.isCancelled, self.activeEpoch == epoch else { return }
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 3 {
+                        self.revokeSpeech()
+                        return
+                    }
+                    // A transient local-server or network delay must not abort a long import.
+                    continue
+                }
+            }
+        }
+    }
+
+    private func revokeSpeech() {
+        speechLeaseTask?.cancel(); speechLeaseTask = nil
+        if let activeEpoch, activeInput == "live" {
+            sendHelper(["command": "speech_revoke", "capture_epoch": activeEpoch])
+        }
+        fileLease?.revoke()
     }
 
     private func meetingSnapshot(_ id: String) async throws -> [String: Any] {
@@ -911,17 +1106,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private func postAudio(_ meeting: String, _ data: Data) async throws {
-        let type = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["type"] as? String ?? ""
-        if meetingFinished, type != "transcript.final", type != "transcript.retracted", type != "audio.recording" { return }
-        do { _ = try await request("/internal/live/v2/meetings/\(meeting)/audio-events", body: data) }
-        catch let failure as HTTPFailure where failure.status == 409 {
-            let state = try await meetingState(meeting)
-            guard state == "ended" || state == "expired" else { throw failure }
-            meetingFinished = true
-            stopWithStatus("会议已结束，正在停止收听…")
-            // Ended meetings accept only their existing segments' brief tail;
-            // an expected rejection does not mean that the backend is offline.
-        }
+        _ = try await request("/internal/live/v2/meetings/\(meeting)/audio-events", body: data)
     }
 
     @objc private func startCapture() { beginCapture(expectedMeeting: nil) }
@@ -958,78 +1143,143 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         }
     }
 
-    private func beginFileImport(meeting: String, fileID: String) {
-        guard canImport, let selection = selectedAudio, selection.id == fileID else {
-            selectedAudioError = "请先安装中文模型，或等待当前任务结束。"; publishNativeState(); return
+    private func useMeetingAudio(meeting: String, fileID: String) {
+        audioSelectionTask?.cancel()
+        audioSelectionTask = Task {
+            do {
+                let snapshot = try await meetingSnapshot(meeting)
+                guard let source = snapshot["meeting"] as? [String: Any],
+                      let recordings = source["recordings"] as? [[String: Any]],
+                      let record = recordings.first(where: { $0["id"] as? String == fileID }),
+                      ["saved", "partial"].contains(record["state"] as? String ?? ""),
+                      let relative = record["path"] as? String else { throw DesktopError(message: "找不到已保存的录音。") }
+                let url = try meetingFileURL(relative, meeting: source)
+                let info = try await AudioFileInfo.inspect(url)
+                guard !Task.isCancelled, activeMeeting == nil, !beginningCapture else { return }
+                selectedAudio = SelectedAudio(id: UUID().uuidString, url: url, info: info)
+                selectedAudioError = ""
+            } catch {
+                guard !Task.isCancelled else { return }
+                selectedAudio = nil; selectedAudioError = error.localizedDescription
+            }
+            publishNativeState()
+        }
+    }
+
+    private func beginFileImport(meeting: String, fileID: String, resume: Bool = false) {
+        guard let selection = selectedAudio, selection.id == fileID, (resume || canImport) else {
+            selectedAudioError = "所选文件转写服务尚未就绪，或当前已有任务。"; publishNativeState(); return
         }
         beginningCapture = true
         fileTask = Task { [self] in
             var registered = false
-            let epoch = UUID().uuidString
+            var epoch = UUID().uuidString
+            var startMS = 0
+            var revision = 1
             do {
                 guard try await selectedMeeting() == meeting else { throw DesktopError(message: "会议已切换，请重新导入。") }
                 try await validateCaptureMeeting(meeting, inputKind: "audio_file")
-                guard hostReady, try await selectedMeeting() == meeting, activeMeeting == nil else {
+                guard hostReady, !quitting, try await selectedMeeting() == meeting, activeMeeting == nil else {
                     throw DesktopError(message: "应用状态已变化，请重新导入。")
                 }
+                try await refreshSpeechConfiguration()
                 let info = try await AudioFileInfo.inspect(selection.url)
-                let body = try JSONSerialization.data(withJSONObject: ["import_id": epoch, "file_name": info.name,
-                    "duration_ms": info.durationMS, "bytes": info.bytes])
-                let registeredData = try await request("/internal/live/v2/meetings/\(meeting)/audio-import", body: body)
+                var provider = speechFileProvider
+                let registeredData: Data
+                if resume {
+                    let snapshot = try await meetingSnapshot(meeting)
+                    guard let source = snapshot["meeting"] as? [String: Any],
+                          let existing = source["audio_import"] as? [String: Any],
+                          let existingID = existing["import_id"] as? String,
+                          let existingProvider = existing["provider"] as? String,
+                          ["failed", "cancelled", "interrupted"].contains(existing["state"] as? String ?? "") else {
+                        throw DesktopError(message: "当前会议没有可恢复的导入任务。")
+                    }
+                    epoch = existingID
+                    provider = existingProvider
+                    let body = try JSONSerialization.data(withJSONObject: ["import_id": epoch])
+                    registeredData = try await request("/internal/live/v2/meetings/\(meeting)/audio-import/resume", body: body, speech: true)
+                } else {
+                    guard provider == "apple_local" ? fileModelState == "installed" : speechFileReady else {
+                        throw DesktopError(message: "所选文件转写服务尚未就绪。")
+                    }
+                    let body = try JSONSerialization.data(withJSONObject: ["import_id": epoch, "file_name": info.name,
+                        "duration_ms": info.durationMS, "bytes": info.bytes, "provider": provider,
+                        "settings_revision": speechRevision])
+                    registeredData = try await request("/internal/live/v2/meetings/\(meeting)/audio-import", body: body, speech: true)
+                }
                 registered = true
                 guard let registeredMeeting = try JSONSerialization.jsonObject(with: registeredData) as? [String: Any],
                       let job = registeredMeeting["audio_import"] as? [String: Any],
                       let relative = job["original_path"] as? String else { throw DesktopError(message: "音频归档位置不可用。") }
+                if let resumeFrom = job["resume_from_ms"] as? Int { startMS = max(0, resumeFrom) }
+                if let resumeCount = job["resume_count"] as? Int { revision = max(1, resumeCount + 1) }
                 let destination = try meetingFileURL(relative, meeting: registeredMeeting)
-                activeInput = "audio_file"; captureProblem = nil; meetingFinished = false
-                activeMeeting = meeting; lastMeeting = meeting; captureState = "importing"
-                beginningCapture = false; status = "正在保存原始音频副本…"
-                try await Task.detached(priority: .utility) {
-                    let part = destination.appendingPathExtension("part")
-                    guard !FileManager.default.fileExists(atPath: destination.path), !FileManager.default.fileExists(atPath: part.path) else {
-                        throw DesktopError(message: "音频归档文件已存在，保留原文件。")
-                    }
-                    try FileManager.default.copyItem(at: selection.url, to: part)
-                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: part.path)
-                    try FileManager.default.moveItem(at: part, to: destination)
-                }.value
-                var recordingEvent = AudioEvent(meetingID: meeting, captureEpoch: epoch, streamID: "archive-\(epoch)",
-                    seq: 1, type: "audio.recording", source: .file)
-                recordingEvent.state = "saved"; recordingEvent.audioEndMS = info.durationMS
-                try await postAudio(meeting, JSONEncoder().encode(recordingEvent))
+                activeInput = "audio_file"; captureProblem = nil
+                captureFinish = nil; captureFinishMeetingId = meeting
+                activeEpoch = epoch; activeMeeting = meeting; lastMeeting = meeting; captureState = "importing"
+                beginningCapture = false
+                if resume {
+                    status = "正在从 \(formatDuration(startMS)) 继续转写…"
+                } else {
+                    status = "正在保存原始音频副本…"
+                    try await Task.detached(priority: .utility) {
+                        let part = destination.appendingPathExtension("part")
+                        guard !FileManager.default.fileExists(atPath: destination.path), !FileManager.default.fileExists(atPath: part.path) else {
+                            throw DesktopError(message: "音频归档文件已存在，保留原文件。")
+                        }
+                        try FileManager.default.copyItem(at: selection.url, to: part)
+                        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: part.path)
+                        try FileManager.default.moveItem(at: part, to: destination)
+                    }.value
+                    var recordingEvent = AudioEvent(meetingID: meeting, captureEpoch: epoch, streamID: "archive-\(epoch)",
+                        seq: 1, type: "audio.recording", source: .file)
+                    recordingEvent.state = "saved"; recordingEvent.audioEndMS = info.durationMS
+                    try await postAudio(meeting, JSONEncoder().encode(recordingEvent))
+                }
                 try Task.checkCancellation()
-                status = "原始音频已保存，正在转写…"
+                status = resume ? "已找到原始音频，正在继续转写…" : "原始音频已保存，正在转写…"
                 let worker = FileTranscription(); fileTranscriber = worker
                 worker.onEvent = { [weak self] event in
                     guard let self, !self.closing else { throw CancellationError() }
                     let data = try JSONEncoder().encode(event)
                     try await self.postAudio(meeting, data)
                 }
-                try await worker.run(url: destination, meetingID: meeting, epoch: epoch)
+                if provider == "apple_local" {
+                    try await worker.run(url: destination, meetingID: meeting, epoch: epoch, startMS: startMS, revision: revision)
+                } else {
+                    let privateConfig = try await speechSession(meeting: meeting, epoch: epoch, kind: "file", sources: [.file])
+                    let config = try JSONDecoder().decode(SpeechSessionConfig.self, from: JSONSerialization.data(withJSONObject: privateConfig))
+                    let lease = SpeechLease(seconds: config.leaseSeconds ?? 0)
+                    fileLease = lease
+                    renewSpeechLease(meeting: meeting, epoch: epoch, kind: "file", sources: [.file])
+                    try await worker.run(url: destination, meetingID: meeting, epoch: epoch, speech: config,
+                                        lease: lease, startMS: startMS, revision: revision)
+                }
                 try Task.checkCancellation()
                 captureState = "stopping"; status = "正在保存完整转写…"
                 let finish = try JSONSerialization.data(withJSONObject: ["import_id": epoch, "state": "completed"])
                 _ = try await request("/internal/live/v2/meetings/\(meeting)/audio-import/finish", body: finish)
                 status = "文件转写已完成，查证可继续进行"
-                captureState = "stopped"
+                captureState = "stopped"; captureFinish = "complete"
             } catch {
                 let cancelled = error is CancellationError || Task.isCancelled
                 if registered, !closing {
-                    // Detached cancellation state must not prevent saving the
-                    // partial transcript through the local backend.
+                    let message = String(error.localizedDescription.prefix(300))
                     let finish = try? JSONSerialization.data(withJSONObject: ["import_id": epoch,
                         "state": cancelled ? "cancelled" : "failed",
-                        "error": cancelled ? "导入已停止，已有转写保留。" : "音频识别或保存失败，已有转写保留。"])
+                        "error": cancelled ? "导入已停止，已有转写保留。" : message])
                     let save = Task { [self] in
-                        if let finish { _ = try? await request("/internal/live/v2/meetings/\(meeting)/audio-import/finish", body: finish) }
+                        guard let finish else { return false }
+                        return (try? await request("/internal/live/v2/meetings/\(meeting)/audio-import/finish", body: finish)) != nil
                     }
-                    await save.value
+                    captureFinish = await save.value ? "with_gaps" : "failed"
                 }
-                captureState = cancelled ? "stopped" : "error"
+                captureState = cancelled && captureFinish != "failed" ? "stopped" : "error"
                 status = cancelled ? "导入已停止，已有转写保留" : "导入失败：" + error.localizedDescription
             }
-            fileTranscriber = nil; fileTask = nil; beginningCapture = false
-            activeMeeting = nil; selectedAudio = nil
+            revokeSpeech(); fileLease = nil; fileTranscriber = nil; fileTask = nil; beginningCapture = false
+            activeEpoch = nil; activeMeeting = nil; selectedAudio = nil
             publishNativeState()
         }
     }
@@ -1047,24 +1297,24 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         status = "正在准备会议…"
         Task { [self] in
             defer { beginningCapture = false }
-            var registeredEpoch: String?
-            var registeredMeeting: String?
+            var unopened: (CaptureEventOutbox.Manifest, URL)?
             do {
                 let meeting = try await selectedMeeting()
                 guard expectedMeeting == nil || expectedMeeting == meeting else { throw DesktopError(message: "会议已切换，请重新开始收听。") }
                 try await validateCaptureMeeting(meeting)
-                let selected = try await selectedMeeting()
-                guard hostReady, modelState == "installed", selected == meeting else { throw DesktopError(message: "会议或音频连接已变化，请重新开始收听。") }
-                captureGeneration += 1
-                let generation = captureGeneration
-                selectInput(requestedInput)
-                sourceLevels = [:]; sourceFrames = [:]
-                captureState = "starting"; captureProblem = nil; meetingFinished = false
-                status = "正在连接音频…"
+                try await refreshSpeechConfiguration()
+                let provider = speechLiveProvider
+                let sources = requestedInput.sources
+                guard hostReady, (provider == "apple_local" ? modelState == "installed" : speechLiveReady),
+                      !quitting, try await selectedMeeting() == meeting else { throw DesktopError(message: "会议或语音服务未就绪。") }
                 let epoch = UUID().uuidString
-                let body = try JSONSerialization.data(withJSONObject: ["recording_id": epoch, "sources": requestedInput.sources.map(\.rawValue)])
-                let registration = try await request("/internal/live/v2/meetings/\(meeting)/recordings", body: body)
-                registeredEpoch = epoch; registeredMeeting = meeting
+                let manifest = CaptureEventOutbox.Manifest(meetingID: meeting, epoch: epoch, sources: sources)
+                let outbox = outboxRoot.appendingPathComponent(epoch, isDirectory: true)
+                try manifest.write(to: outbox)
+                unopened = (manifest, outbox)
+                let body = try JSONSerialization.data(withJSONObject: ["recording_id": epoch, "sources": sources.map(\.rawValue),
+                    "provider": provider, "settings_revision": speechRevision])
+                let registration = try await request("/internal/live/v2/meetings/\(meeting)/recordings", body: body, speech: true)
                 let snapshot = try await meetingSnapshot(meeting)
                 guard let registered = try JSONSerialization.jsonObject(with: registration) as? [String: Any],
                       let directory = registered["recording_directory"] as? String,
@@ -1073,43 +1323,59 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                       directory == (try meetingFileURL(relative, meeting: savedMeeting)).path else {
                     throw DesktopError(message: "录音保存位置不可用，未开始收听。")
                 }
-                guard hostReady, try await selectedMeeting() == meeting, activeMeeting == nil else {
+                var command: [String: Any] = ["command": "start", "meeting_id": meeting, "sources": sources.map(\.rawValue),
+                    "locale": "zh-CN", "capture_epoch": epoch, "recording_directory": directory, "outbox": outbox.path]
+                if provider != "apple_local" {
+                    var speech = try await speechSession(meeting: meeting, epoch: epoch, kind: "live", sources: sources)
+                    command["lease_expires_uptime"] = speech.removeValue(forKey: "lease_expires_uptime")
+                    command["speech"] = speech
+                }
+                guard hostReady, !quitting, try await selectedMeeting() == meeting, activeMeeting == nil else {
                     throw DesktopError(message: "会议已变化，未开始收听。")
                 }
-                activeInput = "live"; activeMeeting = meeting; lastMeeting = meeting
-                sendHelper(["command": "start", "meeting_id": meeting, "sources": requestedInput.sources.map(\.rawValue), "locale": "zh-CN",
-                            "capture_epoch": epoch, "recording_directory": directory])
-                healthTask = Task { [weak self] in
-                    while !Task.isCancelled {
-                        try? await Task.sleep(for: .seconds(1))
-                        guard let self, !Task.isCancelled, self.activeMeeting == meeting,
-                              self.captureGeneration == generation else { return }
-                        do {
-                            let selected = try await self.selectedMeeting()
-                            let state = try await self.meetingState(meeting)
-                            guard !Task.isCancelled, self.activeMeeting == meeting,
-                                  self.captureGeneration == generation else { return }
-                            self.meetingFinished = state == "ended" || state == "expired"
-                            guard selected == meeting, state == "active" else {
-                                self.stopWithStatus("会议切换或结束，正在停止收听…"); return
-                            }
-                        } catch {
-                            guard !Task.isCancelled, self.activeMeeting == meeting,
-                                  self.captureGeneration == generation else { return }
-                            self.stopWithStatus("会议连接中断，正在停止收听…"); return
-                        }
-                    }
-                }
+                captureGeneration += 1
+                selectInput(requestedInput)
+                sourceLevels = [:]; sourceFrames = [:]; transcription = [:]
+                captureState = "starting"; captureProblem = nil
+                captureFinish = nil; captureFinishMeetingId = meeting
+                activeInput = "live"; activeEpoch = epoch; activeOutbox = outbox
+                activeMeeting = meeting; lastMeeting = meeting
+                status = "正在连接音频…"
+                unopened = nil
+                sendHelper(command)
+                processActiveOutbox(manifest, directory: outbox)
+                if provider != "apple_local" { renewSpeechLease(meeting: meeting, epoch: epoch, kind: "live", sources: sources) }
+                monitorMeeting(meeting: meeting, epoch: epoch)
             } catch {
-                if let epoch = registeredEpoch, let meeting = registeredMeeting {
-                    for source in requestedInput.sources {
-                        var event = AudioEvent(meetingID: meeting, captureEpoch: epoch,
-                            streamID: "archive-error-\(source.rawValue)-\(epoch)", seq: 1, type: "audio.recording", source: source)
-                        event.state = "missing"
-                        if let data = try? JSONEncoder().encode(event) { try? await postAudio(meeting, data) }
-                    }
+                if let (manifest, outbox) = unopened {
+                    // A returned error cannot prove registration didn't commit.
+                    // Persist a no-device-opened record and acknowledge it idempotently.
+                    let writer = CaptureEventOutbox.Writer(directory: outbox, manifest: manifest)
+                    writer.seal(); await writer.flush()
+                    // If the API rejected registration, there is no epoch to close.
+                    // An unavailable API leaves the journal available for replay.
+                    if let current = try? await meetingSnapshot(manifest.meetingID),
+                       let row = current["meeting"] as? [String: Any],
+                       (row["capture_epochs"] as? [String: Any])?[manifest.epoch] == nil {
+                        try? FileManager.default.removeItem(at: outbox)
+                    } else { _ = try? await drainOutbox(manifest, directory: outbox) }
                 }
-                activeMeeting = nil; captureState = "error"; status = error.localizedDescription
+                captureState = "error"; status = error.localizedDescription
+            }
+        }
+    }
+
+    private func monitorMeeting(meeting: String, epoch: String) {
+        healthTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self, !self.closing, self.activeEpoch == epoch else { return }
+                if let selected = try? await self.selectedMeeting(), selected != meeting {
+                    self.stopWithStatus("会议切换，正在保存录音和转写…"); return
+                }
+                if let state = try? await self.meetingState(meeting), state != "active", !Task.isCancelled {
+                    self.stopWithStatus("会议已改变，正在保存录音…"); return
+                }
             }
         }
     }
@@ -1154,10 +1420,16 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         sendHelper(["command": "stop"])
         stopWatchdog?.cancel()
         stopWatchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(7))
-            guard let self, !Task.isCancelled, self.activeMeeting != nil else { return }
-            self.helper?.terminate(); self.failBridge("音频组件停止超时，已终止采音；尾部可能缺失。")
-            self.startItem.isEnabled = false
+            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            guard let self, self.activeMeeting != nil else { return }
+            self.captureFinish = "failed"
+            self.status = "录音或转写收尾未确认。保留本机记录，正在重试保存。"
+            if let directory = self.activeOutbox, (try? CaptureEventOutbox.Seal.read(from: directory)) == nil {
+                self.revokeSpeech()
+                // Give the audio component a final EOF to close its sources.
+                try? self.helperInput?.close(); self.helperInput = nil
+            }
+            self.publishNativeState()
         }
     }
 
@@ -1193,6 +1465,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private func audioLine(_ data: Data) {
         guard !closing, let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = event["type"] as? String else { return }
+        if type == "speech.probe" { finishSpeechProbe(event); return }
         let meeting = event["meeting_id"] as? String ?? ""
         if type == "audio.error", event["code"] as? String == "model_install_failed" {
             // A failed download emits no model_status event. Clear the optimistic
@@ -1221,10 +1494,17 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             }
             return
         }
-        guard meeting == (activeMeeting ?? lastMeeting) else { failBridge("音频会议绑定不一致，收听已停止。"); return }
-        guard !bridgeFailed else { return }
-        guard pending.count < 256 else { failBridge("音频事件积压，收听已停止；未确认的事件可能缺失。"); return }
-        pending.append((meeting, data)); pumpEvents()
+        guard meeting == activeMeeting, event["capture_epoch"] as? String == activeEpoch else { return }
+        // The outbox delivers authoritative events. A delayed pipe message
+        // from a previous epoch never changes a newer capture's state.
+        if type == "transcript.interim", captureState == "listening",
+           let stream = event["stream_id"] as? String, let segment = event["segment_id"] as? String {
+            let key = stream + ":" + segment
+            if pendingInterims[key] != nil || pendingInterims.count < 24 {
+                pendingInterims[key] = (meeting, data)
+                pumpInterims()
+            }
+        }
         switch type {
         case "audio.status" where event["state"] as? String == "running":
             // The core reports running only after every selected source starts.
@@ -1240,7 +1520,16 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             // until the latter so its tail cannot race a new capture.
             status = "正在保存转写…"
         case "audio.status" where event["state"] as? String == "stopped":
-            stopWatchdog?.cancel(); healthTask?.cancel(); captureState = "stopped"
+            healthTask?.cancel(); captureState = "stopping"
+        case "asr.status", "asr.gap", "asr.error":
+            if let source = event["source"] as? String {
+                var value = transcription[source] ?? [:]
+                if let state = event["state"] as? String { value["state"] = state }
+                if let provider = event["provider"] as? String { value["provider"] = provider }
+                if let code = event["code"] as? String { value["code"] = code }
+                transcription[source] = value
+                publishNativeState()
+            }
         case "audio.gap", "audio.error":
             let code = event["code"] as? String ?? type
             let messages = ["microphone_denied": "麦克风权限未开启。请打开系统设置，允许真实交互使用麦克风后重试。",
@@ -1254,26 +1543,80 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         }
     }
 
-    private func pumpEvents() {
-        guard !posting, !pending.isEmpty, !bridgeFailed else { return }
-        posting = true
+    private var outboxRoot: URL { stateDirectory.appendingPathComponent("capture-outbox", isDirectory: true) }
+
+    private func pumpInterims() {
+        guard !postingInterims, captureState == "listening" else { return }
+        postingInterims = true
         Task {
-            while !pending.isEmpty, !bridgeFailed, !closing {
-                let (meeting, data) = pending[0]
-                var accepted = false
-                for attempt in 0..<3 {
-                    do { try await postAudio(meeting, data); accepted = true; break }
-                    catch {
-                        if attempt < 2 { try? await Task.sleep(for: .milliseconds(100 * (attempt + 1))) }
-                    }
-                }
-                guard accepted else { failBridge("转写未获服务确认，已停止收听；未确认事件可能缺失。"); break }
-                if !pending.isEmpty { pending.removeFirst() }
+            defer { postingInterims = false }
+            while captureState == "listening", let key = pendingInterims.keys.first,
+                  let (meeting, data) = pendingInterims.removeValue(forKey: key), meeting == activeMeeting {
+                // A final may already have reached the backend. Superseded or
+                // unavailable interim text never blocks durable delivery.
+                try? await postAudio(meeting, data)
             }
-            posting = false
-            if captureState == "stopped", pending.isEmpty, !bridgeFailed {
-                activeMeeting = nil
-                status = captureProblem.map { "已停止 · " + $0 } ?? "已停止"
+        }
+    }
+
+    private func drainOutbox(_ manifest: CaptureEventOutbox.Manifest, directory: URL) async throws -> String? {
+        for record in try CaptureEventOutbox.pending(in: directory) {
+            let data = try Data(contentsOf: record)
+            try await postAudio(manifest.meetingID, data)
+            try FileManager.default.removeItem(at: record)
+        }
+        guard let seal = try? CaptureEventOutbox.Seal.read(from: directory),
+              try CaptureEventOutbox.pending(in: directory).isEmpty else { return nil }
+        let body = try JSONSerialization.data(withJSONObject: ["capture_epoch": manifest.epoch,
+            "saved": seal.saved, "no_audio": seal.saved && !seal.hadAudio])
+        let data = try await request("/live/v2/meetings/\(manifest.meetingID)/capture/finish", body: body, speech: true)
+        let value = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let result = value?["state"] as? String, ["complete", "with_gaps", "failed", "no_audio"].contains(result) else {
+            throw DesktopError(message: "会议服务未确认收尾结果。")
+        }
+        if result != "failed" { try? FileManager.default.removeItem(at: directory) }
+        return result == "no_audio" ? "complete" : result
+    }
+
+    private func processActiveOutbox(_ manifest: CaptureEventOutbox.Manifest, directory: URL) {
+        outboxTask?.cancel()
+        outboxTask = Task {
+            var delayed = false
+            while !Task.isCancelled, !closing, activeEpoch == manifest.epoch {
+                do {
+                    if let result = try await drainOutbox(manifest, directory: directory) {
+                        guard activeEpoch == manifest.epoch else { return }
+                        stopWatchdog?.cancel(); healthTask?.cancel(); revokeSpeech()
+                        captureFinish = result; captureFinishMeetingId = manifest.meetingID
+                        pendingInterims.removeAll(); activeOutbox = nil; activeEpoch = nil; activeMeeting = nil
+                        captureState = result == "failed" ? "error" : "stopped"
+                        switch result {
+                        case "complete": status = captureProblem.map { "收听已停止 · " + $0 } ?? "录音和转写已保存"
+                        case "with_gaps": status = "已保存可用录音。请查看各音源的录音和转写状态。"
+                        default: status = "收尾保存失败。已保留本机记录，会议仍在进行中。"
+                        }
+                        return
+                    }
+                    if delayed, captureState == "listening" { status = "正在收听" }
+                    delayed = false
+                } catch {
+                    if !delayed, captureState == "listening" { status = "录音继续，转写等待保存…" }
+                    delayed = true
+                }
+                do { try await Task.sleep(for: delayed ? .seconds(1) : .milliseconds(200)) } catch { return }
+            }
+        }
+    }
+
+    private func replaySavedCaptures() {
+        Task {
+            guard let directories = try? FileManager.default.contentsOfDirectory(at: outboxRoot, includingPropertiesForKeys: nil) else { return }
+            for directory in directories {
+                guard let manifest = try? CaptureEventOutbox.Manifest.read(from: directory), validMeetingID(manifest.meetingID),
+                      UUID(uuidString: manifest.epoch) != nil, directory.lastPathComponent == manifest.epoch else { continue }
+                // A sealed journal can be replayed after an app or backend
+                // restart. An unsealed journal must never authorize End.
+                _ = try? await drainOutbox(manifest, directory: directory)
             }
         }
     }
@@ -1287,7 +1630,14 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             let process = helper
             Task { try? await Task.sleep(for: .seconds(6)); if process?.isRunning == true { process?.terminate() } }
         }
-        pending.removeAll(); activeMeeting = nil; captureState = "error"
+        revokeSpeech()
+        pendingInterims.removeAll()
+        if activeOutbox != nil {
+            captureFinish = "failed"; captureFinishMeetingId = activeMeeting
+            // The helper may have sealed the outbox before it exited; retain
+            // the binding for the delivery task to finish or retry on restart.
+        } else { activeMeeting = nil }
+        captureState = "error"
         status = message; stopItem.isEnabled = false; startItem.isEnabled = false
         if !pageLoaded { showStartupFailure(message) }
     }
@@ -1295,18 +1645,18 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard activeMeeting != nil || posting else { return .terminateNow }
+        guard activeMeeting != nil || beginningCapture else { return .terminateNow }
         guard !quitting else { return .terminateLater }
         quitting = true
         let meeting = activeMeeting
         stopWithStatus("正在保存录音和转写后退出…")
         Task {
             let deadline = Date().addingTimeInterval(10)
-            while (activeMeeting != nil || posting) && Date() < deadline {
+            while (activeMeeting != nil || beginningCapture) && Date() < deadline {
                 try? await Task.sleep(for: .milliseconds(100))
             }
-            if let meeting, activeMeeting == nil, !posting, !bridgeFailed,
-               (try? await meetingState(meeting)) == "active" {
+            if let meeting, activeMeeting == nil, activeInput == "live", captureFinishMeetingId == meeting,
+               ["complete", "with_gaps"].contains(captureFinish ?? ""), (try? await meetingState(meeting)) == "active" {
                 let data = try? JSONSerialization.data(withJSONObject: ["action": "end"])
                 if let data { _ = try? await request("/live/v2/meetings/\(meeting)/controls", body: data) }
             }
@@ -1317,6 +1667,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 
     func applicationWillTerminate(_ notification: Notification) {
         closing = true; healthTask?.cancel(); stopWatchdog?.cancel()
+        outboxTask?.cancel(); speechLeaseTask?.cancel(); fileLease?.revoke()
         fileTask?.cancel()
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "workbench")
         for record in exports.values {
@@ -1328,7 +1679,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         if helper?.isRunning == true { helper?.terminate() }
         if backend?.isRunning == true { backend?.terminate() }
         session.invalidateAndCancel()
-        ownerToken = ""; agentToken = ""
+        ownerToken = ""; agentToken = ""; speechToken = ""
     }
 }
 

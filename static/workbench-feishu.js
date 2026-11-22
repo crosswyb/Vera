@@ -5,7 +5,7 @@ window.createFeishuSettings = function ({api, state, $, element, text, safeURL})
   const get = name => document.getElementById('feishu-' + name);
   const call = (path, body, method = 'POST') => api('/live/v2/feishu/' + path, body === undefined ? {} : {method, body});
   const active = () => !!state.token && state.home?.member?.role === 'owner';
-  const visible = () => active() && state.route === 'settings' && !document.hidden;
+  const visible = () => active() && state.route === 'settings' && !$('prefs-pane-feishu').hidden && !document.hidden;
   let settings, status, working, session = 0, dirty = false, jobsSignature = '', authURL = '', pendingTest = '';
   let refreshingJobs = false;
   const feedback = (message = '', error = false) => {
@@ -23,7 +23,7 @@ window.createFeishuSettings = function ({api, state, $, element, text, safeURL})
     get('enabled').disabled = busy || !settings;
     for (const name of ['folder', 'delivery', 'chat-query', 'chat-choice']) get(name).disabled = locked;
     get('chat-controls').hidden = !wantsChat;
-    get('connect').hidden = !!status?.authorized;
+    text(get('connect'), status?.authorized ? '重新授权' : '连接飞书');
     get('connect').disabled = busy || !status?.configured;
     get('refresh').disabled = busy;
     get('auth-link').hidden = !authURL;
@@ -34,8 +34,17 @@ window.createFeishuSettings = function ({api, state, $, element, text, safeURL})
     const valid = !enabled || (status?.authorized && folderInput() && (!wantsChat || get('chat-choice').value));
     get('save').disabled = busy || !settings || !dirty || !valid;
     get('test').disabled = busy || !settings?.enabled || !settings?.folder_token || dirty || !status?.authorized || !!pendingTest;
-    text(get('test-info'), settings?.enabled && !dirty ? `测试将在「${settings.folder_name || '已选文件夹'}」创建一份合成文档${settings.chat_id ? `，并向「${settings.chat_name || '已选群聊'}」发送通知` : ''}。` : '保存并开启同步后，可发送一份合成测试文档。');
-    text(get('badge'), settings ? (settings.enabled ? '已开启' : '未开启') : '正在读取');
+    let hint = '';
+    if (enabled) {
+      if (!status?.authorized) hint = '请先连接飞书账号。';
+      else if (!folderInput()) hint = '请粘贴飞书云空间文件夹链接。群通知会附上保存在这里的文档。';
+      else if (wantsChat && !get('chat-choice').value) hint = '请搜索并选中接收通知的群聊。';
+      else if (!dirty && settings?.enabled) hint = `测试将在「${settings.folder_name}」创建合成文档${settings.chat_id ? `，并通知「${settings.chat_name}」` : ''}。`;
+    }
+    if (!hint && dirty) hint = '请点击「保存飞书设置」让修改生效。';
+    text(get('test-info'), hint);
+    const savedState = settings?.enabled ? '已开启' : '未开启';
+    text(get('badge'), settings ? (dirty ? `${savedState} · 修改未保存` : savedState) : '正在读取');
     for (const button of get('jobs').querySelectorAll('button')) button.disabled = busy || !settings?.enabled;
   }
   function setStatus(value) {

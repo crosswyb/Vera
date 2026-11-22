@@ -28,7 +28,10 @@ class CoordinatorPromptTest(unittest.TestCase):
         from live.workbench_runtime import TextModel
         seen = {}
         model = TextModel.__new__(TextModel)
-        model._structured = lambda system, content, *a, **k: seen.update(content)
+        def call(system, content, **kwargs):
+            seen.update(content)
+            return {'actions': []}
+        model.call = call
         questions = [{"id": f"q{n}", "title": f"问题{n}", "version": 1, "state": "completed",
                       "public_query": "q", "source_refs": []} for n in range(80)]
         model.decisions({"meeting": {"id": "m", "coordinator_cursor": 0}, "cursor": 1, "segments": [], "questions": questions})

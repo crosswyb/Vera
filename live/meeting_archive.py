@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from live.artifact_writer import digest
-from live.recording_archive import RecordingArchive
+from live.recording_archive import RecordingArchive, identity
 from live.store import LiveError, require, uid
 from live.workbench_contracts import MeetingSummary
 
@@ -34,7 +34,7 @@ def clock(ms):
 
 
 def render_transcript(meeting, segments):
-    lines = ["# " + meeting["title"] + " · 全量转录", "", "> 本机语音识别结果，可能有误；请结合原始音频核对。撤回内容不计入正文。", "",
+    lines = ["# " + meeting["title"] + " · 全量转录", "", "> 语音识别结果可能有误，请结合原始音频核对。撤回内容不计入正文。", "",
              f"- 有效最终片段：{len(segments)}", f"- 会议 ID：{meeting['id']}", ""]
     job = meeting.get("audio_import", {})
     if job:
@@ -43,8 +43,10 @@ def render_transcript(meeting, segments):
         lines += ["本场没有已确认的转录文字。请检查录音与识别状态；此文件不代表识别成功。", ""]
     for index, s in enumerate(segments, 1):
         source = "文字补充" if s["capture_epoch"] == "manual" else SOURCE_LABELS[s["source"]]
+        service = {"apple_local": "Apple 中文识别", "dashscope": "阿里云百炼", "deepseek": "DeepSeek"}
+        label = service.get(s.get("provider"), "Apple 中文识别") if s["capture_epoch"] != "manual" else "手动"
         lines += [f"## S{index:04d} · {clock(s.get('audio_start_ms'))} · {source}", "",
-                  f"录音段：{s['capture_epoch']}；识别时间：{s.get('occurred_at', '')}", "", s["text"], ""]
+                  f"录音段：{s['capture_epoch']} · 识别服务：{label} · 识别时间：{s.get('occurred_at', '')}", "", s["text"], ""]
     return "\n".join(lines)
 
 
@@ -105,6 +107,8 @@ class MeetingArchive(RecordingArchive):
             recordings = m.setdefault("recordings", [])
             require(not any(r["state"] == "recording" for r in recordings), "请先停止当前录音", 409)
             require(not any(r["epoch"] == value.recording_id for r in recordings), "录音标识已使用", 409)
+            if value.settings_revision is not None or value.provider != "apple_local":
+                self._register_speech_capture(m, value)
             for source in value.sources:
                 path = f"{m['directory']}/01-原始音频-{source}-{value.recording_id}.caf"
                 require(not self.writer_for(m).path(path).exists(), "录音文件已存在", 409)
@@ -119,11 +123,28 @@ class MeetingArchive(RecordingArchive):
     def _recording_event(self, m, value):
         recording = next((r for r in m.get("recordings", []) if r["epoch"] == value.capture_epoch and r["source"] == value.source), None)
         require(recording is not None, "录音未登记", 409)
-        require(value.state in {"saved", "partial", "missing"}, "录音状态无效", 400)
-        path = self.writer_for(m).path(recording["path"])
-        saved = path.is_file() and path.stat().st_size > 0
-        recording.update(state=value.state if saved else "missing", bytes=path.stat().st_size if saved else 0,
-                         duration_ms=value.audio_end_ms or 0, finished_at=time.time(), frames_received=value.frames_received)
+        require(value.state in {"saved", "partial", "missing", "failed"}, "录音状态无效", 400)
+        file_identity = None
+        closed_without_audio = False
+        try:
+            path = self.writer_for(m).path(recording["path"])
+            file_identity = identity(path) if path.is_file() else None
+            closed_without_audio = value.state == "missing" and value.frames_received == 0 and not path.exists()
+        except (OSError, LiveError):
+            if value.state != "failed":
+                raise
+        tracked_capture = value.capture_epoch in m.get("capture_epochs", {})
+        size = file_identity[2] if file_identity is not None else 0
+        saved = value.state in {"saved", "partial"} and size > 0 and (not tracked_capture or bool(value.frames_received))
+        state = value.state if saved or value.state == "failed" else "missing"
+        recording.update(state=state, bytes=size, duration_ms=value.audio_end_ms or 0,
+                         finished_at=time.time(), frames_received=value.frames_received)
+        if state == "failed":
+            recording["error"] = value.detail or "录音关闭后无法确认保存。"
+        else:
+            recording.pop("error", None)
+        if tracked_capture:
+            recording.update(closed_identity=file_identity if saved else None, closed_without_audio=closed_without_audio)
 
     def _archive_file(self, db, m, kind, content, name):
         m.setdefault("base_files", {})

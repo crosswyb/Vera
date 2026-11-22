@@ -10,7 +10,7 @@ let package = Package(
         .executable(name: "DesktopHost", targets: ["DesktopHost"]),
     ],
     targets: [
-        .target(name: "AudioCore"),
+        .target(name: "AudioCore", exclude: ["Resources"]),
         .executableTarget(name: "AudioHelper", dependencies: ["AudioCore"]),
         .executableTarget(name: "DesktopHost", dependencies: ["AudioCore"]),
         .testTarget(name: "AudioCoreTests", dependencies: ["AudioCore"]),

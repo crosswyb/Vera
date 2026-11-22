@@ -55,7 +55,7 @@ def probe(backend):
                 with opener.open(urllib.request.Request(base + path, data=payload, headers=headers, method=method), timeout=4) as response:
                     return response.status, response.read()
 
-            for path, kind in [("/workbench", "html"), ("/static/workbench.css", "css"), ("/static/workbench.js", "js")]:
+            for path, kind in [("/workbench", "html"), ("/static/workbench.css", "css"), ("/static/workbench-layout.css", "layout_css"), ("/static/workbench.js", "js")]:
                 status, data = request(path, authenticated=False)
                 assert status == 200 and len(data) > 500
                 result[kind] = {"status": status, "bytes": len(data)}
@@ -70,6 +70,16 @@ def probe(backend):
             settings = json.loads(data)
             assert status == 200 and settings["editable"] and "api_key" not in settings["model"]
             result["settings_get"] = status
+            speech = settings["speech"]
+            assert speech["live_provider"] == speech["file_provider"] == "apple_local"
+            assert set(speech["providers"]["deepseek"]["destinations"]) == {"file"}
+            assert all("api_key" not in provider for provider in speech["providers"].values())
+            assert all(receipt["status"] == "not_tested" for kinds in speech["verification"].values()
+                       for receipt in kinds.values())
+            assert handshake.get("speech_token") and handshake["speech_token"] != handshake["owner_token"]
+            status, data = request("/static/workbench-speech.js", authenticated=False)
+            assert status == 200 and b"createSpeechSettings" in data
+            result["speech_settings"] = "Apple defaults, cloud services awaiting tests, bundled speech UI, private native token"
             status, data = request("/live/v2/feishu/settings")
             sync = json.loads(data)
             assert status == 200 and not sync["settings"]["enabled"] and sync["jobs"] == []
@@ -93,6 +103,17 @@ def probe(backend):
             assert saved_caps["model_name"] == "frozen-provider-fixture" and saved_caps["search_provider"] == "tavily"
             assert not saved_caps["model_enabled"] and not saved_caps["search_enabled"]
             result["settings_restart_persistence"] = True
+            saved = json.loads(data)
+            compatible = next(p for p in saved["model_profiles"] if p["name"] == "frozen-provider-fixture")
+            assert compatible["api_key_configured"] and "api_key" not in compatible
+            draft["revision"] = saved["revision"]
+            draft["model"].update(provider="deepseek", name="deepseek-v4-pro", base_url="https://api.deepseek.com", api_key=None)
+            _, raw = request("/live/v2/settings", draft, method="PUT")
+            draft["revision"] = json.loads(raw)["revision"]
+            draft["model"] = {k: v for k, v in compatible.items() if k != "api_key_configured"}
+            _, raw = request("/live/v2/settings", draft, method="PUT")
+            assert json.loads(raw)["model"]["api_key_configured"] and b"fixture-only" not in raw
+            result["saved_model_round_trip"] = True
             status, data = request("/live/v2/storage")
             storage = json.loads(data)
             assert status == 200 and storage["output_root"] == str((root / "meetings").resolve())
@@ -119,8 +140,8 @@ def probe(backend):
             assert answer["brief"]["short_answer"] and answer["brief"]["caveat"]
             assert 1 <= len(answer["brief"]["key_points"]) <= 3
             document = next(path.read_text() for path in first_root.rglob("*.md")
-                            if "## 一句话结论" in path.read_text())
-            assert document.index("## 一句话结论") < document.index("## 完整分析") < document.index("## 关键依据")
+                            if "## 结论摘要" in path.read_text())
+            assert document.index("## 结论摘要") < document.index("## 完整分析") < document.index("## 关键依据")
             assert answer["brief"]["caveat"] in document
             result["structured_brief_and_markdown"] = "short answer, full analysis, caveat, original evidence"
             status, data = request("/live/v2/storage", {"output_root": str(second_root)}, method="PUT")

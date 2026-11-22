@@ -6,7 +6,7 @@ import AVFoundation
 final class PCMConverter {
     private var converter: AVAudioConverter?
 
-    func convert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) -> AVAudioPCMBuffer? {
+    func convert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat, allowEmpty: Bool = false) -> AVAudioPCMBuffer? {
         if input.format == format { return input }
         if converter == nil || converter!.inputFormat != input.format || converter!.outputFormat != format {
             converter = AVAudioConverter(from: input.format, to: format)
@@ -21,6 +21,25 @@ final class PCMConverter {
             consumed = true; state.pointee = .haveData
             return input
         }
-        return status == .error || output.frameLength == 0 ? nil : output
+        return status == .error || (!allowEmpty && output.frameLength == 0) ? nil : output
+    }
+
+    /// A streaming resampler can retain valid audio until it sees end-of-stream.
+    func drain(_ receive: (AVAudioPCMBuffer) -> Void) throws {
+        guard let converter else { return }
+        self.converter = nil
+        while true {
+            guard let output = AVAudioPCMBuffer(pcmFormat: converter.outputFormat, frameCapacity: 4096) else {
+                throw AudioCoreError.conversionFailed
+            }
+            var error: NSError?
+            let status = converter.convert(to: output, error: &error) { _, state in
+                state.pointee = .endOfStream
+                return nil
+            }
+            guard status != .error else { throw AudioCoreError.conversionFailed }
+            if output.frameLength > 0 { receive(output) }
+            if status == .endOfStream || output.frameLength == 0 { return }
+        }
     }
 }

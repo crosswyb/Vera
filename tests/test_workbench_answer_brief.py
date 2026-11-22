@@ -28,7 +28,95 @@ ANSWER = {"answer": "合成补充分析。\n\n具体部署条件仍需核对。"
           "uncertainty": ["本机部署能力尚未确认。"], "evidence_status": "mixed"}
 
 
+LONG_CONCLUSION = "长结论需要保留必要条件及其适用范围。" * 12
+
+
 class AnswerBriefTest(unittest.TestCase):
+    def test_answer_deadline_reuses_read_sources_and_retries_only_once(self):
+        from unittest.mock import Mock
+        from live.workbench_runtime import OutcomeUnknown
+        timeout = OutcomeUnknown(diagnostic={'code': 'response_deadline', 'service': 'model'})
+        for second_timeout in (False, True):
+            with self.subTest(second_timeout=second_timeout):
+                model, search, stage = Mock(), Mock(), Mock()
+                search.search.return_value = [{'url': SOURCES[0]['url'], 'content': QUOTE * 5}]
+                model.answer.side_effect = [timeout, timeout if second_timeout else ANSWER]
+                run = lambda: Researcher(search, model).run({}, {'title': '行情', 'public_query': '行情'}, stage)
+                if second_timeout:
+                    with self.assertRaises(OutcomeUnknown):
+                        run()
+                else:
+                    self.assertEqual(run()['evidence_status'], 'mixed')
+                self.assertEqual(model.answer.call_count, 2)
+                self.assertIs(model.answer.call_args_list[0].args[2], model.answer.call_args_list[1].args[2])
+                search.search.assert_called_once_with('行情')
+                self.assertEqual(sum(c.args[0] == 'model_timeout_retry' for c in stage.progress.call_args_list), 1)
+
+    def test_industry_questions_from_meeting_require_search_even_for_legacy_cards(self):
+        from unittest.mock import Mock
+        for title in ('当前炼油加工利润是否受原油与产品两端挤压', '大宗商品企业用时间错配与套保管理价格波动的常见做法',
+                      '服务器硬件毛利率与内存涨价影响', '企业利润管理采用量化模型与传统信息化的对比',
+                      '流程工业设备状态推演与故障诊断的行业做法'):
+            with self.subTest(title=title):
+                search = Mock()
+                search.search.return_value = []
+                engine = Researcher(search, None, choose_search=Mock(side_effect=AssertionError('unexpected direct route')))
+                result = engine.run({'data_scope': 'real'}, {'title': title, 'public_query': '允许外发的检索词'}, lambda _: None)
+                search.search.assert_called_once_with('允许外发的检索词')
+                self.assertEqual(result['evidence_status'], 'insufficient')
+
+    def test_relative_year_in_import_does_not_anchor_search_to_invented_year(self):
+        from unittest.mock import Mock
+        search = Mock()
+        search.search.return_value = []
+        q = {'title': '行情', 'evidence_need': 'public', 'public_query': '内存 2025年 价格走势',
+             'public_query_origin': 'model', 'discussion_context': [{'is_basis': True, 'text': '今年涨了吗？'}]}
+        engine = Researcher(search, None)
+        engine.run({'data_scope': 'real'}, q, lambda _: None)
+        search.search.assert_called_once_with('内存 价格走势')
+        engine.run({'data_scope': 'real'}, {**q, 'public_query_origin': 'owner'}, lambda _: None)
+        self.assertEqual(search.search.call_args.args[0], '内存 2025年 价格走势')
+
+    def test_mixed_intent_bounds_supported_result_and_internal_intent_uses_no_services(self):
+        from unittest.mock import Mock
+        search, model = Mock(), Mock()
+        search.search.return_value = [{'url': SOURCES[0]['url'], 'content': QUOTE * 5}]
+        model.answer.return_value = {**ANSWER, 'evidence_status': 'supported'}
+        engine = Researcher(search, model, choose_search=Mock(side_effect=AssertionError('unexpected routing call')))
+        result = engine.run({}, {'title': '这个判断是否成立', 'evidence_need': 'mixed', 'public_query': '公开行情'}, lambda _: None)
+        self.assertEqual(result['evidence_status'], 'mixed')
+        self.assertIn('内部', result['uncertainty'][0])
+        result = engine.run({}, {'title': '本公司实际采购成本是多少', 'evidence_need': 'internal'}, lambda _: None)
+        self.assertEqual(result['evidence_status'], 'insufficient')
+        search.search.assert_called_once_with('公开行情')
+
+    def test_mandatory_search_bypasses_direct_model_and_only_sends_public_query(self):
+        from unittest.mock import Mock
+        for title, basis in [("Python 3.9 现在还在官方安全维护期内吗？", ""), ("请给出原文链接", ""),
+                             ("这项标准是否有效？", ""), ("维护周期", "请注明出处")]:
+            with self.subTest(title=title):
+                search = Mock()
+                search.search.return_value = []
+                route = Mock(side_effect=AssertionError("mandatory search bypasses model routing"))
+                q = {"title": title, "public_query": "approved query", "discussion_context": [{"is_basis": True, "text": basis}]}
+                result = Researcher(search, None, choose_search=route).run({}, q, lambda _: None)
+                search.search.assert_called_once_with("approved query")
+                self.assertEqual(result["evidence_status"], "insufficient")
+
+    def test_neighbouring_source_request_does_not_force_an_unrelated_calculation(self):
+        from live.source_reader import requires_web_evidence
+        self.assertFalse(requires_web_evidence({"title": "请现在计算120乘2.5", "discussion_context": [
+            {"is_basis": False, "text": "另一个问题请提供官方出处"}]}))
+
+    def test_required_evidence_does_not_publish_an_uncited_model_explanation(self):
+        from unittest.mock import Mock
+        search, model = Mock(), Mock()
+        search.search.return_value = [{"url": "https://fixture.invalid/status", "content": QUOTE * 5}]
+        model.answer.return_value = {"answer": "没有佐证的结论", "claims": [], "evidence_status": "model_explanation"}
+        result = Researcher(search, model).run({}, {"title": "现在还支持吗？"}, lambda _: None)
+        self.assertEqual(result["evidence_status"], "insufficient")
+        self.assertNotIn("没有佐证的结论", str(result))
+
     def test_brief_is_saved_with_valid_evidence_links(self):
         result = validate_result({**ANSWER, "sources": SOURCES})
         self.assertEqual(result["brief"], BRIEF)
@@ -50,7 +138,7 @@ class AnswerBriefTest(unittest.TestCase):
         self.assertEqual(AnswerBrief.model_validate(value).key_points[0].kind, "inference")
 
     def test_brief_limits_are_enforced_by_schema(self):
-        for changes in ({"short_answer": "字" * 81}, {"key_points": BRIEF["key_points"] * 2}, {"caveat": ""}):
+        for changes in ({"short_answer": ""}, {"key_points": BRIEF["key_points"] * 2}, {"caveat": ""}):
             with self.subTest(changes=changes), self.assertRaises(ValidationError):
                 AnswerBrief.model_validate({**BRIEF, **changes})
 
@@ -81,7 +169,15 @@ class AnswerBriefTest(unittest.TestCase):
         self.assertEqual(payload["public_query"], "workflow local deployment")
         self.assertNotIn("不应发给模型", str(payload))
         self.assertIn("官方声称支持的功能未经独立验证时用source_claim", system)
-        self.assertIn('"maxLength": 80', system)
+        self.assertNotIn("maxLength", AnswerBrief.model_json_schema()["properties"]["short_answer"])
+
+    def test_sourced_long_conclusion_is_published_without_correction(self):
+        model = TextModel(None, ModelService())
+        output = {**ANSWER, "brief": {**BRIEF, "short_answer": LONG_CONCLUSION}}
+        with patch.object(model, "call", return_value=output) as call:
+            result = model.answer({}, {"title": "合成问题"}, SOURCES)
+        call.assert_called_once()
+        self.assertEqual(result["brief"]["short_answer"], LONG_CONCLUSION)
 
     def test_bad_brief_reference_gets_one_correction_using_the_same_sources(self):
         model = TextModel(None, ModelService())
@@ -124,13 +220,39 @@ class AnswerBriefTest(unittest.TestCase):
         self.assertLess(content.index(BRIEF["short_answer"]), content.index("## 完整分析"))
         self.assertLess(content.index("## 完整分析"), content.index("## 关键依据"))
         self.assertLess(content.index("## 完整分析"), content.index(BRIEF['caveat']))
-        self.assertIn("## 一句话结论", content)
+        self.assertIn("## 结论摘要", content)
         self.assertIn("（佐证 1）", content)
         self.assertIn(QUOTE, content)
         self.assertIn(SOURCES[0]["url"], content)
 
 
 class AnswerContextTest(unittest.TestCase):
+    def test_model_direct_decision_publishes_without_search_or_citations(self):
+        self.question([])
+        work = self.wb.claim(self.agent)
+        model = TextModel(None, ModelService())
+        engine = Researcher(None, model, choose_search=model.choose_search)
+        with patch.object(model, "call", return_value={"route": "direct", "short_answer": LONG_CONCLUSION, "answer": "120 × 2.5 = 300件。"}) as call:
+            result = engine.run(work["meeting"], work["question"], lambda _: None)
+        self.wb.finish(self.agent, work, result)
+        saved = self.wb.snapshot(self.owner, self.mid)["questions"][0]
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(saved["state"], "completed")
+        self.assertEqual(saved["result"]["evidence_status"], "model_explanation")
+        self.assertEqual(saved["result"]["sources"], [])
+        self.assertEqual(saved["result"]["brief"]["short_answer"], LONG_CONCLUSION)
+
+    def test_model_search_decision_uses_only_approved_query(self):
+        from unittest.mock import Mock
+        search = Mock()
+        search.search.return_value = []
+        model = TextModel(None, ModelService())
+        engine = Researcher(search, model, choose_search=model.choose_search)
+        with patch.object(model, "call", return_value={"route": "web_search"}):
+            result = engine.run({}, {"title": "内部讨论的问题", "public_query": "公开检索词"}, lambda _: None)
+        search.search.assert_called_once_with("公开检索词")
+        self.assertEqual(result["evidence_status"], "insufficient")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)

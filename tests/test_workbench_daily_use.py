@@ -10,7 +10,7 @@ from unittest.mock import patch
 from live.model_budget import ModelBudget
 from live.source_reader import Researcher
 from live.store import LiveError
-from live.workbench_contracts import AudioEvent, Decisions, MeetingPermissions, NewMeeting, Utterance
+from live.workbench_contracts import AudioEvent, Decisions, EditQuestion, MeetingPermissions, NewMeeting, NewQuestion, QuestionAction, Utterance
 from live.workbench_runtime import WorkbenchRuntime
 from live_api import create_app
 
@@ -46,6 +46,35 @@ class DailyUseTest(unittest.TestCase):
         self.assertFalse(meeting["permissions"]["model"])
         with self.assertRaises(LiveError):
             self.wb.create(self.member, NewMeeting(title="成员授权", permissions=MeetingPermissions(model=True)))
+
+    def test_explicit_web_request_requires_query_and_meeting_permission(self):
+        q = self.wb.question(self.owner, self.mid, NewQuestion(title='解释采购成本', public_query='采购成本'))
+        self.assertFalse(q.get('web_search_requested'))
+        with self.assertRaises(LiveError):
+            self.wb.question(self.owner, self.mid, NewQuestion(title=q['title'], web_search_requested=True))
+        with self.assertRaises(LiveError):
+            self.wb.action(self.owner, q['id'], QuestionAction(action='approve', expected_version=1,
+                           public_query=' ', web_search_requested=True))
+        approved = self.wb.action(self.owner, q['id'], QuestionAction(action='approve', expected_version=1,
+                                  public_query='公开行业资料', web_search_requested=True))
+        self.assertTrue(approved['web_search_requested'])
+        self.wb.permissions(self.owner, self.mid, MeetingPermissions(model=True))
+        m = self.wb.snapshot(self.owner, self.mid)['meeting']
+        self.assertIn('尚未批准外部搜索', self.wb.blocked_reason(m, {**approved, 'evidence_need':'internal'}))
+        self.assertIsNone(self.wb.claim(self.agent))
+        self.wb.permissions(self.owner, self.mid, MeetingPermissions(model=True, search=True))
+        self.assertTrue(self.wb.claim(self.agent)['question']['web_search_requested'])
+        revised = self.wb.edit(self.owner, q['id'], EditQuestion(expected_version=1, title='给定条件计算'))
+        self.assertFalse(revised.get('web_search_requested'))
+
+    def test_existing_automatic_answer_cannot_satisfy_a_new_request_for_sources(self):
+        title = '解释采购成本'
+        old = self.wb.question(self.owner, self.mid, NewQuestion(title=title, public_query='公开资料'))
+        request = NewQuestion(title=title, public_query='公开资料', web_search_requested=True)
+        new = self.wb.question(self.owner, self.mid, request)
+        self.assertNotEqual(old['id'], new['id'])
+        self.assertTrue(new['web_search_requested'])
+        self.assertEqual(self.wb.question(self.owner, self.mid, request)['id'], new['id'])
 
     def test_identified_candidate_starts_research_without_question_approval(self):
         self.wb.utterance(self.owner, self.mid, Utterance(text="上下文压缩以后为什么会忘记已有约束？"))

@@ -40,5 +40,19 @@ final class CaptureRecording {
         file = nil
     }
 
+    /// Verify the frame count and decode the tail after the writer closes.
+    func hasReadableFrames() -> Bool {
+        guard closed, frames > 0, let saved = try? AVAudioFile(forReading: url),
+              saved.length > 0, UInt64(saved.length) == frames,
+              saved.processingFormat.sampleRate == sampleRate else { return false }
+        let count = AVAudioFrameCount(min(saved.length, 4096))
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: saved.processingFormat, frameCapacity: count) else { return false }
+        saved.framePosition = saved.length - AVAudioFramePosition(count)
+        do {
+            try saved.read(into: buffer, frameCount: count)
+            return buffer.frameLength == count
+        } catch { return false }
+    }
+
     deinit { file?.close() }
 }

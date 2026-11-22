@@ -170,6 +170,54 @@ class ProviderSettingsTest(unittest.TestCase):
         self.assertEqual(self.save(draft).status_code, 400)
         self.assertFalse(self.path.exists())
 
+    def test_saved_compatible_models_restore_private_options_and_probe_keys(self):
+        url = "https://gateway.example/tenant-a/v1"
+        for name in ("A", "B"):
+            draft = self.draft()
+            draft["model"].update(provider="openai_compatible", base_url=url + "/chat/completions",
+                                  name=name, api_key="fixture-key-" + name, max_tokens=4200 if name == "A" else 4800)
+            draft["search"]["use_model_key"] = False
+            self.assertEqual(self.save(draft).status_code, 200)
+        reopened = ProviderSettings(self.path)
+        public = reopened.public()["model_profiles"]
+        self.assertEqual([p["name"] for p in public], ["B", "A", "deepseek-flash"])
+        self.assertEqual(public[1]["max_tokens"], 4200)
+        self.assertTrue(all(p["api_key_configured"] and "api_key" not in p for p in public))
+        self.assertNotIn("fixture-key", json.dumps(public))
+        draft = self.draft()
+        draft["model"] = {k:v for k,v in public[1].items() if k != "api_key_configured"}
+        with patch("requests.Session.post", return_value=completion({"ok": True})) as post:
+            probe = self.client.post("/live/v2/settings/test/model", json=draft, headers=self.headers)
+        self.assertTrue(probe.get_json()["ok"])
+        self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer fixture-key-A")
+        self.assertEqual(reopened.current.model.name, "B")
+        candidate = reopened.preview(SettingsUpdate.model_validate(draft))
+        self.assertEqual(candidate.model.api_key, "fixture-key-A")
+        for different in ({"base_url": "https://gateway.example/tenant-b/v1"}, {"name": "C"},
+                          {"provider": "deepseek"}):
+            with self.subTest(different=different):
+                changed = {**draft, "model": {**draft["model"], **different}}
+                self.assertFalse(reopened.preview(SettingsUpdate.model_validate(changed)).model.api_key)
+
+    def test_migrated_deepseek_alias_shares_rotation_and_clear_across_templates(self):
+        legacy = self.settings.current.model_dump()
+        legacy["model"]["base_url"] += "/v1"
+        self.path.parent.mkdir()
+        self.path.write_text(json.dumps(legacy))
+        settings = ProviderSettings(self.path)
+        self.assertFalse(settings.load_error)
+        for name, key, clear, expected in (("deepseek-pro", None, False, "model-fixture-secret"),
+                                            ("deepseek-flash", "rotated-key", False, "rotated-key"),
+                                            ("deepseek-pro", None, True, "")):
+            draft = settings.current.model_dump()
+            draft["model"].update(base_url="https://api.deepseek.com", name=name, api_key=key, clear_api_key=clear)
+            settings.commit(settings.preview(SettingsUpdate.model_validate(draft)))
+            settings = ProviderSettings(self.path)
+            self.assertEqual(settings.current.model.api_key, expected)
+            self.assertTrue(all(p.api_key == expected for p in settings.model_profiles))
+        self.assertNotIn("rotated-key", self.path.read_text())
+        self.assertNotIn("model-fixture-secret", self.path.read_text())
+
     def test_stale_update_does_not_overwrite_saved_settings(self):
         stale = self.draft()
         self.assertEqual(self.save().status_code, 200)
@@ -370,13 +418,16 @@ class ProviderSettingsTest(unittest.TestCase):
         self.assertEqual(sessions[0], sessions[1])
         self.assertNotEqual(sessions[0], sessions[2])
 
-    def test_opencode_output_correction_keeps_the_meeting_session_but_http_errors_are_not_retried(self):
+    def test_opencode_deferred_detection_keeps_the_meeting_session_but_http_errors_are_not_retried(self):
         from live.model_transport import ModelRequestError
         config = ModelService(provider="openai_compatible", base_url="https://opencode.ai/zen/go/v1")
         work = {"meeting": {"id": "meeting-one", "coordinator_cursor": 0}, "cursor": 1, "questions": [], "segments": []}
         model = TextModel(self.budget(), config)
         with patch("requests.Session.post", side_effect=[completion({"actions": [{"kind": "invalid"}]}), completion({"actions": []})]) as post:
-            model.decisions(work)
+            rejected = model.decisions(work)
+            self.assertTrue(rejected.failures)
+            self.assertEqual(post.call_count, 1)
+            model.decisions({**work, 'detection_task': {'kind': 'scan'}})
         self.assertEqual(post.call_count, 2)
         self.assertEqual(post.call_args_list[0].kwargs["headers"]["x-opencode-session"],
                          post.call_args_list[1].kwargs["headers"]["x-opencode-session"])

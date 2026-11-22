@@ -1,0 +1,26 @@
+<details id="feishu-setup-guide" class="feishu-guide">
+  <summary>配置与排错指南</summary>
+  <ol>
+    <li><strong>在这台 Mac 上初始化 CLI</strong>
+      <p>装好 CLI 后，在终端运行 <code>lark-cli config init</code>，按引导配置飞书应用。完成后回来点「刷新状态」。如果下方已经显示你的飞书账号，直接从第 3 步开始。</p>
+      <a href="https://github.com/larksuite/cli/blob/v1.0.100/README.zh.md#安装与快速开始" target="_blank" rel="noopener noreferrer">官方中文快速开始 ↗</a></li>
+    <li><strong>连接用来发文档和消息的飞书账号</strong>
+      <p>点「连接飞书」并打开授权页，确认账号后回到这里点「我已完成授权」。看到「已连接」和预期的账号名即可继续。仅有机器人身份时仍需这一步。</p>
+      <a href="https://github.com/larksuite/cli/blob/v1.0.100/skills/lark-shared/references/lark-shared-identity-and-permissions.md" target="_blank" rel="noopener noreferrer">官方身份与权限说明 ↗</a></li>
+    <li><strong>选一个能写入的文件夹，再选通知群</strong>
+      <p>勾选「自动同步新保存的查证结果」。在飞书云空间复制<strong>文件夹链接</strong>，粘贴后点「检查文件夹」，核对名称。如果希望同事收到提醒，选「同步云文档并通知群聊」，搜索并选中你能发言的群，再点「保存飞书设置」。仅保存云文档时可以跳过选群。</p>
+      <a href="https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/create" target="_blank" rel="noopener noreferrer">官方创建文档说明 ↗</a> · <a href="https://open.feishu.cn/document/server-docs/im-v1/message/create" target="_blank" rel="noopener noreferrer">官方发送消息说明 ↗</a></li>
+    <li><strong>发一次测试，用接收人的手机验收</strong>
+      <p>点「发送测试」，展开「最近同步」。先在所选文件夹看是否出现测试文档。启用群通知时，再让一位群成员从手机群消息点开链接。能看到测试正文，就验证了接收方的阅读权限。</p></li>
+  </ol>
+  <details><summary>配置了但没有收到，怎么查？</summary>
+    <dl>
+      <dt>找不到 CLI，或连接飞书不可用</dt><dd>在终端运行 <code>lark-cli --version</code> 核对版本（本 App 要求 1.0.100 或以上），再运行 <code>lark-cli doctor</code> 检查本机配置和网络。完成后点「刷新状态」。</dd>
+      <dt>显示已连接，仍提示缺少权限</dt><dd>请管理员在飞书开放平台为该应用开通报错中指明的用户权限，并按租户要求发布或审批。然后点「重新授权」并确认。可用 <code>lark-cli auth status --json --verify</code> 核对当前用户身份。</dd>
+      <dt>文件夹能检查，创建文档却失败</dt><dd>检查文件夹只核对名称和访问情况。请让文件夹所有者给已连接的账号编辑权限，再重试同步。</dd>
+      <dt>文档已生成，群里没消息</dt><dd>核对接收方式和已保存的群名，确认账号在群里且能发言。在「最近同步」点「重试通知」。若显示「结果待核对」，先查看群里是否已收到。</dd>
+      <dt>群里有消息，同事点开却无权阅读</dt><dd>在飞书文件夹或文档的「分享」里给接收成员阅读权限，再让对方打开原消息里的链接。</dd>
+      <dt>最近同步是空的</dt><dd>确认页面显示「已开启」。只有启用后新保存的查证结果会入队。用「发送测试」可以立即验证，无需重新导入录音。</dd>
+    </dl>
+  </details>
+</details>

@@ -2,8 +2,8 @@ import AppKit
 import AVFoundation
 import Foundation
 
-/// Owns capture, explicitly requested local recordings, and local transcription.
-/// It never reads preferences, calls a model, or uploads meeting data.
+/// Owns capture and local recording. Recognition uses the task's fixed speech
+/// configuration and cannot stop the capture devices.
 @MainActor
 public final class AudioCore {
     public var onEvent: ((AudioEvent) -> Void)?
@@ -16,9 +16,30 @@ public final class AudioCore {
     private var stopTask: Task<Void, Never>?
     private var sleepObserver: NSObjectProtocol?
 
-    public init() {}
+    private let makeSource: (AudioSourceKind, AudioConfig) -> any CapturedAudioSource
+    private let makeSocket: ((URLRequest) -> any DashScopeSocket)?
+    private let requestMicrophoneAccess: () async -> Bool
 
-    public func start(_ requested: AudioConfig) async throws {
+    public convenience init() {
+        self.init(makeSource: { kind, config in
+            if kind == .system {
+                let tap = SystemAudioTap()
+                tap.includedProcessID = config.includedProcessID
+                return tap
+            }
+            return MicrophoneSource()
+        })
+    }
+
+    init(makeSource: @escaping (AudioSourceKind, AudioConfig) -> any CapturedAudioSource,
+         makeSocket: ((URLRequest) -> any DashScopeSocket)? = nil,
+         requestMicrophoneAccess: @escaping () async -> Bool = { await AVCaptureDevice.requestAccess(for: .audio) }) {
+        self.requestMicrophoneAccess = requestMicrophoneAccess
+        self.makeSource = makeSource
+        self.makeSocket = makeSocket
+    }
+
+    public func start(_ requested: AudioConfig, speech: SpeechSessionConfig? = nil, lease: SpeechLease? = nil) async throws {
         #if !arch(arm64)
         throw AudioCoreError.unsupportedMachine
         #endif
@@ -37,22 +58,15 @@ public final class AudioCore {
         config = requested; state = "preparing"
         reportStatus()
         do {
-            if requested.transcribe {
-                let model = await LocalSpeechModels.status(locale: requested.locale)
-                guard generation == token, !Task.isCancelled else { return }
-                guard model == "installed" else { throw AudioCoreError.modelUnavailable(model) }
-            }
             if requested.sources.contains(.microphone) {
-                let permitted = await AVCaptureDevice.requestAccess(for: .audio)
+                let permitted = await requestMicrophoneAccess()
                 guard generation == token, !Task.isCancelled else { return }
                 guard permitted else { throw AudioCoreError.microphoneDenied }
             }
             for kind in requested.sources {
-                let recognizer = requested.transcribe ? try await LocalRecognition.start(locale: requested.locale) : nil
-                guard generation == token, !Task.isCancelled else {
-                    await recognizer?.cancel(); return
-                }
-                let stream = try CaptureStream(config: requested, epoch: epoch, kind: kind, recognizer: recognizer,
+                guard generation == token, !Task.isCancelled else { return }
+                let stream = try CaptureStream(config: requested, epoch: epoch, kind: kind,
+                                           source: makeSource(kind, requested),
                                            onEvent: { [weak self] event in self?.onEvent?(event) },
                                            onFailure: { [weak self] code, detail in
                     self?.failCapture(code: code, detail: detail)
@@ -71,6 +85,7 @@ public final class AudioCore {
                 }
             }
             reportStatus()
+            for stream in streams { stream.startRecognition(speech: speech, lease: lease, makeSocket: makeSocket) }
         } catch {
             guard generation == token else { return }
             await stop(graceful: false)
@@ -87,16 +102,26 @@ public final class AudioCore {
         let finishing = streams
         streams = []
         for stream in finishing { stream.halt() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(4))
         state = "stopping"
         reportStatus()
         let task = Task { @MainActor [self] in
-            for stream in finishing { await stream.finish(graceful: graceful) }
+            // Start both tasks before awaiting either so neither source consumes
+            // the other's finalization time.
+            let sourceTasks = finishing.map { stream in
+                Task { @MainActor in await stream.finish(graceful: graceful, deadline: deadline) }
+            }
+            for sourceTask in sourceTasks { await sourceTask.value }
             stopTask = nil
             state = "stopped"
             reportStatus()
         }
         stopTask = task
         await task.value
+    }
+
+    public func pauseRecognitionForDeliveryBacklog() {
+        for stream in streams { stream.pauseRecognitionForDeliveryBacklog() }
     }
 
     public func reportStatus() {
@@ -143,18 +168,16 @@ private final class CaptureStream {
     private let config: AudioConfig
     private let epoch: String
     private let kind: AudioSourceKind
-    private let recognizer: LocalRecognition?
     private let onEvent: (AudioEvent) -> Void
     private let onFailure: (String, String) -> Void
     private let source: any CapturedAudioSource
-    private var reducer = TranscriptReducer()
+    private var recognition: LiveCaptureRecognition?
     private var seq = 0
     private var inputTask: Task<Void, Never>?
-    private var resultTask: Task<Void, Never>?
-    private var finalizationTask: Task<Void, Never>?
     private var input: AsyncStream<AVAudioPCMBuffer>.Continuation?
     private var stopped = false
     private var failed = false
+    private var recordingWriteFailed = false
     private var frames: UInt64 = 0
     private var nonSilentFrames: UInt64 = 0
     private var sampleRate: Double = 0
@@ -163,16 +186,11 @@ private final class CaptureStream {
     private var lastLevelSeconds = 0.0
     private let recording: CaptureRecording?
 
-    init(config: AudioConfig, epoch: String, kind: AudioSourceKind, recognizer: LocalRecognition?,
+    init(config: AudioConfig, epoch: String, kind: AudioSourceKind, source: any CapturedAudioSource,
          onEvent: @escaping (AudioEvent) -> Void, onFailure: @escaping (String, String) -> Void) throws {
-        self.config = config; self.epoch = epoch; self.kind = kind; self.recognizer = recognizer
+        self.config = config; self.epoch = epoch; self.kind = kind; self.source = source
         self.onEvent = onEvent; self.onFailure = onFailure
         self.recording = try config.recordingDirectory.map { try CaptureRecording(directory: $0, epoch: epoch, source: kind) }
-        if kind == .system {
-            let tap = SystemAudioTap()
-            tap.includedProcessID = config.includedProcessID
-            self.source = tap
-        } else { self.source = MicrophoneSource() }
     }
 
     func start() throws {
@@ -192,115 +210,85 @@ private final class CaptureStream {
         source.onRateChange = { fail("device_changed", "Audio device changed; restart capture to create a new epoch.") }
         inputTask = Task { [weak self] in
             guard let self else { return }
-            let converter = PCMConverter()
-            var appendedSeconds = 0.0
-            var silence = 0.0
-            var voiced = 0.0
-            var lastFinalized = 0.0
             for await buffer in buffers {
                 guard !Task.isCancelled else { break }
-                do { try self.recording?.append(buffer) }
-                catch {
-                    self.fail(code: "recording_failed", detail: "Local recording could not be written; capture stopped."); break
-                }
-                self.observe(buffer)
-                guard let recognizer = self.recognizer else { continue }
-                guard let converted = converter.convert(buffer, to: recognizer.format) else {
-                    self.fail(code: "conversion_failed", detail: AudioCoreError.conversionFailed.localizedDescription); break
-                }
-                do {
-                    try recognizer.append(converted)
-                    let duration = Double(converted.frameLength) / converted.format.sampleRate
-                    appendedSeconds += duration
-                    if self.lastRMS > (self.kind == .system ? 0.002 : 0.01) {
-                        voiced += duration; silence = 0
-                    } else { silence += duration }
-                    // Finalize at pauses or after 12 seconds, without ending capture.
-                    if !self.stopped && self.finalizationTask == nil && voiced >= 0.25 && ((silence >= 0.8 && appendedSeconds - lastFinalized >= 1) || appendedSeconds - lastFinalized >= 12) {
-                        self.requestFinalization(through: appendedSeconds, recognizer: recognizer)
-                        lastFinalized = appendedSeconds; voiced = 0; silence = 0
-                    }
-                } catch {
-                    if !self.stopped { self.fail(code: "recognition_failed", detail: error.localizedDescription) }
+                guard buffer.frameLength > 0 else { continue }
+                if self.sampleRate > 0, self.sampleRate != buffer.format.sampleRate {
+                    self.fail(code: "device_changed", detail: "Audio device changed; restart capture to create a new epoch.")
                     break
                 }
-            }
-        }
-        if let recognizer {
-            resultTask = Task { [weak self] in
-                guard let self else { return }
-                do {
-                    for try await piece in recognizer.results {
-                        if Task.isCancelled { break }
-                        for change in try self.reducer.apply(piece) { self.emit(change) }
-                    }
-                } catch {
-                    if !self.stopped { self.fail(code: "recognition_failed", detail: error.localizedDescription) }
+                do { try self.recording?.append(buffer) }
+                catch {
+                    self.fail(code: "recording_failed", detail: "Local recording could not be written; capture stopped.")
+                    break
                 }
+                self.observe(buffer)
+                self.recognition?.receive(buffer, voiced: self.lastRMS > (self.kind == .system ? 0.002 : 0.01))
+                await Task.yield()
             }
         }
         try source.start()
         var event = makeEvent(type: "audio.ready")
         event.state = "running"
-        event.code = recognizer == nil ? "capture_only" : "local_transcription"
+        event.code = config.transcribe ? "transcription_requested" : "capture_only"
         event.detail = "Capture started; nonzero samples and transcription still require observation."
         onEvent(event)
     }
+
+    func startRecognition(speech: SpeechSessionConfig?, lease: SpeechLease?,
+                          makeSocket: ((URLRequest) -> any DashScopeSocket)?) {
+        guard config.transcribe else { return }
+        recognition = LiveCaptureRecognition(config: config, speech: speech, lease: lease, makeSocket: makeSocket,
+            onEvent: { [weak self] type, provider, state, code, detail, interval in
+                guard let self else { return }
+                var event = self.makeEvent(type: type)
+                event.provider = provider
+                event.state = state
+                event.code = code
+                event.detail = detail
+                event.audioStartMS = interval?.lowerBound
+                event.audioEndMS = interval?.upperBound
+                self.onEvent(event)
+            }, onChange: { [weak self] change, provider in self?.emit(change, provider: provider) })
+        recognition?.start()
+    }
+
+    func pauseRecognitionForDeliveryBacklog() { recognition?.pauseForDeliveryBacklog() }
 
     func halt(discardBuffered: Bool = false) {
         if discardBuffered { inputTask?.cancel() }
         guard !stopped else { return }
         stopped = true
+        recognition?.prepareToStop()
         source.stop()
         input?.finish()
     }
 
-    private func requestFinalization(through seconds: Double, recognizer: LocalRecognition) {
-        // finalize may wait for following audio. Awaiting it inside the input loop
-        // stalls that same audio and can deadlock a stop at this boundary.
-        finalizationTask = Task { [weak self] in
-            do { try await recognizer.finalize(through: seconds) }
-            catch {
-                if let self, !self.stopped { self.fail(code: "finalization_failed", detail: error.localizedDescription) }
-            }
-            self?.finalizationTask = nil
-        }
-    }
-
-    func finish(graceful: Bool) async {
+    func finish(graceful: Bool, deadline: ContinuousClock.Instant) async {
         halt(discardBuffered: !graceful)
-        // A timer requests cancellation if the final tail takes too long. Input has
-        // already stopped; framework cancellation itself is not a hard deadline.
-        if let recognizer {
-            let timeout = Task {
-                do { try await Task.sleep(for: .seconds(3)) } catch { return }
-                inputTask?.cancel()
-                var event = makeEvent(type: "audio.gap")
-                event.code = "finalization_timeout"; event.detail = "Final transcription tail exceeded 3 seconds; remaining input cancelled."
-                onEvent(event)
-                await recognizer.cancel()
-            }
-            await inputTask?.value
-            if graceful {
-                do { try await recognizer.finish() }
-                catch {
-                    var event = makeEvent(type: "audio.gap")
-                    event.code = "finalization_interrupted"; event.detail = error.localizedDescription
-                    onEvent(event)
-                }
-            } else { await recognizer.cancel() }
-            timeout.cancel()
-        } else { await inputTask?.value }
-        await finalizationTask?.value
-        await resultTask?.value
-        for change in reducer.retractOpen() { emit(change) }
+        await inputTask?.value
+        // Close the file even if the recognition service never returns its tail.
+        recording?.close()
+        await recognition?.finish(graceful: graceful, deadline: deadline)
         if let recording {
-            recording.close()
-            var saved = makeEvent(type: "audio.recording")
-            saved.state = recording.frames > 0 ? (failed || !graceful ? "partial" : "saved") : "missing"
-            saved.framesReceived = recording.frames; saved.sampleRate = recording.sampleRate
-            saved.audioEndMS = recording.sampleRate > 0 ? Int(Double(recording.frames) / recording.sampleRate * 1000) : 0
-            onEvent(saved)
+            var event = makeEvent(type: "audio.recording")
+            if recordingWriteFailed {
+                event.state = "failed"
+                event.code = "recording_failed"
+                event.detail = "录音写入失败，无法确认保存。"
+            } else if recording.frames == 0 && !failed {
+                event.state = "missing"
+            } else if recording.hasReadableFrames() {
+                event.state = failed || !graceful ? "partial" : "saved"
+            } else {
+                event.state = "failed"
+                event.code = "recording_unreadable"
+                event.detail = "录音关闭后读取失败，无法确认保存。"
+            }
+            event.framesReceived = recording.frames
+            event.sampleRate = recording.sampleRate
+            event.audioEndMS = recording.sampleRate > 0 ? Int(Double(recording.frames) / recording.sampleRate * 1000) : 0
+            onEvent(event)
         }
         reportLevel()
         var event = makeEvent(type: "audio.stopped")
@@ -308,8 +296,17 @@ private final class CaptureStream {
     }
 
     private func fail(code: String, detail: String) {
-        guard !failed, !stopped else { return }
+        guard !failed else { return }
         failed = true
+        if stopped {
+            // A disk error while draining capture must still mark the recording
+            // failed, even though the hardware has already stopped.
+            var event = makeEvent(type: "audio.error")
+            event.code = code
+            event.detail = detail
+            onEvent(event)
+            return
+        }
         halt(discardBuffered: true)
         onFailure(code, "\(kind.rawValue): \(detail)")
     }
@@ -336,12 +333,13 @@ private final class CaptureStream {
         onEvent(event)
     }
 
-    private func emit(_ change: TranscriptChange) {
+    private func emit(_ change: TranscriptChange, provider: String) {
         var event = makeEvent(type: change.type)
         event.segmentID = change.segmentID; event.revision = change.revision
         event.supersedesRevision = change.supersedesRevision
         event.audioStartMS = change.startMS; event.audioEndMS = change.endMS
-        event.text = change.text; onEvent(event)
+        event.text = change.text; event.provider = provider
+        onEvent(event)
     }
 
     private func makeEvent(type: String) -> AudioEvent {

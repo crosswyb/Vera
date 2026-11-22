@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import secrets
 import signal
 from pathlib import Path
 
@@ -83,8 +84,10 @@ def main():
     if not credentials_path.exists():
         raise SystemExit("先运行 init 创建独立工作区。")
     from live_api import create_app
+    speech_token = secrets.token_urlsafe(32) if args.desktop else None
     app = create_app(database, {"WORKBENCH_ROOT": args.output_root,
-                              "WORKBENCH_SETTINGS_PATH": args.state_dir / "providers.json"})
+                              "WORKBENCH_SETTINGS_PATH": args.state_dir / "providers.json",
+                              "WORKBENCH_SPEECH_TOKEN": speech_token})
     wb = app.extensions["workbench"]
     if args.command == "doctor":
         import certifi
@@ -107,7 +110,8 @@ def main():
         credentials = json.loads(credentials_path.read_text())
         owner = next(m for m in credentials["members"] if m["role"] == "owner")
         agent = next(m for m in credentials["members"] if m["role"] == "agent")
-        print(json.dumps({"type": "ready", "port": server.server_port, "owner_token": owner["token"], "agent_token": agent["token"]}), flush=True)
+        print(json.dumps({"type": "ready", "port": server.server_port, "owner_token": owner["token"], "agent_token": agent["token"],
+                          "speech_token": speech_token}), flush=True)
     else:
         print(f"Workbench: http://127.0.0.1:{server.server_port}/workbench", flush=True)
         print("成员访问码保存在私有 credentials.json；不会输出到日志。", flush=True)

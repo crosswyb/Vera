@@ -154,7 +154,7 @@ def probe(backend, post_meeting=False, large_sse=False):
                 result.update(final_validated=True, markdown_saved=True, loopback_calls=requests_seen,
                               no_python_on_path=True, production_state_used=False, external_calls=0)
                 content = snapshot["documents"][0]["content"]
-                assert content.index("## 一句话结论") < content.index("## 完整分析") < content.index("## 关键依据")
+                assert content.index("## 结论摘要") < content.index("## 完整分析") < content.index("## 关键依据")
                 result["readable_markdown_order"] = True
                 if large_sse:
                     result["large_sse_envelopes_accepted"] = True

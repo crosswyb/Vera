@@ -70,7 +70,12 @@ class FailureDiagnosticsTest(unittest.TestCase):
         self.assertIn("超时", question["error"])
         self.assertNotIn("180", question["error"], "the configured timeout is not the actual elapsed time")
         self.assertNotIn("fixture-secret", json.dumps(question))
-        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_count, 2)
+        model = question['progress']['model']
+        self.assertEqual(model['timeout_retry'], 'sent')
+        self.assertNotEqual(model['timeout_request_id'], model['retry_request_id'])
+        self.assertEqual(model['retry_request_id'], question['error_details']['request_id'])
+        self.search.search.assert_called_once()
 
     def test_http_rejection_reaches_question_instead_of_research_unavailable(self):
         question, post = self.run_question(return_value=Response({"error": {"code": "api_key_expired", "message": "fixture-secret"}}, 401))

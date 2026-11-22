@@ -48,9 +48,12 @@ def probe(backend):
                             realtime_seen.set()
                         existing = {q["title"] for q in content["existing_questions"]}
                         result = {"actions": [{"kind": "create_question", "title": boundaries[s["text"]],
-                            "public_query": "synthetic source evidence", "source_refs": [
+                            "public_query": "synthetic source evidence", "evidence_need": "public",
+                            "external_fact": "合成来源说明", "grounding_quote_id": next(q['id'] for q in content['grounding_options'] if q['segment_id'] == s['segment_id']), "source_refs": [
                                 {"segment_id": s["segment_id"], "revision": s["revision"]}]}
                             for s in new if s["text"] in boundaries and boundaries[s["text"]] not in existing]}
+                    elif system.startswith("判断回答会议问题"):
+                        result = {"route": "web_search"}
                     elif system.startswith("你是会议纪要整理员"):
                         first = content["segments"][0]
                         result = {"overview": "合成会后总结", "topics": [{"text": "合成议题", "source_refs": [

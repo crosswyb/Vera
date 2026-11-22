@@ -84,7 +84,8 @@ class ExecutionTest(unittest.TestCase):
             answer = post.call_args.kwargs["json"]
             model.call(SUMMARY_SYSTEM, {})
             summary = post.call_args.kwargs["json"]
-        self.assertEqual(detection["reasoning_effort"], "low")
+        self.assertEqual(detection["reasoning_effort"], "medium")
+        self.assertEqual(model.config.payload("route", {}, routing=True)["reasoning_effort"], "low")
         self.assertEqual(detection["max_completion_tokens"], 16384)
         self.assertEqual(answer["reasoning_effort"], "max")
         self.assertEqual(summary["reasoning_effort"], "max")
@@ -106,7 +107,7 @@ class ExecutionTest(unittest.TestCase):
         self.assertNotIn("reasoning_effort", payload)
         generic = ModelService(provider="openai_compatible").payload("synthetic", {}, detection=True)
         self.assertNotIn("thinking", generic)
-        self.assertNotIn("reasoning_effort", generic)
+        self.assertEqual(generic["reasoning_effort"], "medium")
 
     def test_old_settings_load_without_migration_and_fast_mode_is_public(self):
         saved = self.model().config.model_dump()
@@ -230,6 +231,40 @@ class ExecutionTest(unittest.TestCase):
             self.wb.fail(self.agent, self.wb.claim(self.agent), "synthetic_failure")
         work = self.wb.claim(self.agent)
         self.assertEqual(work["question"]["id"], available["id"])
+
+    def test_evidence_need_survives_mentions_and_claim_and_is_reset_on_owner_edit(self):
+        from live.workbench_contracts import EditQuestion
+        self.say(1)
+        work = self.wb.coordinator_work(self.agent)
+        self.wb.commit_decisions(self.agent, work, self.decision(work, evidence_need='public'))
+        q = self.wb.snapshot(self.owner, self.mid)['questions'][0]
+        self.say(2)
+        work = self.wb.coordinator_work(self.agent)
+        self.wb.commit_decisions(self.agent, work, self.decision(work, 'revise_question', question_id=q['id'],
+                                 scope_changed=False, evidence_need='explanation'))
+        claimed = self.wb.claim(self.agent)['question']
+        self.assertEqual(claimed['evidence_need'], 'public')
+        edited = self.wb.edit(self.owner, q['id'], EditQuestion(title='只计算给定数字', expected_version=q['version']))
+        self.assertFalse(edited.get('evidence_need'))
+
+    def test_grounded_public_fact_survives_aside_but_not_owner_rewrite(self):
+        from live.workbench_contracts import EditQuestion
+        quote = '现在两端价格都在挤压加工利润吗？'
+        fact = '原油和产品当前价差是否收窄'
+        self.say(1, quote)
+        work = self.wb.coordinator_work(self.agent)
+        self.wb.commit_decisions(self.agent, work, self.decision(work, evidence_need='public',
+                                  grounding_quote=quote, external_fact=fact))
+        q = self.wb.snapshot(self.owner, self.mid)['questions'][0]
+        self.say(2, '价差指的是什么？')
+        work = self.wb.coordinator_work(self.agent)
+        self.wb.commit_decisions(self.agent, work, self.decision(work, 'revise_question', question_id=q['id'],
+                                  scope_changed=False, evidence_need='explanation', grounding_quote='价差指的是什么？'))
+        claimed = self.wb.claim(self.agent)['question']
+        self.assertEqual((claimed['grounding_quote'], claimed['external_fact']), (quote, fact))
+        edited = self.wb.edit(self.owner, q['id'], EditQuestion(title='请解释价差', expected_version=q['version']))
+        self.assertNotIn('grounding_quote', edited)
+        self.assertNotIn('external_fact', edited)
 
     def test_same_scope_mentions_preserve_inflight_answer_but_record_new_evidence(self):
         question = self.discover(1, "create_question", "合成工作流问题")
@@ -360,28 +395,35 @@ class ExecutionTest(unittest.TestCase):
             self.assertEqual(next(x for x in questions if x["id"] == q["id"])["state"], status)
             self.assertEqual(len(questions), n * 2)
 
-    def test_detection_correction_still_uses_fast_parameters(self):
+    def test_deferred_detection_still_uses_fast_parameters(self):
         self.say(1)
         model = self.model()
         with patch("requests.Session.post", side_effect=[Response('{"actions":null}'), Response()]) as post:
-            model.decisions(self.wb.coordinator_work(self.agent))
+            work = self.wb.coordinator_work(self.agent)
+            batch = model.decisions(work)
+            self.assertEqual(post.call_count, 1)
+            self.wb.commit_detection(self.agent, work, batch)
+            retry = self.wb.detection_recovery_work(self.agent)
+            self.assertIsNotNone(retry)
+            self.wb.commit_detection(self.agent, retry, model.decisions(retry))
         self.assertEqual(post.call_count, 2)
         for call in post.call_args_list:
-            self.assertEqual(call.kwargs["json"]["reasoning_effort"], "low")
+            self.assertEqual(call.kwargs["json"]["reasoning_effort"], "medium")
             self.assertEqual(call.kwargs["json"]["max_completion_tokens"], 16384)
 
-    def test_truncated_detection_never_commits_or_advances_cursor(self):
-        from live.output_validation import OutputValidationError
+    def test_truncated_detection_keeps_an_unresolved_range_and_no_questions(self):
         self.say(1)
         work = self.wb.coordinator_work(self.agent)
         model = self.model()
         with patch("requests.Session.post", return_value=Response(finish="length")) as post:
-            with self.assertRaises(OutputValidationError):
-                model.decisions(work)
+            batch = model.decisions(work)
+            self.wb.commit_detection(self.agent, work, batch)
         self.assertEqual(post.call_count, 1)
         snapshot = self.wb.snapshot(self.owner, self.mid)
-        self.assertEqual(snapshot["meeting"]["coordinator_cursor"], 0)
+        self.assertEqual(snapshot["meeting"]["coordinator_cursor"], work['cursor'])
         self.assertEqual(snapshot["questions"], [])
+        self.assertTrue(snapshot['detection_tasks'])
+        self.assertFalse(snapshot['automation_progress']['complete'])
 
 
 if __name__ == "__main__":

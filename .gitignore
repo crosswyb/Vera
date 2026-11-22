@@ -7,7 +7,12 @@ node_modules/
 .env
 .env.live
 .env.live.*
+.env.*
 !.env.live.example
+outputs/
+*.p12
+*.p8
+*.key
 native/build/
 .DS_Store
 .ruff_cache/

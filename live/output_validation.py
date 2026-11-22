@@ -78,6 +78,8 @@ def failure_message(details):
                 "claims_required": "回答标记为有证据，但缺少原文佐证", "sources_required": "没有原文却标记为已有证据",
                 "claim_reference_not_found": "关键依据引用了不存在的佐证编号",
                 "output_incomplete": "模型输出未完成或被输出上限截断", "invalid_json": "模型未返回完整 JSON",
+                "quote_not_in_new_segment": "问题依据未匹配所引用的新发言原话",
+                "source_not_in_new_segment": "问题引用的发言编号或版本不在本批新发言中",
                 "extra_forbidden": f"{label}包含不支持的字段", "missing": f"{label}缺少必要字段"}.get(issue["code"], f"{label}格式不符合要求"))
     corrected = "；已自动修正一次，仍未通过" if details.get("correction_attempts") else ""
     return stage + "未通过校验：" + "；".join(reasons) + corrected + "。"

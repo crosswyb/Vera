@@ -44,7 +44,8 @@ def probe(backend, output, hold=False):
                     return
                 if payload["messages"][0]["content"].startswith("你是会议查证协调器"):
                     content = json.loads(payload["messages"][1]["content"])
-                    detections.append({"payload": payload, "content": content})
+                    detection = {"payload": payload, "content": content}
+                    detections.append(detection)
                     if len(detections) == 1:
                         first_detection.set()
                         if not release_detection.wait(20):
@@ -55,18 +56,23 @@ def probe(backend, output, hold=False):
                         if not segment["is_new"]:
                             continue
                         ref = {"segment_id": segment["segment_id"], "revision": segment["revision"]}
+                        grounding = {'evidence_need': 'public', 'external_fact': '合成来源说明',
+                            'grounding_quote_id': next(q['id'] for q in content['grounding_options'] if q['segment_id'] == segment['segment_id'])}
                         if segment["text"] == "补充同一问题":
                             q = existing["合成请求0"]
                             actions.append({"kind": "revise_question", "question_id": q["id"],
                                 "expected_version": q["version"], "title": q["title"], "public_query": q["public_query"],
-                                "source_refs": [ref], "scope_changed": False})
+                                "source_refs": [ref], "scope_changed": False, **grounding})
                         elif segment["text"].startswith("合成请求") and segment["text"] not in existing:
                             number = int(segment["text"].removeprefix("合成请求"))
                             actions.append({"kind": "create_question" if number == 40 else "candidate",
-                                "title": segment["text"], "public_query": f"synthetic request {number}", "source_refs": [ref]})
+                                "title": segment["text"], "public_query": f"synthetic request {number}", "source_refs": [ref], **grounding})
                         if len(actions) == content["action_limit"]:
                             break
                     answer = {"actions": actions}
+                    detection['raw_actions'] = len(actions)
+                elif payload["messages"][0]["content"].startswith("判断回答会议问题"):
+                    answer = {"route": "web_search"}
                 else:
                     answers.append(payload)
                     answer = ANSWER
@@ -147,15 +153,26 @@ def probe(backend, output, hold=False):
                     and sum(d["state"] == "saved" for d in s["documents"]) == 42, timeout=35)
                 assert set(searches[2:4]) == {"synthetic manual", "synthetic request 40"}, searches[:5]
                 assert len(searches) == 42 and len(answers) == 42
-                assert all(d["payload"]["reasoning_effort"] == "low" for d in detections)
+                assert all(d["payload"]["reasoning_effort"] == "medium" for d in detections)
                 assert all(d["payload"]["max_tokens"] == 8192 for d in detections)
                 assert all(p["reasoning_effort"] == "max" for p in answers)
                 assert any(d["content"]["action_limit"] == 12 for d in detections)
                 read = {s["text"] for d in detections for s in d["content"]["recent_segments"] if s["is_new"]}
                 assert {f"合成请求{n}" for n in range(41)} <= read
-                assert len(detections) < 12
+                main_detections = [d for d in detections if 'recovery_context' not in d['content']]
+                recovery_detections = [d for d in detections if 'recovery_context' in d['content']]
+                assert len(main_detections) < 12, 'main input processing lost its batching bound'
+                scan_windows = sum((sum(s['is_new'] for s in d['content']['recent_segments']) + 3) // 4
+                    for d in main_detections if d['raw_actions'] >= d['content']['action_limit'])
+                # Saturated input now has durable, separate gap scans. Check
+                # their explicit two-attempt budget alongside the main lane.
+                assert len(recovery_detections) <= scan_windows * 2
+                assert all(d['content']['recovery_context']['kind'] == 'scan'
+                    and sum(s['is_new'] for s in d['content']['recent_segments']) <= 4 for d in recovery_detections)
                 result = {"status": "passed", "production_state_used": False, "external_calls": 0,
                     "detection_requests": len(detections), "catchup_action_limit": 12,
+                    "main_detection_requests": len(main_detections), "recovery_detection_requests": len(recovery_detections),
+                    "recovery_request_budget": scan_windows * 2,
                     "no_unread_input_skipped": True, "fast_detection_payload": True, "max_answer_preserved": True,
                     "manual_and_explicit_ahead_of_full_backlog": True, "inflight_basis_preserved": True,
                     "same_scope_not_researched_twice": True, "completed_questions": len(done["questions"]),

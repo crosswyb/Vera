@@ -32,7 +32,7 @@ def short_answer_preview(content):
         return ""
     brief = partial.get("brief") if isinstance(partial, dict) else None
     answer = brief.get("short_answer") if isinstance(brief, dict) else None
-    return answer[:80] if isinstance(answer, str) else ""
+    return answer if isinstance(answer, str) else ""
 
 
 def read_completion(response, check, progress=None):

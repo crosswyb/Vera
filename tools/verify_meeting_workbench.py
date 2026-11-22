@@ -1,7 +1,7 @@
 """Reproducible offline engineering checks, without capture or paid services.
 
 This does not label the 54-case product acceptance matrix as complete.
-Optional --native runs the framework-free Swift smoke checks.
+Optional --native runs Swift smoke checks without a physical device or a cloud account.
 """
 
 import argparse
@@ -34,11 +34,14 @@ def main():
     (output / "workbench-unittest.log").write_text(stream.getvalue(), encoding="utf-8")
     checks.append({"name": "workbench_contracts_and_lifecycle", "status": "passed" if result.wasSuccessful() else "failed",
                    "tests": result.testsRun, "failures": len(result.failures), "errors": len(result.errors),
+                   "skipped": len(result.skipped),
                    "seconds": round(time.monotonic() - started, 3), "evidence": "workbench-unittest.log"})
     commands = [("javascript_syntax", ["node", "--check", "static/workbench.js"]),
+                ("speech_javascript_syntax", ["node", "--check", "static/workbench-speech.js"]),
                 ("tracked_diff_whitespace", ["git", "diff", "--check"])]
     if args.native:
-        commands.append(("native_framework_free_smoke", ["/bin/zsh", "native/scripts/smoke.sh"]))
+        commands.extend([("native_framework_free_smoke", ["/bin/zsh", "native/scripts/smoke.sh"]),
+                         ("native_cloud_asr_stub", ["/bin/zsh", "native/scripts/test-cloud-asr.sh"])])
     for name, command in commands:
         try:
             value = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=60)

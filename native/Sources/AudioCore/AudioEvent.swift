@@ -36,6 +36,7 @@ public struct AudioEvent: Codable, Sendable {
     public var audioEndMS: Int?
     public var text: String?
     public var state: String?
+    public var provider: String?
     public var code: String?
     public var detail: String?
     public var rms: Float?
@@ -50,7 +51,7 @@ public struct AudioEvent: Codable, Sendable {
         case audioStartMS = "audio_start_ms", audioEndMS = "audio_end_ms"
         case occurredAt = "occurred_at", framesReceived = "frames_received"
         case nonSilentFrames = "non_silent_frames", sampleRate = "sample_rate"
-        case seq, type, source, revision, text, state, code, detail, rms
+        case seq, type, source, revision, text, state, provider, code, detail, rms
     }
 
     public init(meetingID: String, captureEpoch: String, streamID: String,

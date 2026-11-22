@@ -48,17 +48,99 @@ class WorkbenchFrontendContractTests(unittest.TestCase):
         for form in required:
             self.assertRegex(self.js, rf"\$\('{form}'\)\.addEventListener\('submit'")
 
+    def test_editing_custom_model_name_preserves_pending_key_clear(self):
+        script = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const src = fs.readFileSync(process.argv[1], 'utf8');
+const state = {clearModelKey: true};
+const fields = {'service-model-name': {value:'saved'}, 'service-model-url': {value:'example'}, 'service-model-profile': {value:''}};
+const $ = id => fields[id];
+const saved = {};
+const matchingModelProfile = (_, url, name) => name === 'saved' ? saved : null;
+const modelProfiles = () => [saved];
+const fn = src.slice(src.indexOf('  function syncCustomSelection()'), src.indexOf("  $('service-model-name').addEventListener('input'"));
+eval(fn + '; globalThis.syncSelection = syncCustomSelection;');
+for (const name of ['new', 'saved']) {
+  fields['service-model-name'].value = name;
+  syncSelection();
+  assert.equal(state.clearModelKey, true);
+  assert.equal(fields['service-model-profile'].value, name === 'saved' ? '0' : '');
+}
+"""
+        subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')], check=True)
+
+    def test_speech_consent_is_cleared_when_destination_or_source_changes(self):
+        script = r"""
+const assert = require('node:assert/strict');
+globalThis.window = {};
+require(process.argv[1]);
+const nodes = new Map();
+const $ = id => {
+  if (!nodes.has(id)) nodes.set(id, {addEventListener() {}, checked:false});
+  return nodes.get(id);
+};
+const saved = (revision, destination) => ({revision, speech: {live_provider:'dashscope', providers:{dashscope:{destinations:{live:destination}}}}});
+const state = {token:'fixture', home:{member:{role:'owner'}}, serviceSettings:saved(1, 'wss://initial.example')};
+let refreshed = saved(2, 'wss://initial.example');
+const speech = window.createSpeechSettings({
+  api: async (path) => { assert.equal(path, '/live/v2/settings'); return refreshed; },
+  state, $, text: (node, value) => { node.textContent = value; },
+  renderRuntime: () => speech.renderUpload('meeting', speech.scope('live', ['system'])),
+});
+(async () => {
+  const oldScope = speech.scope('live', ['system']);
+  speech.renderUpload('meeting', oldScope);
+  $('meeting-upload-agree').checked = true;
+  assert.equal((await speech.checkScope('live', ['system'], oldScope)).revision, 2);
+  assert.equal($('meeting-upload-agree').checked, true);
+  refreshed = saved(3, 'wss://changed.example');
+  await assert.rejects(speech.checkScope('live', ['system'], oldScope), /接收地址已变化/);
+  assert.equal($('meeting-upload-agree').checked, false);
+  assert.match($('meeting-upload-scope').textContent, /changed.example/);
+  $('meeting-upload-agree').checked = true;
+  assert.equal(speech.renderUpload('meeting', speech.scope('live', ['system', 'microphone'])), false);
+  assert.equal($('meeting-upload-agree').checked, false);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench-speech.js')], check=True)
+
+    def test_native_release_does_not_confirm_live_capture_finish(self):
+        script = r"""
+const assert = require('node:assert/strict');
+const src = require('node:fs').readFileSync(process.argv[1], 'utf8');
+const state = {native:{meetingId:'meeting-active', inputKind:'live', canStop:true}};
+const window = new EventTarget();
+const requests = [];
+const nativePost = (action, meeting) => requests.push([action, meeting]);
+const emit = detail => window.dispatchEvent(new CustomEvent('zsjh-native-state', {detail}));
+const source = src.slice(src.indexOf('  async function stopCaptureAndWait()'), src.indexOf('  function calendarDate('));
+eval(source + '; globalThis.waitForCapture = stopCaptureAndWait;');
+(async () => {
+  let completed = false;
+  const waiting = waitForCapture().then(result => { completed = true; return result; });
+  assert.deepEqual(requests, [['stopCapture', 'meeting-active']]);
+  emit({meetingId:null});
+  emit({meetingId:null, captureFinishMeetingId:'another-meeting', captureFinish:'complete'});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(completed, false);
+  emit({meetingId:null, captureFinishMeetingId:'meeting-active', captureFinish:'with_gaps'});
+  assert.equal(await waiting, 'with_gaps');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')], check=True)
+
     def test_browser_keeps_native_command_and_event_contract(self):
         swift = (ROOT / 'native/Sources/DesktopHost/DesktopHost.swift').read_text()
         commands = set(re.findall(r"nativePost\('([A-Za-z]+)'", self.js))
-        required = set('checkModel chooseAudioFile chooseOutputDirectory importAudioFile installModel openMeetingAudio openMicrophoneSettings openOutput requestState setAudioSource setThemePreference startCapture stopCapture'.split())
+        required = set('checkModel chooseAudioFile chooseOutputDirectory importAudioFile installModel openMeetingAudio openMicrophoneSettings openOutput requestState setAudioSource setThemePreference setLayoutPreference startCapture stopCapture'.split())
         self.assertFalse(required - commands)
         for command in commands:
             self.assertIn('"' + command + '"', swift)
         for marker in ('zsjh-native-state', 'zsjh-storage-changed', 'wb_access'):
             self.assertIn(marker, self.js)
             self.assertIn(marker, swift)
-        for marker in ('themePreference', '__ZSJH_THEME_PREFERENCE__'):
+        for marker in ('themePreference', '__ZSJH_THEME_PREFERENCE__', 'layoutPreference', '__ZSJH_LAYOUT_PREFERENCE__'):
             self.assertIn(marker, self.js)
             self.assertIn(marker, swift)
 
@@ -112,6 +194,36 @@ eval(loader + '; globalThis.load = loadStorageSettings;');
                                 text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_open_files_folder_targets_the_current_meeting_even_before_files_exist(self):
+        panel = (ROOT / 'templates/workbench.html').read_text().split('id="meeting-files-panel"', 1)[1].split('</section>', 1)[0]
+        self.assertIn('id="open-files-folder"', panel)
+        self.assertIn("$('open-files-folder').addEventListener('click', openMeetingFolder)", self.js)
+        script = r"""
+const assert = require('node:assert/strict');
+const src = require('node:fs').readFileSync(process.argv[1], 'utf8');
+const state = {meetingId:'first', snapshot:{meeting:{id:'first', directory:'first-dir', state:'active'}}};
+const posts = [];
+const window = {webkit:{messageHandlers:{workbench:{postMessage:msg => posts.push(msg)}}}};
+const handlers = src.slice(src.indexOf('  function nativeAvailable()'), src.indexOf('  async function stopCaptureAndWait('));
+eval(handlers + '; globalThis.click = openMeetingFolder;');
+click();
+state.meetingId = 'second';
+click(); // Previous snapshot has not been replaced yet.
+state.snapshot.meeting = {id:'second', directory:'second-dir', state:'ended'};
+click();
+state.snapshot.meeting.directory = '';
+click();
+state.snapshot = null;
+click();
+state.snapshot = {meeting:{id:'second', directory:'second-dir', state:'active'}};
+delete window.webkit;
+click();
+assert.deepEqual(posts, [{action:'openOutput',meetingId:'first'},{action:'openOutput',meetingId:'second'}]);
+"""
+        result = subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')],
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_unavailable_recording_reports_storage_without_claiming_audio_loss(self):
         script = r"""
 const assert=require('node:assert/strict');
@@ -158,7 +270,7 @@ const meetingStates = {ended:'会议已结束'};
 const activeStates = new Set(['queued','running','paused']);
 const coordinatorIssue = meeting => meeting.coordinator_error_message || '';
 const calendarDate = () => '', time = () => '', retracted = () => false;
-const renderCapabilities=()=>{}, renderCapture=()=>{}, renderTranscripts=()=>{}, renderQuestions=()=>{}, renderDetail=()=>{}, renderActivity=()=>{}, renderMeetingFiles=()=>{};
+const renderCapabilities=()=>{}, renderCapture=()=>{}, renderTranscripts=()=>{}, renderQuestions=()=>{}, renderDetail=()=>{}, renderActivity=()=>{}, renderMeetingFiles=()=>{}, renderDetectionRecovery=()=>{};
 eval(render + '\nrenderSnapshot();');
 assert.equal($('research-control').disabled, false);
 assert.match($('automation-hint').textContent, /3 段转写待分析/);

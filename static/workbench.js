@@ -18,6 +18,36 @@
   applyTheme();
   systemTheme.addEventListener('change', () => applyTheme());
   window.addEventListener('storage', event => { if (event.key === 'wb_theme' && !nativeAvailable()) applyTheme(event.newValue); });
+  const layoutValues = new Set(['a', 'b']);
+  let layoutPreference = window.__ZSJH_LAYOUT_PREFERENCE__;
+  if (!layoutValues.has(layoutPreference)) {
+    try { layoutPreference = localStorage.getItem('wb_layout'); } catch { /* Visual preferences also work without browser storage. */ }
+  }
+  if (!layoutValues.has(layoutPreference)) layoutPreference = 'a';
+  function syncMeetingPanels() {
+    const grid = $('work-grid');
+    const reading = grid.dataset.mobilePanel === 'results';
+    const wide = wideMeeting();
+    const triple = layoutPreference === 'b' && window.matchMedia('(min-width:1201px)').matches;
+    grid.dataset.layoutMode = triple ? 'triple' : wide ? reading ? 'reading' : 'overview' : 'single';
+    $('questions-panel').hidden = reading && !wide;
+    $('results-panel').hidden = !(reading || triple);
+  }
+  function applyLayout(value = layoutPreference, persist = false) {
+    layoutPreference = layoutValues.has(value) ? value : 'a';
+    document.documentElement.dataset.layout = layoutPreference;
+    for (const button of document.querySelectorAll('.layout-switch [data-layout]')) {
+      button.setAttribute('aria-pressed', String(button.dataset.layout === layoutPreference));
+    }
+    $('layout-preference').value = layoutPreference;
+    syncMeetingPanels();
+    if (persist) {
+      try { localStorage.setItem('wb_layout', layoutPreference); } catch { /* Native preferences are persisted by the host. */ }
+      if (nativeAvailable()) nativePost('setLayoutPreference', null, null, null, null, layoutPreference);
+      text($('layout-status'), layoutPreference === 'b' ? '已切换为全景布局' : '已切换为静阅布局');
+    }
+  }
+  window.addEventListener('storage', event => { if (event.key === 'wb_layout' && !nativeAvailable()) applyLayout(event.newValue); });
   const state = {
     token: '', home: null, snapshot: null, meetingId: '', selectedQuestionId: '',
     request: null, selection: 0, detailTab: 'answer', dialogQuestion: null, queryQuestion: null,
@@ -25,19 +55,22 @@
     transcriptSignature: '', questionSignature: '', activitySignature: '', noticeTimer: null,
     pendingButtons: new Set(), route: 'meetings', filter: 'all', queueFilter: 'all', descending: true,
     search: '', librarySignature: '', recentIds: [], homeRequest: null,
-    native: window.__ZSJH_NATIVE__ || null, switchTarget: null, endTarget: '', importTarget: '', importFileID: '', nativeFileError: '', permissionTarget: '',
+    native: window.__ZSJH_NATIVE__ || null, switchTarget: null, endTarget: '', importTarget: '', importFileID: '', nativeFileError: '', importRetry: null, importResume: false, permissionTarget: '',
     serviceSettings: null, settingsRequest: null, settingsBusy: false, settingsDirty: false,
     storageSettings: null, storageRequest: null, storageRefreshPending: false, storageError: '',
     clearModelKey: false, clearSearchKey: false, manageTarget: null, deletionReady: false,
     snapshotReceivedAt: 0, serverOffset: 0, transcriptHistory: null, returnNote: null,
   };
+  const meetingSearch = {timer: null, controller: null, sequence: 0, previousFocus: null};
+  applyLayout();
   const feishu = window.createFeishuSettings({api, state, $, element, text, safeURL});
+  const speech = window.createSpeechSettings({api, state, $, text, nativeAvailable, postNative, time, audioTime, renderRuntime:renderSpeechRuntime});
   const questionStates = {
     candidate: '待确认', queued: '等待研究', running: '正在研究', completed: '任务完成',
     insufficient: '研究结束·证据不足', failed: '任务失败', cancelled: '已取消',
     superseded: '已被新版本替代', outcome_unknown: '请求结果未知', paused: '已暂停',
     waiting_dependency: '等待前置资料',
-    needs_review: '依据已更正·待复核', backlog: '队列已满·待整理',
+    needs_query: '待补检索词', needs_review: '依据已更正·待复核', backlog: '队列已满·待整理',
   };
   const evidenceStates = {supported: '有来源支持', mixed: '证据存在分歧', insufficient: '证据不足', model_explanation: '模型解释·未核验'};
   const stages = {searching: '搜索资料', reading: '读取原文', synthesizing: '整理回答', publishing: '保存文档', queued: '等待执行', detecting: '问题识别', research_unavailable: '研究服务暂不可用', budget_exhausted: '本次请求额度已用完', invalid_evidence_or_contract: '返回资料未通过校验', outcome_unknown: '请求结果未知，请确认后重试'};
@@ -46,10 +79,10 @@
   const sources = {system: '电脑声音', microphone: '麦克风', mic: '麦克风', file: '音频文件', manual: '文字补充', synthetic: '合成讨论', cicada: '知了转写'};
   const audioInputs = {
     system: {label: '电脑声音', sources: ['system'], help: '仅收听电脑上播放的声音。'},
-    microphone: {label: '麦克风', sources: ['microphone'], help: '直接对着系统当前输入设备讲话，声音会在本机转写。'},
+    microphone: {label: '麦克风', sources: ['microphone'], help: '直接对着系统当前输入设备讲话。'},
     both: {label: '电脑声音＋麦克风', sources: ['system', 'microphone'], help: '同时收听会议播放和你的发言。建议戴耳机，避免外放声音被重复收录。'},
   };
-  const activeStates = new Set(['candidate', 'queued', 'running', 'paused', 'waiting_dependency', 'needs_review', 'backlog']);
+  const activeStates = new Set(['candidate', 'queued', 'running', 'paused', 'waiting_dependency', 'needs_review', 'needs_query', 'backlog']);
   const retryStates = new Set(['failed', 'insufficient', 'cancelled', 'outcome_unknown', 'paused']);
 
   function text(node, value) {
@@ -83,7 +116,13 @@
     return Number.isNaN(result.getTime()) ? null : result;
   }
   function retracted(segment) { return segment.type === 'transcript.retracted'; }
-  function segmentSource(segment) { return state.snapshot?.meeting?.mode === 'demo' ? '示例发言' : segment.capture_epoch === 'manual' ? '文字补充' : sources[segment.source] || segment.source || '转写'; }
+  function segmentSource(segment) {
+    if (state.snapshot?.meeting?.mode === 'demo') return '示例发言';
+    if (segment.capture_epoch === 'manual') return '文字补充';
+    const source = sources[segment.source] || segment.source || '转写';
+    const provider = speech.label(segment.provider);
+    return provider ? `${source} · ${provider}` : source;
+  }
   function audioTime(ms = 0) { const seconds = Math.floor(ms / 1000); return `${Math.floor(seconds / 3600) ? Math.floor(seconds / 3600) + ':' : ''}${String(Math.floor(seconds / 60) % 60).padStart(2,'0')}:${String(seconds % 60).padStart(2,'0')}`; }
   function segmentTime(segment) { return segment.received_at || segment.occurred_at; }
   function time(value, full = false) {
@@ -113,17 +152,46 @@
     state.noticeTimer = setTimeout(() => { $('notice').hidden = true; }, error ? 12000 : 5000);
   }
   function nativeAvailable() { return Boolean(window.webkit?.messageHandlers?.workbench); }
-  function nativePost(action, meetingId, fileId, audioSource, themePreference) {
+  function meetingFolderId() {
+    const meeting = state.snapshot?.meeting;
+    return nativeAvailable() && meeting?.directory && meeting.id === state.meetingId ? meeting.id : null;
+  }
+  function openMeetingFolder() {
+    const id = meetingFolderId();
+    if (id) nativePost('openOutput', id);
+  }
+  function postNative(message) {
     if (!nativeAvailable()) { notice('请在真实交互桌面 App 中使用本机功能。', true); return false; }
-    window.webkit.messageHandlers.workbench.postMessage({action, ...(meetingId ? {meetingId} : {}), ...(fileId ? {fileId} : {}), ...(audioSource ? {audioSource} : {}), ...(themePreference ? {themePreference} : {})});
+    window.webkit.messageHandlers.workbench.postMessage(message);
     return true;
+  }
+  function nativePost(action, meetingId, fileId, audioSource, themePreference, layoutPreference) {
+    return postNative({action, ...(meetingId ? {meetingId} : {}), ...(fileId ? {fileId} : {}), ...(audioSource ? {audioSource} : {}), ...(themePreference ? {themePreference} : {}), ...(layoutPreference ? {layoutPreference} : {})});
   }
   async function stopCaptureAndWait() {
     const bound = state.native?.meetingId;
     if (!bound) return;
-    await new Promise((resolve, reject) => {
+    const isFile = state.native?.inputKind === 'audio_file';
+    return await new Promise((resolve, reject) => {
       const cleanup = () => { window.removeEventListener('zsjh-native-state', changed); clearTimeout(timeout); };
-      const changed = (event) => { if (!event.detail?.meetingId) { cleanup(); resolve(); } };
+      const changed = ({detail}) => {
+        if (!detail) return;
+        if (detail.captureFinishMeetingId === bound && detail.captureFinish === 'failed') {
+          cleanup(); reject(new Error(detail.status || '未能确认转写和录音已保存。会议尚未结束。')); return;
+        }
+        if (detail.meetingId) return;
+        if (['complete', 'with_gaps', 'no_audio'].includes(detail.captureFinish) && detail.captureFinishMeetingId === bound) {
+          cleanup(); resolve(detail.captureFinish); return;
+        }
+        // The file worker uses the import endpoint to persist its final state.
+        if (isFile) {
+          cleanup();
+          api(`/live/v2/meetings/${encodeURIComponent(bound)}/snapshot`).then(({meeting}) => {
+            if (['completed','cancelled','failed','interrupted'].includes(meeting?.audio_import?.state)) resolve(meeting.audio_import.state);
+            else reject(new Error('未能确认文件转写已保存。会议尚未结束。'));
+          }, reject);
+        }
+      };
       const timeout = setTimeout(() => { cleanup(); reject(new Error('音频仍在收尾，请稍后重试。会议尚未结束。')); }, 14000);
       window.addEventListener('zsjh-native-state', changed);
       if (state.native?.canStop) nativePost('stopCapture', bound);
@@ -138,7 +206,42 @@
     const left = $('work-grid').dataset.leftPane;
     return `#meeting/${encodeURIComponent(state.meetingId)}${detail ? `?question=${encodeURIComponent(state.selectedQuestionId)}&tab=${state.detailTab}` : ['files','summary'].includes(left) ? `?view=${left}` : ''}`;
   }
+  const preferenceTabs = [...document.querySelectorAll('.prefs-tabs [role="tab"]')];
+  let preference = 'start';
+  function selectPreference(key, focus = false) {
+    const owner = state.home?.member?.role === 'owner';
+    const selected = preferenceTabs.find(tab => tab.id === 'prefs-tab-' + key && (key !== 'feishu' || owner)) || preferenceTabs[0];
+    preference = selected.id.slice('prefs-tab-'.length);
+    $('settings-save-toolbar').hidden = preference !== 'ai';
+    for (const tab of preferenceTabs) {
+      const on = tab === selected;
+      tab.hidden = tab.id === 'prefs-tab-feishu' && !owner;
+      tab.setAttribute('aria-selected', String(on)); tab.tabIndex = on ? 0 : -1;
+      $(tab.getAttribute('aria-controls')).hidden = !on;
+    }
+    document.querySelector('[data-pref-step="sync"]').hidden = !owner;
+    if (focus) selected.focus();
+    if (preference === 'feishu' && state.route === 'settings') feishu.open();
+  }
+  for (const tab of preferenceTabs) {
+    tab.addEventListener('click', () => selectPreference(tab.id.slice('prefs-tab-'.length)));
+    tab.addEventListener('keydown', event => {
+      const visible = preferenceTabs.filter(item => !item.hidden), n = visible.length, i = visible.indexOf(tab);
+      const index = {ArrowLeft:(i+n-1)%n, ArrowRight:(i+1)%n, Home:0, End:n-1}[event.key];
+      if (index === undefined) return;
+      event.preventDefault(); selectPreference(visible[index].id.slice('prefs-tab-'.length), true);
+    });
+  }
+  function openPreference(key) {
+    if (state.route !== 'settings') { preference = key; setRoute('settings'); }
+    selectPreference(key, true);
+  }
+  document.querySelectorAll('[data-pref-go]').forEach(button => button.addEventListener('click', () => {
+    openPreference(button.dataset.prefGo);
+    if (button.dataset.prefStep === 'search') $('service-search-provider').focus();
+  }));
   function setRoute(route, updateHistory = true) {
+    closeMeetingSearch();
     state.route = ['meetings', 'materials', 'meeting', 'guide', 'settings'].includes(route) ? route : 'meetings';
     $('workspace').dataset.route = state.route;
     $('workspace').dataset.mobileNav = 'closed';
@@ -150,14 +253,18 @@
     }
     $('back-library').hidden = state.route !== 'meeting';
     text($('breadcrumb'), state.route === 'meeting' ? state.snapshot?.meeting?.title || '会议' : {meetings:'工作区', materials:'工作区', guide:'如何使用', settings:'设置'}[state.route]);
-    $('library-search').placeholder = state.route === 'materials' ? '搜索资料' : '搜索会议';
+    const searchLabel = state.route === 'meeting' ? '搜索本场发言或问题' : state.route === 'materials' ? '搜索资料' : '搜索会议';
+    $('library-search').placeholder = searchLabel;
+    $('library-search').value = state.route === 'meeting' ? '' : state.search;
+    text($('library-search-label'), searchLabel);
     if (updateHistory) {
       const hash = state.route === 'meeting' ? meetingHash() : `#${state.route}`;
       if (location.hash !== hash) history.pushState(null, '', hash);
     }
     renderLibrary();
+    renderRecent();
     renderSettings();
-    if (state.route === 'settings') { loadServiceSettings(); loadStorageSettings(); feishu.open(); }
+    if (state.route === 'settings') { loadServiceSettings(); loadStorageSettings(); selectPreference(preference); }
     $('main').scrollTop = 0;
   }
   async function readRoute() {
@@ -177,7 +284,8 @@
   }
   function renderRecent() {
     const meetings = state.home?.meetings || [];
-    const rows = state.recentIds.map(id => meetings.find(m => m.id === id)).filter(Boolean).slice(0, 4);
+    const current = meetings.find(m => m.id === state.native?.meetingId) || (state.snapshot?.meeting?.state === 'active' ? state.snapshot.meeting : null);
+    const rows = state.recentIds.filter(id => id !== current?.id).map(id => meetings.find(m => m.id === id)).filter(Boolean).slice(0, 4);
     const list = $('recent-meetings');
     const signature = JSON.stringify(rows.map(m => [m.id, m.title]));
     if (list.dataset.signature !== signature) {
@@ -192,7 +300,6 @@
       }));
     }
     document.querySelector('.recent-section').hidden = !rows.length;
-    const current = meetings.find(m => m.id === state.native?.meetingId) || (state.snapshot?.meeting?.state === 'active' ? state.snapshot.meeting : null);
     $('current-meeting-nav').hidden = !current;
     $('return-meeting').dataset.meetingId = current?.id || '';
     text($('current-meeting-name'), current?.title || '');
@@ -202,6 +309,120 @@
       if (state.route === 'meeting' && button.dataset.meetingId === state.meetingId) button.setAttribute('aria-current','page');
       else button.removeAttribute('aria-current');
     }
+  }
+  function closeMeetingSearch(restoreFocus = false) {
+    clearTimeout(meetingSearch.timer);
+    meetingSearch.controller?.abort();
+    meetingSearch.sequence += 1;
+    const panel = $('meeting-search-popover');
+    if (panel.matches(':popover-open')) panel.hidePopover();
+    $('library-search').setAttribute('aria-expanded', 'false');
+    if (restoreFocus) {
+      const previous = meetingSearch.previousFocus;
+      (previous?.isConnected ? previous : $('main')).focus({preventScroll: true});
+    }
+  }
+  function positionMeetingSearch() {
+    const bounds = document.querySelector('.global-search').getBoundingClientRect();
+    const panel = $('meeting-search-popover');
+    const width = Math.min(520, window.innerWidth - 24);
+    panel.style.width = `${width}px`;
+    panel.style.left = `${Math.max(12, Math.min(bounds.left, window.innerWidth - width - 12))}px`;
+    panel.style.top = `${bounds.bottom + 6}px`;
+    panel.style.maxHeight = `${Math.max(120, window.innerHeight - bounds.bottom - 22)}px`;
+  }
+  function searchExcerpt(value, query) {
+    const node = element('span', 'meeting-search-excerpt');
+    const index = value.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
+    const start = Math.max(0, index - 24);
+    const end = Math.min(value.length, Math.max(index + query.length + 60, start + 100));
+    if (start) node.append(document.createTextNode('…'));
+    node.append(document.createTextNode(value.slice(start, Math.max(start, index))));
+    if (index >= 0) node.append(element('mark', '', value.slice(index, index + query.length)));
+    node.append(document.createTextNode(value.slice(index >= 0 ? index + query.length : start, end)));
+    if (end < value.length) node.append(document.createTextNode('…'));
+    return node;
+  }
+  async function locateSearchSegment(segment, mid) {
+    const current = () => state.route === 'meeting' && mid === state.meetingId;
+    const find = () => [...$('transcript-list').children].find(row => row.dataset.segmentId === segment.segment_id);
+    if (!current()) return;
+    $('follow-transcript').checked = false;
+    setMeetingTab('transcript');
+    if (!find()) {
+      const page = await api(`/live/v2/meetings/${encodeURIComponent(mid)}/segments?before=${segment.event_seq + 1}`);
+      if (!current()) return;
+      const found = page.segments.find(row => row.segment_id === segment.segment_id);
+      if (!found || page.revision_epoch !== state.snapshot.transcript_page.revision_epoch) {
+        notice('这段发言已更新，请重新搜索。', true);
+        return;
+      }
+      state.transcriptHistory = {epoch: page.revision_epoch, rows: new Map(page.segments.map(row => [row.segment_id, row])), page, focused: true, loading: false};
+      renderTranscripts(state.snapshot.segments, true);
+    }
+    const row = find();
+    if (row) {
+      row.tabIndex = -1;
+      row.focus({preventScroll: true});
+      row.scrollIntoView({block: 'center'});
+    }
+  }
+  async function runMeetingSearch() {
+    meetingSearch.controller?.abort();
+    const sequence = ++meetingSearch.sequence;
+    const query = $('library-search').value.trim();
+    const mid = state.meetingId;
+    const container = $('meeting-search-results');
+    container.replaceChildren();
+    if (!query) { text($('meeting-search-status'), '输入关键词，查找本场发言或问题。'); return; }
+    text($('meeting-search-status'), '正在搜索本场会议…');
+    const controller = new AbortController();
+    meetingSearch.controller = controller;
+    try {
+      const result = await api(`/live/v2/meetings/${encodeURIComponent(mid)}/search?q=${encodeURIComponent(query)}`, {signal: controller.signal});
+      if (sequence !== meetingSearch.sequence || mid !== state.meetingId || state.route !== 'meeting') return;
+      const groups = [['发言', result.segments, result.more_segments], ['查证问题', result.questions, result.more_questions]];
+      let count = 0;
+      for (const [label, rows, more] of groups) {
+        if (!rows.length) continue;
+        count += rows.length;
+        const section = element('section', 'meeting-search-group');
+        section.append(element('h2', '', `${label} · ${more ? '最近 ' : ''}${rows.length}${more ? ' 条' : ''}`));
+        for (const row of rows) {
+          const button = element('button', 'meeting-search-hit');
+          button.type = 'button';
+          button.append(searchExcerpt(row.text || row.title, query), element('span', 'meeting-search-meta',
+            row.segment_id ? `${sources[row.source] || '发言'} · ${time(segmentTime(row))}` : questionStates[row.state] || row.state));
+          button.addEventListener('click', () => perform(button, async () => {
+            closeMeetingSearch();
+            if (row.segment_id) await locateSearchSegment(row, mid);
+            else if (mid === state.meetingId) {
+              await selectMeeting(mid, row.id);
+              $('question-title').tabIndex = -1;
+              $('question-title').focus({preventScroll: true});
+            }
+          }));
+          section.append(button);
+        }
+        container.append(section);
+      }
+      text($('meeting-search-status'), count ? `本场找到 ${count}${result.more_segments || result.more_questions ? ' 条以上' : ' 条'}匹配结果` : '本场没有匹配结果，可以换个关键词。');
+    } catch (error) {
+      if (error.name !== 'AbortError' && sequence === meetingSearch.sequence) text($('meeting-search-status'), `搜索未完成：${error.message}`);
+    }
+  }
+  function openMeetingSearch() {
+    if (state.route !== 'meeting' || !state.snapshot) return;
+    const panel = $('meeting-search-popover');
+    positionMeetingSearch();
+    if (!panel.matches(':popover-open')) panel.showPopover();
+    $('library-search').setAttribute('aria-expanded', 'true');
+    meetingSearch.controller?.abort();
+    meetingSearch.sequence += 1;
+    clearTimeout(meetingSearch.timer);
+    $('meeting-search-results').replaceChildren();
+    text($('meeting-search-status'), $('library-search').value.trim() ? '正在搜索本场会议…' : '输入关键词，查找本场发言或问题。');
+    meetingSearch.timer = setTimeout(runMeetingSearch, 180);
   }
   const materialShelf = {filter:'all', id:'', requestKey:'', request:null};
   const desktopLibrary = matchMedia('(min-width: 981px)');
@@ -252,7 +473,8 @@
     text($('library-title'), materials ? '全部资料' : '全部会议');
     text($('library-description'), materials ? `已登记 ${home.materials?.length || 0} 份资料` : `${meetings.length} 场会议 · ${meetings.filter(m => m.state === 'active').length} 场进行中`);
     text($('name-column'), materials ? '资料名称' : '会议名称');
-    text(document.querySelector('.count-column'), materials ? '版本' : '查证资料');
+    text(document.querySelector('.count-column'), materials ? '版本' : '全部文件');
+    document.querySelector('.count-column').title = materials ? '查证文档版本' : '含查证文档、录音、转写及纪要；查证问题数量见会议名称下方';
     text(document.querySelector('.date-column'), materials ? '生成时间' : '最近更新');
     text($('library-sort'), `${materials ? '生成时间' : '最近更新'} ${state.descending ? '↓' : '↑'}`);
     $('welcome-strip').hidden = materials || Boolean(query) || home.project?.data_scope !== 'synthetic';
@@ -281,6 +503,7 @@
         const button = element('button', 'library-row');
         button.dataset.rowId = row.id;
         button.dataset.meetingId = materials ? row.meeting_id : row.id;
+        button.title = row.title || '未命名';
         if (materials) {
           button.dataset.materialQuestion = row.question_id;
           button.setAttribute('aria-current', String(row.id === materialShelf.id));
@@ -315,9 +538,10 @@
     }
     $('library-empty').hidden = Boolean(rows.length);
     $('empty-create').hidden = Boolean(query) || materials || state.filter !== 'all';
+    $('empty-setup').hidden = $('empty-create').hidden || Boolean(state.home?.meetings?.length);
     const filteredMaterials = materials && (materialShelf.filter !== 'all' || state.filter !== 'all');
     text($('library-empty-title'), query ? '没有找到匹配内容' : filteredMaterials ? '暂无符合筛选的资料' : materials ? '资料会在这里汇集' : state.filter === 'all' ? '开始你的第一场会议' : '暂无符合筛选的会议');
-    text($('library-empty-message'), query ? '试试更短的关键词，或清除搜索。' : filteredMaterials ? '切换资料状态或会议筛选查看其他资料。' : materials ? '打开一场会议，在“查证问题”中添加问题；生成的 Markdown 会出现在这里。' : state.filter === 'all' ? '首次使用先到“设置”安装中文转写模型、配置联网服务。准备好后开始会议，也可以导入已有录音。' : '切换“全部”查看已有会议。');
+    text($('library-empty-message'), query ? '试试更短的关键词，或清除搜索。' : filteredMaterials ? '切换资料状态或会议筛选查看其他资料。' : materials ? '打开一场会议，在“查证问题”中添加问题；生成的 Markdown 会出现在这里。' : state.filter === 'all' ? '第一次使用？先设置语音转写，再决定是否开启 AI 查证和飞书同步。' : '切换“全部”查看已有会议。');
     renderRecent();
   }
   function closeMeetingActions() {
@@ -436,11 +660,12 @@
     try { value ? sessionStorage.setItem('wb_access', value) : sessionStorage.removeItem('wb_access'); } catch { /* Access can be disabled by browser settings. */ }
   }
   function logout(showMessage = true) {
+    closeMeetingSearch();
     state.request?.controller.abort();
     state.request = null;
     state.token = '';
     state.home = null;
-    feishu.reset();
+    feishu.reset(); preference = 'start';
     state.snapshot = null;
     state.meetingId = '';
     state.transcriptHistory = state.returnNote = null;
@@ -450,6 +675,7 @@
     state.librarySignature = '';
     state.recentIds = [];
     state.serviceSettings = null; state.settingsRequest = null; state.settingsDirty = false;
+    speech.reset(); state.importRetry = null;
     state.storageSettings = null; state.storageRequest = null; state.storageRefreshPending = false; state.storageError = '';
     state.clearModelKey = false; state.clearSearchKey = false;
     $('service-model-key').value = ''; $('service-search-key').value = '';
@@ -500,6 +726,10 @@
   }
   function coordinatorIssue(meeting) {
     if (!meeting) return '';
+    if (!meeting.coordinator_error && meeting.detection_service_error) {
+      const retry = meeting.detection_service_retry;
+      return `问题识别服务暂时受阻。${meeting.detection_service_error.message || ''} ${retry?.state === 'scheduled' ? `约 ${Math.max(0, Math.ceil(retry.next_at - Date.now() / 1000))} 秒后自动重试（${retry.attempts}/${retry.max_attempts}）。` : '请检查模型服务后重试。'} 转写已保存。`;
+    }
     if (meeting.coordinator_error && meeting.coordinator_error_message) {
       const details = meeting.coordinator_error_details || {};
       const retry = meeting.coordinator_retry;
@@ -537,8 +767,15 @@
     const desktop = nativeAvailable();
     const modelStates = {unknown:'正在检查中文识别模型…', installed:'中文识别模型已安装 · 音频在本机处理', downloadable:'尚未安装中文识别模型，请先安装。', downloading:'正在安装中文识别模型…', unsupported:'当前系统不支持本机中文识别。'};
     const fileModel = native?.fileModelState || 'unknown';
-    text($('settings-audio-state'), desktop ? native?.status || '正在连接本机音频组件…' : '本机收听仅在桌面 App 中可用。浏览器可查看与补充会议。');
-    text($('settings-model-state'), desktop ? fileModel === 'downloadable' && native?.modelState === 'installed' ? '系统收听已就绪；文件转写还需安装中文模型。' : modelStates[fileModel] || '模型状态待确认' : '请在桌面 App 中检查与安装。');
+    const readiness = {installed:'已就绪', downloadable:'待安装', downloading:'安装中', unsupported:'不支持', unknown:'待检查'};
+    const liveState = readiness[native?.modelState] || '待检查', importState = readiness[fileModel] || '待检查';
+    const liveProvider = speech.activeProvider('live'), fileProvider = speech.activeProvider('file');
+    const selectedLive = liveProvider === 'apple_local' ? liveState : speech.label(liveProvider);
+    const selectedFile = fileProvider === 'apple_local' ? importState : speech.label(fileProvider);
+    text($('setup-audio'), desktop ? `实时 ${selectedLive} · 文件 ${selectedFile}` : '需在 Mac 检查');
+    for (const kind of ['model','search']) text($('setup-' + kind), cap[kind + '_enabled'] ? '已启用' : cap[kind + '_configured'] ? '待启用' : '未配置');
+    text($('settings-audio-state'), desktop ? `实时 ${liveState} · 文件 ${importState}` : '请在桌面 App 中检查与安装。');
+    text($('settings-model-state'), desktop ? modelStates[fileModel] || '模型状态待确认' : '音频在本机处理，无需 API Key。');
     $('check-model').disabled = !desktop || !native?.ready || native?.modelState === 'downloading' || Boolean(native?.meetingId);
     $('install-model').disabled = !desktop || !native?.ready || ![native?.modelState,fileModel].includes('downloadable') || [native?.modelState,fileModel].includes('downloading') || Boolean(native?.meetingId);
     text($('install-model'), native?.modelState === 'installed' && fileModel === 'installed' ? '已安装' : [native?.modelState,fileModel].includes('downloading') ? '安装中…' : '安装模型');
@@ -546,6 +783,7 @@
     text($('settings-search-badge'), cap.search_enabled ? '已启用' : cap.search_configured ? '待启用' : '未配置');
     text($('settings-authorization'), `新会议默认开启联网查证，可在创建或导入时关闭。自动搜索使用公开检索词。${requestLimitsText()}`);
     renderProviderSettings();
+    speech.render();
     renderStorageSettings();
     text($('settings-retention'), '录音、转写、纪要与查证资料长期保存在本机，不会自动到期删除。仅在你确认删除会议时清除该会议资料。');
     $('guide-demo').hidden = state.home?.project?.data_scope !== 'synthetic';
@@ -591,11 +829,80 @@
     text($(id), value);
     $(id).dataset.state = status;
   }
+  const deepSeekURL = 'https://api.deepseek.com';
+  function modelURL(value) {
+    return value.trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '');
+  }
+  function officialDeepSeek(value) {
+    return [deepSeekURL, deepSeekURL + '/v1'].includes(modelURL(value));
+  }
+  function modelProfiles() {
+    return state.serviceSettings?.model_profiles || [];
+  }
+  function matchingModelProfile(provider, url, name) {
+    const destination = provider === 'deepseek' && officialDeepSeek(url) ? deepSeekURL : modelURL(url);
+    return modelProfiles().find(m => {
+      const savedURL = provider === 'deepseek' && officialDeepSeek(m.base_url) ? deepSeekURL : modelURL(m.base_url);
+      return m.provider === provider && savedURL === destination && m.name === name;
+    });
+  }
+  function modelKeySaved() {
+    const provider = $('service-model-provider').value;
+    const url = $('service-model-url').value;
+    if (provider === 'deepseek' && officialDeepSeek(url)) {
+      return modelProfiles().some(m => m.provider === provider && officialDeepSeek(m.base_url) && m.api_key_configured);
+    }
+    return matchingModelProfile(provider, url, $('service-model-name').value.trim())?.api_key_configured;
+  }
+  function fillModelFields(model) {
+    const deepseek = model.provider === 'deepseek';
+    const official = deepseek && officialDeepSeek(model.base_url);
+    const presetName = model.name === 'deepseek-v4-flash' ? 'deepseek-flash' : model.name;
+    $('service-model-provider').value = model.provider;
+    $('service-model-url').value = official ? deepSeekURL : model.base_url;
+    $('service-model-url').readOnly = official;
+    $('service-model-name').value = model.name;
+    const picker = $('service-deepseek-model');
+    picker.querySelector('option[disabled]')?.remove();
+    if (official && !Array.from(picker.options).some(option => option.value === presetName)) {
+      const legacy = new Option(`已保存：${model.name || '未选择'}`, presetName);
+      legacy.disabled = true;
+      legacy.hidden = true;
+      picker.add(legacy);
+    }
+    picker.value = presetName;
+    picker.parentElement.hidden = !official;
+    $('service-model-name').parentElement.hidden = official;
+    $('service-model-profile').parentElement.hidden = deepseek;
+    $('service-model-enabled').checked = model.enabled;
+    $('service-model-effort').value = model.reasoning_effort;
+    $('service-model-detection').value = model.detection_mode ?? 'fast';
+    $('service-model-tokens').value = model.max_tokens;
+    $('service-model-timeout').value = model.timeout_seconds;
+    $('service-model-token-parameter').value = model.token_parameter;
+    $('service-model-json').checked = model.json_mode;
+    $('service-model-thinking').checked = model.thinking === 'enabled';
+    $('service-model-key').value = '';
+    state.clearModelKey = false;
+    const list = $('service-model-profile');
+    list.replaceChildren(new Option('新增兼容模型', ''));
+    modelProfiles().forEach((m, index) => {
+      if (m.provider !== 'openai_compatible') return;
+      const option = new Option(`${m.name} · ${m.base_url}`, String(index));
+      list.add(option);
+      option.selected = !deepseek && modelURL(m.base_url) === modelURL(model.base_url) && m.name === model.name;
+    });
+  }
+  function modelDefaults(provider) {
+    const deepseek = provider === 'deepseek';
+    return {provider, name: deepseek ? 'deepseek-flash' : '', base_url: deepseek ? deepSeekURL : 'https://api.openai.com/v1',
+      enabled: true, json_mode: deepseek, reasoning_effort: 'default', detection_mode: 'fast', thinking: 'disabled',
+      max_tokens: 8192, timeout_seconds: 180, token_parameter: deepseek ? 'max_tokens' : 'max_completion_tokens'};
+  }
   function matchingKeyDestination(kind) {
     const current = state.serviceSettings?.[kind];
     if (!current || current.provider !== $(`service-${kind}-provider`).value) return false;
-    try { return new URL(current.base_url).origin === new URL($(`service-${kind}-url`).value).origin; }
-    catch { return false; }
+    return modelURL(current.base_url) === modelURL($(`service-${kind}-url`).value);
   }
   function renderProviderSettings() {
     const settings = state.serviceSettings;
@@ -607,7 +914,7 @@
     $('archive-settings-fields').disabled = !editable || busy;
     $('save-service-settings').disabled = !editable || busy;
     $('reload-service-settings').disabled = !owner || busy;
-    text($('save-service-settings'), state.settingsBusy ? '处理中…' : '保存设置');
+    text($('save-service-settings'), state.settingsBusy ? '处理中…' : '保存模型与搜索设置');
     $('model-thinking-row').hidden = $('service-model-provider').value !== 'deepseek';
     let shared = $('service-model-provider').value === 'deepseek' && $('service-search-provider').value === 'deepseek';
     try { shared = shared && new URL($('service-model-url').value).origin === new URL($('service-search-url').value).origin; }
@@ -617,7 +924,7 @@
     $('search-key-field').hidden = shared && $('service-search-shared-key').checked;
     for (const kind of ['model', 'search']) {
       const cleared = kind === 'model' ? state.clearModelKey : state.clearSearchKey;
-      const saved = settings?.[kind]?.api_key_configured && matchingKeyDestination(kind);
+      const saved = kind === 'model' ? modelKeySaved() : settings?.search?.api_key_configured && matchingKeyDestination('search');
       text($(`service-${kind}-key-state`), cleared ? '将清除' : saved ? '已保存' : '未配置');
       $(`service-${kind}-key`).placeholder = cleared ? '保存后清除密钥' : saved ? '留空保留已有密钥' : '填写服务商提供的密钥';
       $(`clear-${kind}-key`).disabled = busy || !editable || !saved || cleared;
@@ -635,16 +942,10 @@
       $(`service-${kind}-enabled`).checked = value.enabled;
       $(`service-${kind}-key`).value = '';
     }
-    $('service-model-name').value = settings.model.name;
-    $('service-model-effort').value = settings.model.reasoning_effort;
-    $('service-model-detection').value = settings.model.detection_mode ?? 'fast';
-    $('service-model-tokens').value = settings.model.max_tokens;
-    $('service-model-timeout').value = settings.model.timeout_seconds ?? 180;
-    $('service-model-token-parameter').value = settings.model.token_parameter;
-    $('service-model-json').checked = settings.model.json_mode;
-    $('service-model-thinking').checked = settings.model.thinking === 'enabled';
+    fillModelFields(settings.model);
     $('service-search-shared-key').checked = settings.search.use_model_key;
     $('keep-original-caf').checked = settings.keep_original_caf === true;
+    speech.fill(settings);
     renderProviderSettings();
   }
   async function loadServiceSettings(force = false) {
@@ -664,11 +965,11 @@
       if (state.token === token) providerMessage('service-settings-result', error.message, 'error');
     } finally {
       if (state.settingsRequest === request) state.settingsRequest = null;
-      renderProviderSettings();
+      renderProviderSettings(); speech.render(); renderSpeechRuntime();
     }
   }
   function serviceSettingsBody() {
-    return {revision: state.serviceSettings.revision, keep_original_caf: $('keep-original-caf').checked, model: {
+    return {revision: state.serviceSettings.revision, model: {
       provider: $('service-model-provider').value, base_url: $('service-model-url').value.trim(),
       name: $('service-model-name').value.trim(), enabled: $('service-model-enabled').checked,
       api_key: $('service-model-key').value.trim() || null, clear_api_key: state.clearModelKey,
@@ -739,9 +1040,12 @@
     document.querySelector('.capture-reading').dataset.active = String(listening || (!desktop && ['listening', 'running', 'capturing'].includes(serverCapture.status)));
     $('start-listening').hidden = synthetic || file || ended || busy;
     $('stop-listening').hidden = synthetic || ended || !busy;
-    $('start-listening').disabled = !desktop || !native?.ready || state.pendingButtons.has('start-listening');
+    const liveProvider = speech.activeProvider('live');
+    const needsApple = liveProvider === 'apple_local' && native?.modelState === 'downloadable';
+    const canStart = desktop && (native?.canStart || needsApple && native?.ready && !native?.meetingId);
+    $('start-listening').disabled = !canStart || state.pendingButtons.has('start-listening');
     $('stop-listening').disabled = moving || !native?.canStop || state.pendingButtons.has('stop-listening');
-    text($('start-listening').querySelector('span'), desktop && native?.modelState === 'downloadable' ? '安装中文模型' : '开始收听');
+    text($('start-listening').querySelector('span'), needsApple ? '安装中文模型' : '开始收听');
     text($('stop-listening'), file ? '停止导入' : '暂停收听');
     let guidance = input.help + ' 选择后点击“开始收听”。';
     if (synthetic) guidance = '这是一场示例会议，展示转写、查证与资料保存的完整流程。';
@@ -751,24 +1055,36 @@
     else if (desktop && native?.captureState === 'error') guidance = native.status || '请检查系统录音权限，然后重新开始收听。';
     else if (moving || bound && native.captureState === 'stopped') guidance = native.status || '音频组件正在收尾，请稍候。';
     else if (listening) guidance = input.help;
-    else if (native?.modelState === 'downloadable') guidance = '首次使用需要中文识别模型。点击“安装中文模型”前往设置。';
-    else if (native?.modelState === 'downloading') guidance = '中文模型正在安装，完成后即可开始收听。';
-    else if (native?.modelState === 'unsupported') guidance = '当前系统不支持本机中文识别，可先使用文字补充。';
+    else if (needsApple) guidance = '首次使用需要中文识别模型。点击“安装中文模型”前往设置。';
+    else if (liveProvider === 'apple_local' && native?.modelState === 'downloading') guidance = '中文模型正在安装，完成后即可开始收听。';
+    else if (liveProvider === 'apple_local' && native?.modelState === 'unsupported') guidance = '当前系统不支持本机中文识别，可在设置中选择云端服务，或使用文字补充。';
+    else if (!canStart && liveProvider !== 'apple_local') guidance = `${speech.label(liveProvider)}实时转写尚未就绪，可在设置中查看。`;
     else if (serverCapture.status === 'paused' || serverCapture.status === 'stopped') guidance = '收听已暂停，可切换音源后继续。';
     if (desktop && bound && !moving && listening) guidance += ' 切换音源请先暂停。';
+    if (!bound && !ended && canStart && !synthetic && !file && !inputError) {
+      guidance += liveProvider === 'apple_local' ? ' 音频由 Apple 在本机处理。' : ` 将使用${speech.label(liveProvider)}转写，上传前需获得本场授权。`;
+    }
     text($('capture-guidance'), guidance);
+    speech.renderMeeting(meeting, bound);
     text($('transcript-live-label'), synthetic ? '示例讨论' : listening ? '实时更新中' : ended ? '会议记录' : '等待收听');
     $('import-progress').hidden = !file;
     if (file) {
       const job = meeting.audio_import;
       const labels = {processing:'正在转写', completed:'转写完成', cancelled:'导入已停止', failed:'导入失败', interrupted:'导入已中断'};
       text($('capture-status'), bound && native.captureState === 'stopping' ? '正在保存转写…' : job ? labels[job.state] || job.state : bound ? '正在准备导入' : '等待导入音频');
-      text($('capture-guidance'), job?.error || (ended ? '本场会议已结束，录音与文档可在“会议文件”查看。恢复自动查证可继续分析剩余转写和未完成问题。' : job?.state === 'completed' ? '录音已转写；问题分析与查证可能尚未完成。结束会议会暂停自动任务，会后可恢复。' : job?.state === 'processing' || bound ? '直接读取文件，在本机识别。无需播放，不会收听电脑上的其他声音。' : '选择音频开始转写；停止后会保留已识别的内容。'));
+      text($('capture-guidance'), job?.error || (ended ? '本场会议已结束，录音与文档可在“会议文件”查看。恢复自动查证可继续分析剩余转写和未完成问题。' : job?.state === 'completed' ? '录音已转写；问题分析与查证可能尚未完成。结束会议会暂停自动任务，会后可恢复。' : job?.state === 'processing' || bound ? `${speech.label(job?.provider || speech.activeProvider('file'))}正在转写选定文件，无需播放。` : '选择音频开始转写；停止后会保留已识别的内容。'));
       if (job?.transcript_state === 'save_failed') text($('capture-guidance'), '转写内容已保留，但自动保存文件失败。可点击“导出完整转写”另存，或检查会议目录的写入权限。');
       text($('import-file-name'), job?.file_name || '尚未绑定音频');
-      text($('import-progress-label'), job ? `${labels[job.state] || job.state} · ${audioTime(job.processed_ms)} / ${audioTime(job.duration_ms)}` : bound ? native.status : native?.captureState === 'error' ? native.status : '选择音频后开始');
+      const failurePosition = Number.isFinite(job?.failed_at_ms) ? ` · ${audioTime(job.failed_at_ms)} 起未完成` : '';
+      const recording = (meeting.recordings || []).find(row => row.source === 'file' && ['saved', 'partial'].includes(row.state));
+      const resumable = desktop && job && ['failed', 'cancelled', 'interrupted'].includes(job.state)
+        && ['dashscope', 'deepseek'].includes(job.provider) && Boolean(recording) && !bound && !ended;
+      text($('import-progress-label'), job ? `${labels[job.state] || job.state} · ${audioTime(job.processed_ms)} / ${audioTime(job.duration_ms)}${failurePosition}` : bound ? native.status : native?.captureState === 'error' ? native.status : '选择音频后开始');
       $('import-progress-bar').value = job?.duration_ms ? Math.min(100, job.processed_ms / job.duration_ms * 100) : 0;
-      $('restart-import').hidden = ended || job?.state === 'processing' || Boolean(bound);
+      $('continue-import').hidden = !resumable;
+      $('continue-import').disabled = state.pendingButtons.has('continue-import');
+      $('restart-import').hidden = !desktop || job?.state === 'processing' || Boolean(bound) || ended && !job;
+      text($('continue-import'), resumable ? `继续导入（从 ${audioTime(job.failed_at_ms || job.processed_ms)}）` : '继续导入');
       text($('restart-import'), job ? '重新导入为新会议' : '重新选择音频');
       $('download-transcript').disabled = !(state.snapshot?.segments || []).some(s => s.type === 'transcript.final') || state.pendingButtons.has('download-transcript');
       text($('transcript-live-label'), state.snapshot?.segment_count > 120 ? '显示最近 120 段 · 完整内容可导出' : job?.state === 'processing' ? '转写逐段更新' : '完整内容可导出');
@@ -780,12 +1096,14 @@
     const available = cap.model_enabled && cap.search_enabled && granted;
     $('research-warning').hidden = !meeting || synthetic || available;
     $('authorize-research').hidden = !researchAvailable() || !cap.model_enabled || state.home?.member?.role !== 'owner';
-    text($('research-warning-text'), cap.model_enabled && cap.search_enabled ? '本场会议尚未授权联网查证。转写可在本机继续。' : '联网查证尚未启用。可先在本机转写，前往设置连接模型与搜索。');
+    text($('research-warning-text'), cap.model_enabled && cap.search_enabled ? '本场会议尚未授权联网查证。语音转写可继续。' : '联网查证尚未启用。语音转写可继续。');
     const issue = coordinatorIssue(meeting);
     const researchState = meeting?.coordinator_state;
     const postMeetingWork = state.snapshot?.automation_progress?.pending || researchState === 'running' || state.snapshot?.questions?.some(q => activeStates.has(q.state));
     text($('questions-guidance'), ended ? !researchAvailable() ? '会议内容已清理，无法继续查证。' : issue ? '会后问题识别受阻，原因见上方提示。已有问题仍可单独查证。' : meeting?.research_paused ? '会议已结束，自动任务已暂停。恢复后会从剩余转写继续识别问题；已有问题也可单独重试。' : postMeetingWork ? '正在处理会后任务：继续分析剩余转写，并查证未完成的问题。' : '本场转写已分析完毕。可查看已有资料，或打开具体问题重试。' : meeting?.research_paused ? '自动查证已暂停。打开等待中的问题可立即查证，也可以手动添加或重试。' : ['scheduled', 'running'].includes(meeting?.coordinator_retry?.state) ? '正在恢复问题识别，将从未处理的发言继续。已有问题可照常查证。' : issue ? '自动问题识别受阻，原因见上方提示。已有问题仍可手动查证。' : synthetic ? '打开问题查看参考回答、来源与 Markdown。示例内容仅用于体验。' : !available ? '联网查证尚未就绪。你可以先添加问题，配置服务后再查证。' : researchState === 'running' ? '正在分析讨论，识别待查证的问题…' : researchState === 'pending' ? '等待分析新发言，识别后会显示在这里。' : '“调研一下”“找些来源”等明确请求会自动识别，也可以手动添加。');
-    $('open-meeting-folder').disabled = !desktop || !meeting?.directory;
+    const folderDisabled = !meetingFolderId();
+    $('open-meeting-folder').disabled = folderDisabled;
+    $('open-files-folder').disabled = folderDisabled;
     renderRecent();
   }
   async function selectMeeting(id, questionId = '', tab = 'answer', updateHistory = true) {
@@ -891,16 +1209,23 @@
     const unfinished = questions.filter(q => activeStates.has(q.state)).length;
     const progress = snapshot?.automation_progress;
     const pendingSegments = Math.max(0, progress?.pending || 0);
+    const deferredDetection = Math.max(0, progress?.recovering || 0);
+    const detectionReview = Math.max(0, progress?.needs_review || 0);
     const issue = coordinatorIssue(meeting);
-    const recovering = ['scheduled', 'running'].includes(meeting?.coordinator_retry?.state);
+    const recovering = ['scheduled', 'running'].includes(meeting?.coordinator_retry?.state) || meeting?.detection_service_retry?.state === 'scheduled';
     const postMeetingStatus = issue && !recovering ? '会后问题识别待重试' : pendingSegments || meeting?.coordinator_state === 'running' ? paused ? '会后问题识别已暂停' : recovering ? '正在恢复会后问题识别' : meeting?.coordinator_state === 'running' ? '会后问题识别进行中' : '会后问题识别等待执行' : questions.some(q => q.state === 'running') ? '会后查证进行中' : unfinished ? paused ? '未完成查证已暂停' : '会后查证等待执行' : questions.some(q => ['failed', 'outcome_unknown'].includes(q.state)) ? '查证问题可重试' : questions.length ? '查证已完成' : '暂无查证问题';
     text($('automation-status'), !meeting ? '正在读取查证状态' : afterMeeting ? postMeetingStatus : !live ? meetingStates[meeting.state] || '会议不可用' : paused ? '自动查证已暂停' : recovering ? '正在恢复问题识别' : meeting.coordinator_error || ['failed', 'outcome_unknown'].includes(meeting.coordinator_state) ? '问题识别待重试' : '自动查证运行中');
     $('automation-status').dataset.state = !research ? 'ended' : paused ? 'paused' : issue && !recovering ? 'failed' : 'active';
+    if (research && !paused && !issue && (deferredDetection || detectionReview)) {
+      text($('automation-status'), `${afterMeeting ? '会后识别' : '新发言识别'}${pendingSegments || meeting.coordinator_state === 'running' ? '进行中' : '正常'} · ${deferredDetection ? `${deferredDetection} 项补充识别中` : ''}${deferredDetection && detectionReview ? ' · ' : ''}${detectionReview ? `${detectionReview} 项待核对` : ''}`);
+    }
     $('automation-hint').hidden = !research || !paused && !(afterMeeting && pendingSegments);
     text($('automation-hint'), afterMeeting ? `${pendingSegments ? `还有 ${pendingSegments} 段转写待分析。` : ''}${paused ? '恢复自动查证后继续识别剩余转写和未完成问题；也可单独重试已有问题。' : issue && !recovering ? '问题识别暂未完成，请查看错误提示并重试；已完成资料会保留。' : '将从剩余转写继续分析，已完成的资料会保留。'}` : '已开始的任务会完成；仍可手动添加、立即查证或重试。');
     text($('meeting-info-guidance'), afterMeeting ? '会议已停止收听并整理文件。恢复自动查证后，从未分析的转写继续识别问题，并处理未完成查证；已完成资料会保留。' : '暂停只影响自动任务。已开始的查证会继续，手动添加和重试仍可用；恢复后从未处理的转写继续。');
     text($('automation-progress-label'), '问题识别进度');
     text($('automation-progress'), progress ? `已分析 ${progress.processed} 段 · 待分析 ${progress.pending} 段${afterMeeting ? ` · ${unfinished} 个问题尚待完成` : progress.held_questions ? ` · ${progress.held_questions} 个问题等待恢复` : ''}` : '正在读取');
+    if (progress && (deferredDetection || detectionReview)) text($('automation-progress'), `已扫描 ${progress.processed} 段 · 未扫描 ${progress.pending} 段 · ${deferredDetection} 项补充识别中 · ${detectionReview} 项待核对`);
+    renderDetectionRecovery(snapshot?.detection_tasks || [], paused);
     for (const id of ['show-meeting-info', 'show-activity']) $(id).disabled = !meeting;
     $('coordinator-warning').hidden = !research || !issue;
     text($('coordinator-warning-text'), issue ? `${issue}${paused && !recovering ? ' 恢复自动查证后，可单独重试问题识别。' : ''}` : '');
@@ -916,6 +1241,79 @@
     renderMeetingFiles();
   }
   let filePreviewRequest = 0;
+  function renderDetectionRecovery(tasks, paused) {
+    const mid = state.meetingId;
+    $('detection-recovery').hidden = !tasks.length;
+    text($('detection-recovery-summary'), `部分发言仍待识别确认（${tasks.length} 项）${paused ? '，恢复自动查证后继续' : '，后续发言继续处理'}`);
+    const container = $('detection-recovery-items');
+    const signature = JSON.stringify([mid, tasks, paused]);
+    if (container.dataset.signature === signature) return;
+    container.dataset.signature = signature;
+    container.replaceChildren();
+    const reasons = {quote_id_not_found: '所选原话编号无效', quote_not_in_new_segment: '问题依据未匹配原话',
+      source_not_in_new_segment: '引用发言的编号或版本无效', context_stale: '依据或问题版本已变化',
+      missing_proposal: '模型未能完成本条问题的修正', correction_count_mismatch: '修正结果没有保留本条问题',
+      scan_incomplete: '此范围仍需补充识别', invalid_json: '模型未返回完整内容', interrupted: '上次识别被中断',
+      local_save_failed: '识别结果未能保存到本机，请检查磁盘后重试此项',
+      overlapping_proposal: '与已有问题共用原话，需核对是否重复', correction_changed_intent: '修正结果改变了原问题',
+      read_timeout: '模型响应超时', http_error: '模型服务暂不可用', request_failed: '模型请求未完成'};
+    for (const task of tasks) {
+      const row = element('div', 'detection-recovery-item');
+      const stamp = audioTime(task.audio_start_ms || 0);
+      const label = task.state === 'needs_review' ? '待核对' : task.state === 'running' ? '补充识别中' : paused ? '已暂停' : '等待补充识别';
+      row.append(element('p', '', `${stamp} · ${label} · ${reasons[task.issues?.[0]?.code] || '返回内容未通过校验'}`));
+      const locate = element('button', 'text-button', '查看相关发言');
+      locate.type = 'button';
+      locate.id = `locate-${task.id}`;
+      locate.addEventListener('click', () => perform(locate, () => locateDetectionTask(task, mid)));
+      row.append(locate);
+      if (task.state === 'needs_review') {
+        const retry = element('button', 'text-button', '重新识别这段发言');
+        retry.id = `retry-${task.id}`;
+        retry.type = 'button'; retry.disabled = paused || state.pendingButtons.has(retry.id);
+        retry.addEventListener('click', () => perform(retry, async () => {
+          await api(`/live/v2/meetings/${encodeURIComponent(mid)}/detection-tasks/${encodeURIComponent(task.id)}/retry`, {method: 'POST', body: {}});
+          if (mid === state.meetingId) await refreshNow();
+        }));
+        row.append(retry);
+        if (paused) {
+          const hint = element('span', 'detection-retry-hint', '本场自动查证已暂停，恢复后可重新识别。');
+          hint.id = `retry-hint-${task.id}`;
+          retry.setAttribute('aria-describedby', hint.id);
+          const resume = element('button', 'text-button', '查看整场恢复操作');
+          resume.type = 'button';
+          resume.addEventListener('click', () => {
+            $('research-control').focus({preventScroll: true});
+            $('research-control').scrollIntoView({block: 'center'});
+          });
+          row.append(hint, resume);
+        }
+      }
+      container.append(row);
+    }
+  }
+  async function locateDetectionTask(task, mid) {
+    const ref = task.source_refs?.[0];
+    if (!ref) return;
+    const current = () => state.route === 'meeting' && state.meetingId === mid;
+    const find = () => [...$('transcript-list').querySelectorAll('[data-segment-id]')].find(row => row.dataset.segmentId === ref.segment_id);
+    for (let i = 0; i < 10 && current() && !find() && transcriptPage()?.has_more; i++) {
+      const before = transcriptPage().next_before;
+      await earlierTranscripts(false);
+      if (before === transcriptPage()?.next_before) break;
+    }
+    if (!current()) return;
+    const segment = visibleTranscripts(state.snapshot.segments).find(s => s.segment_id === ref.segment_id);
+    const row = find();
+    if (!row || segment?.revision !== ref.revision) {
+      notice(transcriptPage()?.has_more ? '当前已加载的发言中没有这条依据，可再次定位以继续向前查找。' : '对应发言已更正或撤回，请查看最新转写。');
+      return;
+    }
+    if (wideMeeting() && $('work-grid').dataset.layoutMode === 'triple') { $('work-grid').dataset.leftPane = 'transcript'; $('meeting-files-panel').hidden = true; }
+    else setMeetingTab('transcript');
+    $('follow-transcript').checked = false;
+    row.tabIndex = -1; row.focus({preventScroll:true}); row.scrollIntoView({block:'nearest'});
+  }
   async function previewMeetingFile(mid, kind, scroll = false) {
     const n = ++filePreviewRequest;
     const current = () => n === filePreviewRequest && state.meetingId === mid && state.route === 'meeting' && ['files','summary'].includes($('work-grid').dataset.leftPane);
@@ -1057,6 +1455,7 @@
       history.epoch = epoch;
     }
     for (const segment of latest) {
+      if (history.focused && !history.rows.has(segment.segment_id)) continue;
       const old = history.rows.get(segment.segment_id);
       if (!old || segment.revision >= old.revision) history.rows.set(segment.segment_id, segment);
     }
@@ -1222,7 +1621,7 @@
     if (automationHeld(q)) return 'hold';
     if (q.basis_stale) return 'unknown';
     if (['completed','insufficient'].includes(q.state)) return ({supported:'check', mixed:'mixed', insufficient:'missing', model_explanation:'unknown'})[q.result?.evidence_status] || (q.state === 'insufficient' ? 'missing' : 'none');
-    return ({failed:'failed',outcome_unknown:'unknown',running:'running',candidate:'candidate',paused:'hold',queued:'wait',waiting_dependency:'wait',needs_review:'unknown'})[q.state] || 'none';
+    return ({failed:'failed',outcome_unknown:'unknown',running:'running',candidate:'candidate',paused:'hold',queued:'wait',waiting_dependency:'wait',needs_query:'wait',needs_review:'unknown'})[q.state] || 'none';
   }
   function renderQuestions(questions) {
     if (state.snapshot && !questions.some((question) => question.id === state.selectedQuestionId)) state.selectedQuestionId = questions[0]?.id || '';
@@ -1288,10 +1687,14 @@
     text($('question-failure-heading'), details.stage ? `${stages[details.stage] || details.stage}未完成` : '本次查证未完成');
     text($('question-error'), error || '');
     text($('question-error-suggestion'), details.suggestion || '可重试此问题；若持续失败，请检查服务设置和运行记录。');
-    const note = question.state === 'outcome_unknown' ? '未能确认服务端是否已完成处理，应用不会自动重发此请求。' : '';
+    const retry = question.progress?.model?.timeout_retry;
+    const note = retry === 'sent' ? '首次模型请求超时后已自动重试 1 次。本轮查证已停止，可手动重试。' : retry === 'queued' ? '首次模型请求超时，自动重试在发出前停止。' : question.state === 'outcome_unknown' ? '未能确认服务端是否已完成处理。本轮没有自动重试记录。' : '';
     text($('question-error-note'), note);
     $('question-error-note').hidden = !note;
     const facts = [];
+    const model = question.progress?.model;
+    if (Number.isInteger(model?.timeout_request_id)) facts.push(['首次超时请求', `模型 #${model.timeout_request_id}`]);
+    if (Number.isInteger(model?.retry_request_id)) facts.push(['自动重试请求', `模型 #${model.retry_request_id}`]);
     if (details.code) facts.push(['错误类型', details.code]);
     if (details.http_status) facts.push(['HTTP 状态', String(details.http_status)]);
     if (details.provider_code) facts.push(['服务错误码', details.provider_code]);
@@ -1313,6 +1716,7 @@
   }
   function researchLabel(question) {
     if (question.state !== 'running') return questionFailureLabel(question);
+    if (question.stage === 'routing') return '模型正在判断是否需要联网搜索';
     if (question.stage === 'searching') return '正在搜索网页';
     if (question.stage === 'reading') return '正在读取原文';
     const phase = question.progress?.model?.phase;
@@ -1365,7 +1769,7 @@
     text($('research-source-count'), sourceItems.length ? `已读取 ${sourceItems.length} 份原文` : '');
     const eventLabels = {searching: '开始搜索网页', search_query: '检索词已准备', reading: '正在检查搜索结果中的原文',
       sources_ready: '已读取原文', synthesizing: '准备结合资料回答', model_queued: '已进入模型队列',
-      model_request: '请求已发送，等待响应', model_validating: '核验回答结构和原文引用', model_correcting: '正在修正回答格式与引用'};
+      model_request: '请求已发送，等待响应', model_timeout_retry: '模型响应超时，自动重试 1 次（首次请求可能已计费）', model_validating: '核验回答结构和原文引用', model_correcting: '正在修正回答格式与引用'};
     const events = (p?.events || []).filter(event => !['search_query', 'reading', 'synthesizing', 'model_queued'].includes(event.kind));
     const eventList = $('research-events');
     const eventSignature = JSON.stringify(events);
@@ -1400,7 +1804,8 @@
         model.last_response_at ? `最近响应于 ${time(model.last_response_at)}` : '尚未收到响应',
         model.reasoning_chars ? `已收到推理响应 ${model.reasoning_chars} 字` : '',
         model.answer_chars ? `已收到回答 ${model.answer_chars} 字` : '',
-        model.attempt > 1 ? '正在进行一次格式校正' : ''].filter(Boolean).join('\n'));
+        model.timeout_retry === 'sent' ? '超时后已自动重试 1 次' : model.timeout_retry === 'queued' ? '超时后等待自动重试' : '',
+        model.format_corrected ? '已进入格式校正流程' : ''].filter(Boolean).join('\n'));
     }
     const draft = running && model?.draft;
     $('research-draft').hidden = !draft;
@@ -1438,12 +1843,17 @@
       return `${time(segmentTime(segment))}「${segment.text}」`;
     });
     const origin = basis.length ? `发言依据：${basis.join('；')}` : question.origin === 'manual' ? '来源：手动研究问题' : '';
-    text($('question-trigger'), [origin, question.public_query ? `公开检索词：${question.public_query}` : ''].filter(Boolean).join('\n'));
+    const route = {public: '联网查证', mixed: '查公开事实，内部情况另核', explanation: '模型解释', internal: '需内部材料'}[question.evidence_need];
+    const trigger = question.grounding_quote && !question.basis_stale ? [
+      route && `处理方式：${route}`, `触发原话：「${question.grounding_quote}」`,
+      question.external_fact && `待核实的事实：${question.external_fact}`,
+    ] : [];
+    text($('question-trigger'), [...trigger, origin, question.public_query ? `公开检索词：${question.public_query}` : ''].filter(Boolean).join('\n'));
     $('locate-question').hidden = question.basis_stale || question.state === 'superseded' || !(question.anchor_ref || question.source_refs?.[0])?.segment_id;
     renderQuestionFailure(question);
     const research = researchAvailable();
     const questionMenu = document.querySelector('.question-menu');
-    const needsAction = research && (held || (question.state === 'candidate' ? !automatic : ['needs_review', 'failed', 'outcome_unknown', 'backlog', 'paused'].includes(question.state)));
+    const needsAction = research && (held || (question.state === 'candidate' ? !automatic : ['needs_query', 'needs_review', 'failed', 'outcome_unknown', 'backlog', 'paused'].includes(question.state)));
     if (questionMenu.dataset.questionId !== question.id || needsAction) questionMenu.open = needsAction;
     questionMenu.dataset.questionId = question.id;
     $('approve-question').hidden = question.state !== 'candidate' || automatic || !research;
@@ -1453,10 +1863,22 @@
     $('prioritize-question').hidden = !['queued', 'paused'].includes(question.state) || !research;
     $('retry-question').hidden = !(held || retryStates.has(question.state)) || !research;
     text($('retry-question'), held ? '立即查证' : question.state === 'paused' ? '继续查证' : '重试此问题');
+    const inlineRetry = !$('question-failure').hidden && !$('retry-question').hidden;
+    const retryContainer = inlineRetry ? $('question-failure-actions') : $('question-menu-actions');
+    if ($('retry-question').parentElement !== retryContainer) retryContainer.append($('retry-question'));
+    $('retry-question').classList.toggle('primary', inlineRetry);
+    if (inlineRetry) questionMenu.open = false;
     $('cancel-question').hidden = !activeStates.has(question.state) || !research;
     for (const action of ['approve', 'prioritize', 'retry', 'cancel']) $(`${action}-question`).disabled = state.pendingButtons.has(`${action}-question`);
     const result = question.state === 'running' ? {} : question.result || {};
     const sourceItems = Array.isArray(result.sources) ? result.sources : question.progress?.sources || [];
+    const hasAnswer = ['completed', 'insufficient'].includes(question.state) && Boolean(result.brief?.short_answer || result.answer);
+    const page = document.querySelector('.reading-page');
+    page.dataset.hasAnswer = String(hasAnswer);
+    const answerAnchor = hasAnswer ? document.querySelector('.question-detail-heading') : $('research-progress');
+    if (answerAnchor.nextElementSibling !== $('answer-panel')) answerAnchor.after($('answer-panel'));
+    $('view-original').hidden = !hasAnswer || !(sourceItems.length || safeURL(result.original_evidence?.url));
+    text($('view-original'), result.original_evidence?.quote ? '查看原文' : '查看来源');
     renderAnswer(result, question, sourceItems, automatic);
     renderClaims(result.claims || [], sourceItems);
     renderUncertainties(result.uncertainty || [], Boolean(result.brief));
@@ -1498,20 +1920,30 @@
     if (question.state === 'running' && !$('research-progress').hidden) return;
     const brief = result.brief;
     if (!brief) {
+      if (!result.answer && !$('question-failure').hidden) return;
       if (result.answer) {
         answerParagraphs(container, result.answer);
         if (result.original_evidence) { const proof = element('section', 'original-evidence'); renderOriginalEvidence(proof, result.original_evidence); container.append(proof); }
         return;
       }
-      container.append(element('p', 'muted', automationHeld(question) ? '自动查证已暂停。点击“立即查证”只处理这个问题，也可以恢复查证后继续。' : question.state === 'paused' ? '查证已暂停。点击“继续查证”处理这个问题，或在上方恢复未完成的查证。' : question.state === 'candidate' ? automatic ? '问题已识别，将自动排队查证。' : '本场已关闭自动查证，可在需要时开始查证。' : question.state === 'needs_review' ? '发言依据已更正或撤回，请核对最新转写并确认问题范围。' : question.state === 'backlog' ? '已加入查证队列，空出执行位置后会自动开始。' : question.state === 'running' ? `${stages[question.stage] || '研究正在进行'}，完成后在这里呈现参考回答。` : question.state === 'queued' ? question.stage || '已进入研究队列，等待执行。' : '尚无参考回答。'));
+      container.append(element('p', 'muted', automationHeld(question) ? '自动查证已暂停。点击“立即查证”只处理这个问题，也可以恢复查证后继续。' : question.state === 'paused' ? '查证已暂停。点击“继续查证”处理这个问题，或在上方恢复未完成的查证。' : question.state === 'candidate' ? automatic ? '问题已识别，将自动排队查证。' : '本场已关闭自动查证，可在需要时开始查证。' : question.state === 'needs_query' ? '请点击“设置检索词”，填写允许发给搜索服务的内容。' : question.state === 'needs_review' ? '发言依据已更正或撤回，请核对最新转写并确认问题范围。' : question.state === 'backlog' ? '已加入查证队列，空出执行位置后会自动开始。' : question.state === 'running' ? `${stages[question.stage] || '研究正在进行'}，完成后在这里呈现参考回答。` : question.state === 'queued' ? question.stage || '已进入研究队列，等待执行。' : '尚无参考回答。'));
       return;
     }
     const briefSection = element('section', 'answer-brief');
-    briefSection.setAttribute('aria-label', '一句话结论');
+    briefSection.setAttribute('aria-label', '结论摘要');
     const heading = element('div', 'brief-heading');
     const copy = element('button', 'text-button copy-brief', '复制回答');
-    heading.append(element('h3', '', '一句话结论'), copy);
-    briefSection.append(heading, element('p', 'short-answer', brief.short_answer));
+    heading.append(element('h3', '', '结论摘要'), copy);
+    briefSection.append(heading);
+    const chars = Array.from(brief.short_answer);
+    if (chars.length > 360) {
+      briefSection.append(element('p', 'short-answer', chars.slice(0, 360).join('')));
+      const more = element('details', 'answer-disclosure');
+      more.append(element('summary', '', '继续阅读结论'), element('p', 'answer-text', chars.slice(360).join('')));
+      briefSection.append(more);
+    } else {
+      briefSection.append(element('p', 'short-answer', brief.short_answer));
+    }
     container.append(briefSection);
     if (result.answer) {
       const analysis = element('section', 'answer-analysis');
@@ -1551,7 +1983,7 @@
     copy.addEventListener('click', async () => {
       copy.disabled = true;
       const value = [question.title, evidenceStates[result.evidence_status] || '',
-        ...(question.basis_stale ? ['依据已更正，当前回答待复核。'] : []), '', '一句话结论', brief.short_answer, '', '完整分析', result.answer || '', '', `适用限制：${brief.caveat}`, '',
+        ...(question.basis_stale ? ['依据已更正，当前回答待复核。'] : []), '', '结论摘要', brief.short_answer, '', '完整分析', result.answer || '', '', `适用限制：${brief.caveat}`, '',
         ...(result.original_evidence ? [result.original_evidence.label, result.original_evidence.quote || result.original_evidence.message,
           safeURL(result.original_evidence.url)?.href || '', ''] : []),
         ...(brief.key_points || []).map(point => `- 【${kinds[point.kind] || '参考说明'}】${point.text}`),
@@ -1665,8 +2097,7 @@
     highlightQuestionNote();
     grid.dataset.meetingTab = panel === 'results' ? 'questions' : panel;
     if (['transcript','files','summary'].includes(panel)) grid.dataset.leftPane = panel;
-    $('results-panel').hidden = panel !== 'results';
-    $('questions-panel').hidden = panel === 'results';
+    syncMeetingPanels();
     if (panel !== 'results') state.returnNote = null;
     text($('back-questions-label'), state.returnNote ? '返回发言' : '全部问题');
     $('meeting-files-panel').hidden = grid.dataset.leftPane === 'transcript';
@@ -1771,6 +2202,11 @@
       if (id === state.meetingId) await refreshNow();
     });
   }
+  function renderSpeechRuntime() {
+    renderCapture();
+    if ($('meeting-dialog').open) updateMeetingForm();
+    if ($('import-dialog').open) updateImportForm();
+  }
   function openMeetingDialog() {
     if (state.native?.meetingId) {
       notice('当前会议正在收听。请先暂停收听，再开始另一场会议。');
@@ -1778,6 +2214,7 @@
       return;
     }
     $('meeting-form').reset();
+    speech.resetUpload('meeting');
     $('meeting-research').checked = Boolean(state.home?.capabilities?.model_enabled && state.home?.capabilities?.search_enabled);
     $('meeting-audio-source').value = state.native?.audioSource || 'system';
     $('meeting-scope').querySelector('[value="synthetic"]').disabled = state.home?.project?.data_scope !== 'synthetic';
@@ -1785,21 +2222,29 @@
     text($('meeting-error'), '');
     $('meeting-dialog').showModal();
     $('meeting-title').focus();
+    void loadServiceSettings();
   }
   function updateMeetingForm() {
     const synthetic = $('meeting-scope').value === 'synthetic';
     const desktop = nativeAvailable();
     text($('meeting-dialog-intro'), synthetic ? '用一段示例讨论，体验转写、查证和资料保存。无需录音或联网。' : desktop ? '选择要听的声音，实时转写并整理查证资料。' : '先创建会议。请在桌面 App 中收听，浏览器可手动补充讨论。');
-    text($('meeting-submit'), synthetic ? '创建并体验示例' : desktop && state.native?.modelState === 'installed' ? '创建并开始收听' : '创建会议');
+    const provider = speech.activeProvider('live');
+    const autoStart = !synthetic && desktop && state.native?.canStart;
+    text($('meeting-submit'), synthetic ? '创建并体验示例' : autoStart ? '创建并开始收听' : '创建会议');
     $('meeting-audio-help').hidden = synthetic;
     $('meeting-source-field').hidden = synthetic || !desktop;
     $('meeting-audio-source').disabled = Boolean(state.native?.meetingId) || state.native?.canSelectSource === false;
     const input = audioInputs[$('meeting-audio-source').value] || audioInputs.system;
-    text($('meeting-audio-help'), desktop && state.native?.modelState === 'downloadable' ? '首次收听需要安装中文模型。创建后可前往设置安装。' : input.help);
+    const scope = autoStart ? speech.scope('live', input.sources) : null;
+    const authorized = speech.renderUpload('meeting', scope);
+    $('meeting-submit').disabled = state.pendingButtons.has('meeting-submit') || !authorized;
+    text($('meeting-audio-help'), desktop && provider === 'apple_local' && state.native?.modelState === 'downloadable'
+      ? '首次收听需要安装中文模型。创建后可前往设置安装。'
+      : `${input.help}${desktop && provider === 'apple_local' ? ' 音频由 Apple 在本机处理。' : ''}`);
     $('meeting-setup-warning').hidden = synthetic || Boolean(state.home?.capabilities?.model_enabled && state.home?.capabilities?.search_enabled);
     $('meeting-permissions-field').hidden = synthetic;
     $('meeting-research').disabled = !state.home?.capabilities?.model_enabled || !state.home?.capabilities?.search_enabled;
-    text($('meeting-research-help'), `音频留在本机；取消勾选可仅做本机转写。${requestLimitsText()}`);
+    text($('meeting-research-help'), `取消勾选可仅做语音转写。${requestLimitsText()}`);
   }
   async function playDemo(id) {
     await api(`/live/v2/meetings/${encodeURIComponent(id)}/demo`, {method:'POST', body:{}});
@@ -1811,35 +2256,63 @@
     const caps = state.home?.capabilities || {};
     if (file && state.importFileID !== file.id) {
       state.importFileID = file.id;
-      if (!state.importTarget) $('import-title').value = file.name.replace(/\.[^.]+$/, '').slice(0,120);
+      if (!state.importTarget && !$('import-title').value) $('import-title').value = file.name.replace(/\.[^.]+$/, '').slice(0,120);
+      speech.resetUpload('import');
     }
     text($('audio-file-name'), file?.name || '尚未选择音频');
     text($('audio-file-meta'), file ? `${audioTime(file.durationMS)} · ${(file.bytes / 1024 / 1024).toFixed(1)} MB` : 'WAV、M4A、MP3、AIFF、CAF、FLAC');
-    text($('import-desktop-help'), !nativeAvailable() ? '请在桌面 App 中导入音频。浏览器可回看已导入的会议。' : native?.fileModelState === 'downloading' ? '中文模型正在安装，完成后即可导入。' : native?.fileModelState !== 'installed' ? '首次文件转写需要安装中文识别模型，点击下方按钮安装。' : '音频仅在本机处理，无需播放。支持不超过 2 GB、六小时的录音。');
-    $('import-install-model').hidden = !nativeAvailable() || native?.fileModelState !== 'downloadable';
+    const target = state.importTarget && state.snapshot?.meeting?.id === state.importTarget ? state.snapshot.meeting : null;
+    const importProvider = state.importResume ? target?.audio_import?.provider : null;
+    const local = (importProvider || speech.activeProvider('file')) === 'apple_local';
+    const scope = nativeAvailable() ? speech.scopeFor('file', ['file'], importProvider) : null;
+    const authorized = speech.renderUpload('import', scope, target);
+    const providerInfo = local ? 'Apple 在本机处理音频。' : `将使用${speech.label(scope?.provider)}转写。`;
+    text($('import-desktop-help'), !nativeAvailable() ? '请在桌面 App 中导入音频。' : local && native?.fileModelState === 'downloading'
+      ? '中文模型正在安装，完成后即可导入。' : local && native?.fileModelState === 'downloadable'
+      ? '首次使用 Apple 文件转写需安装中文模型。' : local && native?.fileModelState === 'unsupported'
+      ? '当前系统不支持 Apple 文件转写。可在设置中选择云端服务。' : `${providerInfo} 支持不超过 2 GB、六小时的录音。`);
+    $('import-install-model').hidden = !nativeAvailable() || !local || native?.fileModelState !== 'downloadable';
     $('import-install-model').disabled = !native?.ready || Boolean(native?.meetingId);
-    $('choose-audio').disabled = !nativeAvailable() || !native?.ready || Boolean(native.meetingId);
+    $('choose-audio').hidden = Boolean(state.importRetry);
+    $('choose-audio').disabled = !nativeAvailable() || !native?.ready || Boolean(native.meetingId) || Boolean(state.importRetry);
     $('import-model').disabled = !caps.model_enabled;
     $('import-search').disabled = !caps.search_enabled || !$('import-model').checked;
     if ($('import-model').disabled) $('import-model').checked = false;
     if ($('import-search').disabled) $('import-search').checked = false;
-    text($('import-services-help'), caps.model_enabled && caps.search_enabled ? `默认开启，取消勾选可仅做本机转写。${requestLimitsText()}` : '联网服务尚未就绪。可以先导入并本机转写，之后在设置中连接模型与搜索。');
-    $('import-submit').disabled = !file || !native?.canImport || state.pendingButtons.has('import-submit');
+    text($('import-services-help'), caps.model_enabled && caps.search_enabled ? `取消勾选可仅做语音转写。${requestLimitsText()}` : '联网查证尚未启用，可先导入并转写。');
+    const retry = state.importRetry;
+    if (retry?.recording && file && file.id !== retry.previousFileId && !retry.selectedFileId) retry.selectedFileId = file.id;
+    const waitingForOriginal = retry && (!file || retry.selectedFileId !== file.id);
+    if (waitingForOriginal) text($('audio-file-name'), retry.recording ? '正在读取原会议录音…' : '未找到原会议录音');
+    $('import-submit').disabled = !file || waitingForOriginal || !native?.canImport || !authorized || state.pendingButtons.has('import-submit');
     const fileError = native?.audioFileError || '';
     if (state.nativeFileError !== fileError) {
       state.nativeFileError = fileError;
       text($('import-error'), fileError);
     }
   }
-  function openImportDialog(target = '') {
+  function openImportDialog(target = '', retry = null, resume = false) {
     if (state.native?.meetingId) { notice('请先停止当前收听或导入，再导入另一份音频。'); return; }
     state.importTarget = target;
+    state.importRetry = retry ? {previousFileId:state.native?.audioFile?.id, recording:retry.recording} : null;
+    state.importResume = resume;
     state.importFileID = '';
-    $('import-title').value = target ? state.snapshot?.meeting?.title || '' : '';
+    speech.resetUpload('import');
+    text($('import-heading'), resume ? '继续导入会议音频' : retry ? '重新导入为新会议' : '导入会议音频');
+    text($('import-intro'), resume
+      ? '将使用原会议已保存的音频，从失败位置继续转写，已有转写和查证结果会保留。'
+      : retry
+        ? '会创建一场新会议并从头转写。旧会议的原音、已有转写与失败位置会保留。使用云端服务可能重复计费。'
+        : '将录音转写为文字，并保存到会议。');
+    $('import-title').value = target ? state.snapshot?.meeting?.title || '' : retry ? `${retry.title}（重新导入）`.slice(0,120) : '';
     $('import-model').checked = Boolean(state.home?.capabilities?.model_enabled);
     $('import-search').checked = Boolean(state.home?.capabilities?.model_enabled && state.home?.capabilities?.search_enabled);
     text($('import-error'), ''); updateImportForm();
     $('import-dialog').showModal();
+    if (retry?.recording) nativePost('useMeetingAudio', retry.id, retry.recording.id);
+    void speech.refreshScope('file', ['file']).catch(error => {
+      if ($('import-dialog').open) text($('import-error'), error.message);
+    });
   }
   function downloadMarkdown(content, filename) {
     const url = URL.createObjectURL(new Blob([content], {type:'text/markdown;charset=utf-8'}));
@@ -1851,27 +2324,56 @@
   $('choose-audio').addEventListener('click', () => { text($('import-error'), ''); nativePost('chooseAudioFile'); });
   $('import-install-model').addEventListener('click', () => nativePost('installModel'));
   $('import-model').addEventListener('change', updateImportForm);
-  $('restart-import').addEventListener('click', () => openImportDialog(state.snapshot?.meeting?.audio_import ? '' : state.meetingId));
+  $('continue-import').addEventListener('click', () => {
+    const meeting = state.snapshot?.meeting;
+    if (!meeting?.audio_import) return;
+    const recording = (meeting.recordings || []).find(row => row.source === 'file' && ['saved', 'partial'].includes(row.state));
+    if (!recording) { notice('找不到已保存的原始音频，无法继续导入。'); return; }
+    state.pendingButtons.add('continue-import'); updateImportForm();
+    openImportDialog(meeting.id, {id:meeting.id, title:meeting.title, recording}, true);
+    state.pendingButtons.delete('continue-import'); updateImportForm();
+  });
+  $('restart-import').addEventListener('click', () => {
+    const meeting = state.snapshot?.meeting;
+    if (!meeting?.audio_import) { openImportDialog(state.meetingId); return; }
+    const recording = (meeting.recordings || []).find(row => row.source === 'file' && ['saved', 'partial'].includes(row.state));
+    openImportDialog('', {id:meeting.id, title:meeting.title, recording});
+  });
+  $('import-upload-agree').addEventListener('change', updateImportForm);
+  $('meeting-upload-agree').addEventListener('change', updateMeetingForm);
+  $('speech-reload').addEventListener('click', () => { speech.reset(); loadServiceSettings(true); });
   $('import-form').addEventListener('submit', async event => {
     event.preventDefault();
     const file = state.native?.audioFile;
     const title = $('import-title').value.trim();
     if (!title || !file || $('import-submit').disabled) return;
+    const sources = ['file'];
+    const targetMeeting = state.importTarget && state.snapshot?.meeting?.id === state.importTarget ? state.snapshot.meeting : null;
+    const importProvider = state.importResume ? targetMeeting?.audio_import?.provider : null;
+    const approved = speech.scopeFor('file', sources, importProvider);
     state.pendingButtons.add('import-submit'); updateImportForm();
     text($('import-error'), '');
     let id = state.importTarget;
+    let registered = state.snapshot?.meeting?.id === id ? state.snapshot.meeting : null;
     try {
-      if (!id) {
-        const meeting = await api('/live/v2/meetings', {method:'POST', body:{title, data_scope:'real', input_kind:'audio_file',
-          permissions:{model:$('import-model').checked, search:$('import-search').checked, auto_search:$('import-search').checked}}});
-        id = meeting.id; state.importTarget = id;
-        state.home.meetings.unshift(meeting); renderMeetingOptions();
+      const scope = await speech.checkScope('file', sources, approved);
+      if (!$('import-dialog').open || state.native?.audioFile?.id !== file.id) return;
+      if (!state.importResume) {
+        if (!id) {
+          const meeting = await api('/live/v2/meetings', {method:'POST', body:{title, data_scope:'real', input_kind:'audio_file',
+            permissions:{model:$('import-model').checked, search:$('import-search').checked, auto_search:$('import-search').checked}}});
+          id = meeting.id; state.importTarget = id; registered = meeting;
+          state.home.meetings.unshift(meeting); renderMeetingOptions();
+        } else {
+          await api(`/live/v2/meetings/${id}/permissions`, {method:'POST', body:{model:$('import-model').checked, search:$('import-search').checked, auto_search:$('import-search').checked}});
+        }
       }
-      else await api(`/live/v2/meetings/${id}/permissions`, {method:'POST', body:{model:$('import-model').checked, search:$('import-search').checked, auto_search:$('import-search').checked}});
-      await selectMeeting(id);
+      await speech.authorize(registered || {id}, scope);
+      if (!await selectMeeting(id)) return;
       $('import-dialog').close();
-      nativePost('importAudioFile', id, file.id);
-      notice('已建立音频会议，正在准备本机转写。');
+      if (state.importResume) nativePost('resumeAudioImport', id, file.id);
+      else nativePost('importAudioFile', id, file.id);
+      notice(state.importResume ? '已开始从失败位置继续转写。' : '已建立音频会议，正在准备转写。');
       await refreshHome();
     } catch (error) { text($('import-error'), error.message); }
     finally { state.pendingButtons.delete('import-submit'); updateImportForm(); }
@@ -1945,23 +2447,39 @@
     nativePost('setAudioSource', null, null, event.target.value);
   });
   $('open-microphone-settings').addEventListener('click', () => nativePost('openMicrophoneSettings'));
-  const compactRail = window.matchMedia('(max-width:1479px)');
+  const compactRail = window.matchMedia('(max-width:980px)');
+  const mobileNavigation = window.matchMedia('(max-width:800px)');
   let preferredRail;
   try { preferredRail = localStorage.getItem('wb_rail'); } catch { /* Optional visual preference. */ }
   function updateRail() {
     const collapsed = preferredRail ? preferredRail === 'collapsed' : compactRail.matches;
     $('workspace').dataset.rail = collapsed ? 'collapsed' : 'expanded';
-    const label = collapsed ? '展开侧栏' : '收起侧栏';
+    const label = mobileNavigation.matches ? '关闭导航' : collapsed ? '展开侧栏' : '收起侧栏';
     $('rail-toggle').title = label;
     $('rail-toggle').setAttribute('aria-label', label);
-    $('rail-toggle').setAttribute('aria-expanded', String(!collapsed));
+    if (mobileNavigation.matches) $('rail-toggle').removeAttribute('aria-expanded');
+    else $('rail-toggle').setAttribute('aria-expanded', String(!collapsed));
     text($('rail-toggle').querySelector('span'), label);
   }
   for (const link of document.querySelectorAll('.app-sidebar .brand, .app-sidebar [data-route], #new-meeting, #import-audio')) {
     link.title = link.textContent.trim(); link.setAttribute('aria-label', link.title);
   }
   updateRail(); compactRail.addEventListener('change', updateRail);
+  mobileNavigation.addEventListener('change', updateRail);
+  for (const button of document.querySelectorAll('.layout-switch [data-layout]')) {
+    button.addEventListener('click', () => applyLayout(button.dataset.layout, true));
+  }
+  $('layout-preference').addEventListener('change', event => applyLayout(event.target.value, true));
+  for (const query of ['(min-width:1101px)', '(min-width:1201px)']) {
+    window.matchMedia(query).addEventListener('change', syncMeetingPanels);
+  }
   $('rail-toggle').addEventListener('click', () => {
+    if (mobileNavigation.matches) {
+      $('workspace').dataset.mobileNav = 'closed';
+      $('toggle-navigation').setAttribute('aria-expanded', 'false');
+      $('toggle-navigation').focus();
+      return;
+    }
     preferredRail = $('workspace').dataset.rail === 'collapsed' ? 'expanded' : 'collapsed';
     try { localStorage.setItem('wb_rail', preferredRail); } catch { /* In-memory preference remains active. */ }
     updateRail();
@@ -2045,9 +2563,44 @@
     if ($('cancel-delete-meeting').disabled) event.preventDefault();
   });
   $('library-search').addEventListener('input', (event) => {
+    if (state.route === 'meeting') { openMeetingSearch(); return; }
     state.search = event.target.value;
     if (!['meetings', 'materials'].includes(state.route)) setRoute('meetings');
     renderLibrary();
+  });
+  $('library-search').addEventListener('pointerdown', () => {
+    if (document.activeElement !== $('library-search')) meetingSearch.previousFocus = document.activeElement;
+  });
+  $('library-search').addEventListener('focus', openMeetingSearch);
+  $('library-search').addEventListener('keydown', event => {
+    if (event.key !== 'ArrowDown' || !$('meeting-search-popover').matches(':popover-open')) return;
+    event.preventDefault();
+    $('meeting-search-popover').querySelector('button')?.focus();
+  });
+  $('meeting-search-popover').addEventListener('keydown', event => {
+    if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+    const buttons = [...$('meeting-search-popover').querySelectorAll('button')];
+    const index = buttons.indexOf(document.activeElement);
+    if (index < 0) return;
+    event.preventDefault();
+    if (event.key === 'ArrowUp' && index === 0) $('library-search').focus();
+    else buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+  });
+  $('search-library').addEventListener('click', () => {
+    state.search = $('library-search').value;
+    setRoute('meetings');
+    $('library-search').focus();
+  });
+  window.addEventListener('resize', () => {
+    if ($('meeting-search-popover').matches(':popover-open')) positionMeetingSearch();
+  });
+  $('view-original').addEventListener('click', () => {
+    const proof = $('answer-content').querySelector('.original-evidence');
+    setDetailTab(proof ? 'answer' : 'sources');
+    const target = proof || $('source-list');
+    target.tabIndex = -1;
+    target.focus({preventScroll: true});
+    target.scrollIntoView({block: 'start'});
   });
   document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => {
     state.filter = button.dataset.filter;
@@ -2061,10 +2614,19 @@
     $('toggle-navigation').setAttribute('aria-expanded', String(open));
   });
   $('main').addEventListener('click', () => { $('workspace').dataset.mobileNav = 'closed'; $('toggle-navigation').setAttribute('aria-expanded', 'false'); });
-  $('start-listening').addEventListener('click', () => {
-    if (state.native?.modelState === 'downloadable') { setRoute('settings'); notice('请先安装中文识别模型，完成后返回当前会议。'); return; }
-    nativePost('startCapture', state.meetingId, null, $('capture-source').value);
-  });
+  $('start-listening').addEventListener('click', event => perform(event.currentTarget, async () => {
+    const liveProvider = speech.activeProvider('live');
+    if (liveProvider === 'apple_local' && state.native?.modelState === 'downloadable') {
+      openPreference('audio'); notice('请先安装中文识别模型，完成后返回当前会议。'); return;
+    }
+    if (!state.native?.canStart) return;
+    const meeting = state.snapshot?.meeting;
+    if (!meeting || meeting.state !== 'active') return;
+    const mode = $('capture-source').value;
+    const scope = await speech.refreshScope('live', audioInputs[mode].sources);
+    if (meeting.id !== state.meetingId || mode !== $('capture-source').value) return;
+    speech.confirmLive(meeting, scope, () => nativePost('startCapture', meeting.id, null, mode));
+  }));
   $('stop-listening').addEventListener('click', () => nativePost('stopCapture', state.meetingId));
   $('check-model').addEventListener('click', () => nativePost('checkModel'));
   $('install-model').addEventListener('click', () => nativePost('installModel'));
@@ -2072,18 +2634,35 @@
   $('service-settings-form').addEventListener('input', editedServiceSettings);
   $('service-settings-form').addEventListener('change', editedServiceSettings);
   $('service-model-provider').addEventListener('change', () => {
-    const deepseek = $('service-model-provider').value === 'deepseek';
-    const field = $('service-model-url');
-    if (['https://api.deepseek.com', 'https://api.openai.com/v1', ''].includes(field.value.replace(/\/$/, ''))) field.value = deepseek ? 'https://api.deepseek.com' : 'https://api.openai.com/v1';
-    if (deepseek && !$('service-model-name').value) $('service-model-name').value = 'deepseek-flash';
-    else if (!deepseek && $('service-model-name').value.startsWith('deepseek-')) $('service-model-name').value = '';
-    $('service-model-json').checked = deepseek;
-    $('service-model-thinking').checked = false;
-    $('service-model-effort').value = 'default';
-    $('service-model-token-parameter').value = deepseek ? 'max_tokens' : 'max_completion_tokens';
+    const provider = $('service-model-provider').value;
+    const saved = modelProfiles().find(m => m.provider === provider && (provider !== 'deepseek' || officialDeepSeek(m.base_url)));
+    fillModelFields(saved || modelDefaults(provider));
+    if (provider === 'deepseek' && $('service-search-provider').value === 'deepseek' && state.serviceSettings.search.use_model_key) {
+      $('service-search-shared-key').checked = true;
+    }
     renderProviderSettings();
   });
+  $('service-deepseek-model').addEventListener('change', () => {
+    const name = $('service-deepseek-model').value;
+    const saved = matchingModelProfile('deepseek', deepSeekURL, name);
+    if (saved && !$('service-model-key').value && !state.clearModelKey) fillModelFields(saved);
+    else $('service-model-name').value = name;
+  });
+  $('service-model-profile').addEventListener('change', event => {
+    const selected = event.target.value;
+    fillModelFields(selected === '' ? modelDefaults('openai_compatible') : modelProfiles()[Number(selected)]);
+  });
+  function syncCustomSelection() {
+    const matched = matchingModelProfile('openai_compatible', $('service-model-url').value, $('service-model-name').value.trim());
+    $('service-model-profile').value = matched ? String(modelProfiles().indexOf(matched)) : '';
+  }
+  $('service-model-name').addEventListener('input', syncCustomSelection);
+  $('service-model-url').addEventListener('input', () => {
+    $('service-model-key').value = '';
+    syncCustomSelection();
+  });
   $('service-search-provider').addEventListener('change', () => {
+    $('service-search-key').value = ''; state.clearSearchKey = false;
     const tavily = $('service-search-provider').value === 'tavily';
     const field = $('service-search-url');
     if (['https://api.deepseek.com', 'https://api.tavily.com', ''].includes(field.value.replace(/\/$/, ''))) field.value = tavily ? 'https://api.tavily.com' : 'https://api.deepseek.com';
@@ -2102,6 +2681,19 @@
     });
     $(`test-${kind}-service`).addEventListener('click', () => testService(kind));
   }
+  $('keep-original-caf').addEventListener('change', async event => {
+    if (!state.serviceSettings || state.settingsBusy) return;
+    const token = state.token, enabled = event.target.checked;
+    state.settingsBusy = true; renderProviderSettings();
+    try {
+      const result = await api('/live/v2/settings/archive', {method:'PUT', body:{revision:state.serviceSettings.revision, keep_original_caf:enabled}});
+      if (token !== state.token) return;
+      Object.assign(state.serviceSettings, result);
+      providerMessage('archive-result', '归档设置已保存，下次收听时生效。', 'success');
+    } catch (error) {
+      if (token === state.token) { $('keep-original-caf').checked = state.serviceSettings.keep_original_caf; providerMessage('archive-result', error.message, 'error'); }
+    } finally { if (token === state.token) { state.settingsBusy = false; renderProviderSettings(); } }
+  });
   $('service-settings-form').addEventListener('submit', async event => {
     event.preventDefault();
     if (!state.serviceSettings || state.settingsBusy) return;
@@ -2117,7 +2709,7 @@
       state.home.capabilities = result.capabilities;
       renderCapabilities();
       const incomplete = result.capabilities.model_enabled && result.capabilities.search_enabled ? '' : '，尚未配置的服务可稍后补充';
-      providerMessage('service-settings-result', `已保存，新任务使用当前配置${incomplete}。`, 'success');
+      providerMessage('service-settings-result', `模型与搜索设置已保存${incomplete}。`, 'success');
       await refreshHome();
     } catch (error) {
       if (state.token === token) providerMessage('service-settings-result', error.message, 'error');
@@ -2131,13 +2723,13 @@
     try { localStorage.setItem('wb_theme', themePreference); } catch { /* Native preferences are persisted by the host. */ }
     if (nativeAvailable()) nativePost('setThemePreference', null, null, null, themePreference);
   });
-  $('open-meeting-folder').addEventListener('click', () => nativePost('openOutput', state.meetingId));
+  $('open-meeting-folder').addEventListener('click', openMeetingFolder);
+  $('open-files-folder').addEventListener('click', openMeetingFolder);
   window.addEventListener('zsjh-native-state', (event) => {
     state.native = event.detail;
     if (themeValues.has(state.native?.themePreference)) applyTheme(state.native.themePreference);
-    renderCapture(); renderSettings();
-    if ($('meeting-dialog').open) updateMeetingForm();
-    if ($('import-dialog').open) updateImportForm();
+    if (layoutValues.has(state.native?.layoutPreference) && state.native.layoutPreference !== layoutPreference) applyLayout(state.native.layoutPreference);
+    renderSpeechRuntime(); renderSettings();
   });
   window.addEventListener('popstate', () => { if (state.token) readRoute(); });
   window.addEventListener('hashchange', () => { if (state.token) readRoute(); });
@@ -2146,24 +2738,34 @@
     event.preventDefault();
     const title = $('meeting-title').value.trim();
     if (!title || $('meeting-submit').disabled) return;
+    state.pendingButtons.add('meeting-submit');
     $('meeting-submit').disabled = true;
     text($('meeting-error'), '');
     try {
       const scope = $('meeting-scope').value;
       const audioSource = $('meeting-audio-source').value;
+      const autoStart = scope === 'real' && nativeAvailable() && state.native?.canStart;
+      const sources = audioInputs[audioSource].sources;
+      const approved = autoStart ? speech.scope('live', sources) : null;
+      const upload = autoStart ? await speech.checkScope('live', sources, approved) : null;
+      if (!$('meeting-dialog').open || audioSource !== $('meeting-audio-source').value) return;
       const research = scope === 'real' && !$('meeting-research').disabled && $('meeting-research').checked;
       const meeting = await api('/live/v2/meetings', {method: 'POST', body: {title, data_scope: scope,
         permissions:{model:research, search:research, auto_search:research}}});
       state.home.meetings = [meeting, ...(state.home.meetings || [])];
       renderMeetingOptions();
       $('meeting-dialog').close();
-      await selectMeeting(meeting.id);
+      if (!await selectMeeting(meeting.id)) return;
       if (scope === 'synthetic') await playDemo(meeting.id);
-      else if (nativeAvailable() && state.native?.ready && state.native?.modelState === 'installed') nativePost('startCapture', meeting.id, null, audioSource);
-      else notice('会议已创建。请按页面提示开始收听，或手动补充讨论。');
+      else if (autoStart) {
+        await speech.authorize(meeting, upload);
+        if (meeting.id === state.meetingId) nativePost('startCapture', meeting.id, null, audioSource);
+      } else notice('会议已创建。请按页面提示开始收听，或手动补充讨论。');
       await refreshHome();
-    } catch (error) { text($('meeting-error'), error.message); }
-    finally { $('meeting-submit').disabled = false; }
+    } catch (error) {
+      if ($('meeting-dialog').open) text($('meeting-error'), error.message);
+      else notice(`会议已创建。${error.message}`, true);
+    } finally { state.pendingButtons.delete('meeting-submit'); updateMeetingForm(); }
   });
   $('transcript-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -2224,7 +2826,7 @@
       if (!current()) return;
       const row = find();
       if (!row) { notice(transcriptPage()?.has_more ? '当前已加载的发言中没有这条依据，可再次定位以继续向前查找。' : '未找到对应修订的原始发言。'); return; }
-      if (wideMeeting()) { $('work-grid').dataset.leftPane = 'transcript'; $('meeting-files-panel').hidden = true; }
+      if (wideMeeting() && $('work-grid').dataset.layoutMode === 'triple') { $('work-grid').dataset.leftPane = 'transcript'; $('meeting-files-panel').hidden = true; }
       else setMeetingTab('transcript');
       $('follow-transcript').checked = false;
       row.tabIndex = -1; row.focus({preventScroll:true}); row.scrollIntoView({block:'nearest'});
@@ -2289,9 +2891,12 @@
     $('question-submit').disabled = true;
     text($('question-dialog-error'), '');
     try {
+      const query = $('new-query-wrap').hidden ? '' : $('new-public-query').value.trim();
+      const forceWeb = !$('new-query-wrap').hidden && $('new-force-web').checked;
+      if (forceWeb && !query) throw new Error('请填写允许发往搜索服务的公开检索词。');
       const question = editing
         ? await api(`/live/v2/questions/${encodeURIComponent(editing.id)}`, {method: 'PATCH', body: {expected_version: editing.version, title}})
-        : await api(`/live/v2/meetings/${encodeURIComponent(meetingId)}/questions`, {method: 'POST', body: {title, public_query: $('new-query-wrap').hidden ? '' : $('new-public-query').value.trim()}});
+        : await api(`/live/v2/meetings/${encodeURIComponent(meetingId)}/questions`, {method: 'POST', body: {title, public_query: query, web_search_requested: forceWeb}});
       $('question-dialog').close();
       if (meetingId === state.meetingId) {
         state.selectedQuestionId = question.id;
@@ -2318,7 +2923,7 @@
     $('search-query-submit').disabled = true;
     text($('search-query-error'), '');
     try {
-      await api(`/live/v2/questions/${encodeURIComponent(editing.id)}/actions`, {method: 'POST', body: {action: 'approve', expected_version: editing.version, public_query: query}});
+      await api(`/live/v2/questions/${encodeURIComponent(editing.id)}/actions`, {method: 'POST', body: {action: 'approve', expected_version: editing.version, public_query: query, web_search_requested: true}});
       $('search-query-dialog').close();
       if (editing.meetingId === state.meetingId) await refreshNow();
     } catch (error) {
@@ -2334,7 +2939,7 @@
     state.endTarget = state.meetingId;
     const unfinished = (state.snapshot?.questions || []).filter(q => activeStates.has(q.state)).length;
     const pending = Math.max(0, state.snapshot?.automation_progress?.pending || 0);
-    text($('end-description'), `停止收听，保存原始音频和全量转录，并开始整理会议纪要。${pending ? `还有 ${pending} 段转写未完成问题识别。` : ''}${unfinished ? `还有 ${unfinished} 个未完成的查证问题。` : ''}问题识别与未完成查证会暂停；会后点击“恢复自动查证”继续，已有问题也可逐条重试。`);
+    text($('end-description'), `停止收听并保存原音和转写。可能缺失的转写会标出对应录音时间。${pending ? `还有 ${pending} 段转写未完成问题识别。` : ''}${unfinished ? `还有 ${unfinished} 个未完成的查证问题。` : ''}问题识别与未完成查证会暂停；会后点击“恢复自动查证”继续，已有问题也可逐条重试。`);
     text($('end-error'), '');
     $('end-dialog').showModal();
   });
@@ -2352,7 +2957,9 @@
       await refreshHome();
       setMeetingTab('files');
       const failed = Object.values(archived.base_files || {}).some(f => f.state === 'save_failed');
-      notice(failed ? '会议已结束，部分文件未能保存。请在会议文件中重新保存。' : '会议已结束。三份基础文件的状态可在这里查看。', failed);
+      const gaps = Object.values(archived.capture_epochs || {}).some(epoch => epoch.state === 'with_gaps');
+      notice(failed ? '会议已结束，部分文件未能保存。请在会议文件中重新保存。'
+        : gaps ? '会议已结束。可在会议文件中查看各音源的录音和转写状态。' : '会议已结束。可在会议文件中查看保存状态。', failed);
     } catch (error) { text($('end-error'), error.message); }
     finally { $('confirm-end').disabled = false; }
   });
@@ -2378,13 +2985,23 @@
     }
   });
   document.addEventListener('click', (event) => {
+    if (!event.target.closest('.global-search, #meeting-search-popover')) closeMeetingSearch();
     for (const menu of document.querySelectorAll('.session-menu, .meeting-more')) {
       if (!menu.contains(event.target) || menu.matches('.meeting-more') && event.target.closest('button')) menu.open = false;
     }
   });
   document.addEventListener('keydown', (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !document.querySelector('dialog[open]')) { event.preventDefault(); $('library-search').focus(); $('library-search').select(); }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !document.querySelector('dialog[open]')) {
+      event.preventDefault();
+      if (document.activeElement !== $('library-search')) meetingSearch.previousFocus = document.activeElement;
+      $('library-search').focus(); $('library-search').select();
+    }
     if (event.key === 'Escape') {
+      if ($('meeting-search-popover').matches(':popover-open')) {
+        event.preventDefault();
+        closeMeetingSearch(true);
+        return;
+      }
       for (const menu of document.querySelectorAll('.meeting-more[open], .session-menu[open]')) { menu.open = false; menu.querySelector('summary')?.focus(); }
       $('workspace').dataset.mobileNav = 'closed';
       $('toggle-navigation').setAttribute('aria-expanded', 'false');

@@ -1,6 +1,7 @@
 """Register v2 routes under the existing authentication/Origin boundary."""
 
 import os
+import secrets
 import threading
 import time
 
@@ -9,9 +10,12 @@ from flask import g, jsonify, render_template, request
 from live.model_budget import ModelBudget
 from live.model_transport import ModelRequestError
 from live.provider_settings import ProviderSettings, SettingsUpdate
+from live.speech_settings import SpeechSettingsUpdate, SpeechTestRequest, SpeechTestResult, SpeechTests
 from live.store import LiveError, require
 from live.workbench import Workbench
-from live.workbench_contracts import AudioEvent, AudioImport, AudioImportFinish, DeleteMeeting, EditQuestion, MeetingControl, MeetingPermissions, NewMeeting, NewQuestion, QuestionAction, RecordingStart, RenameMeeting, Utterance
+from live.workbench_contracts import (AudioEvent, AudioImport, AudioImportFinish, CaptureFinish, DeleteMeeting,
+    EditQuestion, MeetingControl, MeetingPermissions, NewMeeting, NewQuestion, QuestionAction, RecordingStart,
+    RenameMeeting, SpeechAuthorization, SpeechSessionRequest, Utterance, AudioImportResume)
 
 
 def register_workbench(app, store):
@@ -35,6 +39,26 @@ def register_workbench(app, store):
     app.extensions["workbench"] = wb
     app.extensions["workbench_settings"] = settings
     probe_slot = threading.BoundedSemaphore(1)
+    speech_tests = SpeechTests()
+    speech_token = app.config.get("WORKBENCH_SPEECH_TOKEN")
+
+    def require_native_speech():
+        presented = request.headers.get('X-ZSJH-Speech-Token', '')
+        require(speech_token and secrets.compare_digest(presented.encode(), speech_token.encode()),
+                "只允许本机桌面语音组件访问", 403)
+
+    def speech_test_owner(test_id, native=False):
+        if native:
+            require_native_speech()
+            if g.member['role'] == 'owner':
+                return speech_tests.find(test_id, g.member['id'])
+            require(g.member['role'] == 'agent', '只允许本机桌面语音组件访问', 403)
+            speech_tests.prune()
+            job = speech_tests.jobs.get(test_id)
+            require(job is not None and job['project_id'] == g.member['project_id'], '测试不存在或已过期', 404)
+            return job
+        settings_owner()
+        return speech_tests.find(test_id, g.member['id'])
 
     def settings_owner():
         require(g.member["role"] == "owner", "只有工作区主持人可以配置服务", 403)
@@ -51,6 +75,61 @@ def register_workbench(app, store):
     def workbench_settings():
         settings_owner()
         return jsonify(settings.public())
+
+    @app.post("/live/v2/settings/speech/tests")
+    def workbench_start_speech_test():
+        settings_owner()
+        require(speech_token, "请在桌面应用中测试云端语音转写", 409)
+        with settings.lock:
+            result = speech_tests.start(settings.current, body(SpeechTestRequest), g.member['id'])
+            speech_tests.jobs[result['test_id']]['project_id'] = g.member['project_id']
+            return jsonify(result), 201
+
+    @app.get("/live/v2/settings/speech/tests/<test_id>")
+    def workbench_get_speech_test(test_id):
+        with settings.lock:
+            return jsonify(speech_tests.public(speech_test_owner(test_id)))
+
+    @app.delete("/live/v2/settings/speech/tests/<test_id>")
+    def workbench_delete_speech_test(test_id):
+        with settings.lock:
+            speech_test_owner(test_id)
+            speech_tests.jobs.pop(test_id)
+        return jsonify(cancelled=True)
+
+    @app.post("/live/v2/settings/speech/tests/<test_id>/session")
+    def workbench_claim_speech_test(test_id):
+        with settings.lock:
+            return jsonify(speech_tests.claim(speech_test_owner(test_id, native=True)))
+
+    @app.post("/live/v2/settings/speech/tests/<test_id>/result")
+    def workbench_finish_speech_test(test_id):
+        with settings.lock:
+            return jsonify(speech_tests.finish(speech_test_owner(test_id, native=True), body(SpeechTestResult)))
+
+    @app.put("/live/v2/settings/speech")
+    def workbench_save_speech():
+        settings_owner()
+        with settings.lock:
+            candidate = speech_tests.save(settings.current, body(SpeechSettingsUpdate), g.member['id'])
+            settings.commit(candidate)
+            caps.update(candidate.capabilities())
+            return jsonify(settings.public())
+
+    @app.put("/live/v2/settings/archive")
+    def workbench_save_archive():
+        settings_owner()
+        value = request.get_json(silent=True)
+        require(isinstance(value, dict) and set(value) == {"revision", "keep_original_caf"}
+                and type(value["revision"]) is int and type(value["keep_original_caf"]) is bool,
+                "归档设置参数无效", 400)
+        with settings.lock:
+            require(value["revision"] == settings.current.revision, "设置已更新，请重新载入后再试。", 409)
+            candidate = settings.current.model_copy(update={"revision": value["revision"] + 1,
+                                                           "keep_original_caf": value["keep_original_caf"]})
+            settings.commit(candidate)
+            caps["settings_revision"] = candidate.revision
+            return jsonify(revision=candidate.revision, keep_original_caf=candidate.keep_original_caf)
 
     @app.put("/live/v2/settings")
     def workbench_save_settings():
@@ -160,6 +239,10 @@ def register_workbench(app, store):
         require(before is not None and 0 < before <= 2**63 - 1, '发言分页位置无效', 400)
         return jsonify(wb.earlier_segments(g.member, mid, before))
 
+    @app.get("/live/v2/meetings/<mid>/search")
+    def workbench_search_meeting(mid):
+        return jsonify(wb.search_meeting(g.member, mid, request.args.get('q', '')))
+
     @app.post("/live/v2/meetings/<mid>/utterances")
     def workbench_utterance(mid):
         return jsonify(wb.utterance(g.member, mid, body(Utterance)))
@@ -172,12 +255,39 @@ def register_workbench(app, store):
     @app.post("/internal/live/v2/meetings/<mid>/audio-import")
     def workbench_import(mid):
         require(caps.get("audio_enabled"), "本机音频接入尚未启用", 409)
-        return jsonify(wb.begin_import(g.member, mid, body(AudioImport)))
+        value = body(AudioImport)
+        if value.settings_revision is not None or value.provider != "apple_local":
+            require_native_speech()
+        return jsonify(wb.begin_import(g.member, mid, value))
+
+    @app.post("/internal/live/v2/meetings/<mid>/audio-import/resume")
+    def workbench_import_resume(mid):
+        require(caps.get("audio_enabled"), "本机音频接入尚未启用", 409)
+        require_native_speech()
+        return jsonify(wb.resume_import(g.member, mid, body(AudioImportResume)))
 
     @app.post("/internal/live/v2/meetings/<mid>/recordings")
     def workbench_recording(mid):
         require(caps.get("audio_enabled"), "本机音频接入尚未启用", 409)
-        return jsonify(wb.start_recording(g.member, mid, body(RecordingStart)))
+        value = body(RecordingStart)
+        if value.settings_revision is not None or value.provider != "apple_local":
+            require_native_speech()
+        return jsonify(wb.start_recording(g.member, mid, value))
+
+    @app.put("/live/v2/meetings/<mid>/speech-authorization")
+    def workbench_speech_authorize(mid):
+        return jsonify(wb.speech_authorize(g.member, mid, body(SpeechAuthorization)))
+
+    @app.post("/live/v2/meetings/<mid>/speech-session")
+    @app.post("/live/v2/meetings/<mid>/speech-session/lease", defaults={'renew': True})
+    def workbench_speech_session(mid, renew=False):
+        require_native_speech()
+        return jsonify(wb.speech_session(g.member, mid, body(SpeechSessionRequest), renew=renew))
+
+    @app.post("/live/v2/meetings/<mid>/capture/finish")
+    def workbench_capture_finish(mid):
+        require_native_speech()
+        return jsonify(wb.capture_finish(g.member, mid, body(CaptureFinish)))
 
     @app.post("/internal/live/v2/meetings/<mid>/audio-import/finish")
     def workbench_import_finish(mid):
@@ -220,6 +330,10 @@ def register_workbench(app, store):
     @app.post("/live/v2/meetings/<mid>/controls")
     def workbench_controls(mid):
         return jsonify(wb.control(g.member, mid, body(MeetingControl).action))
+
+    @app.post('/live/v2/meetings/<mid>/detection-tasks/<tid>/retry')
+    def workbench_retry_detection_task(mid, tid):
+        return jsonify(wb.retry_detection_task(g.member, mid, tid))
 
     @app.post("/live/v2/meetings/<mid>/demo")
     def workbench_demo(mid):

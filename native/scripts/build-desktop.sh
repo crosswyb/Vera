@@ -21,6 +21,7 @@ rm -rf "$task_app_dir/Contents/Resources/backend" "$task_app_dir/Contents/Resour
 ditto "$task_backend_dir" "$task_app_dir/Contents/Resources/backend"
 ditto "$task_native_dir/build/ZSJHAudioHelper.app" "$task_app_dir/Contents/Resources/ZSJHAudioHelper.app"
 ditto "$task_native_dir/../third_party" "$task_app_dir/Contents/Resources/ThirdParty"
+test -s "$task_app_dir/Contents/Resources/ZSJHAudioHelper.app/Contents/Resources/speech-probe-zh-CN.wav"
 codesign --force --sign - --identifier com.zsjh.workbench "$task_app_dir"
 codesign --verify --deep --strict "$task_app_dir"
 print -r -- "$task_app_dir"

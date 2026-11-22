@@ -118,7 +118,7 @@ def render_document(meeting, question, result):
     lines = [f"# {question['title']}", synthetic]
     brief = result.get("brief")
     if brief:
-        lines += ["## 一句话结论", "", brief["short_answer"], "", "## 完整分析", "", result["answer"], "",
+        lines += ["## 结论摘要", "", brief["short_answer"], "", "## 完整分析", "", result["answer"], "",
                   "## 适用范围", "", brief['caveat'], "", "## 关键依据", ""]
         kinds = {"fact": "资料事实", "source_claim": "来源主张", "inference": "模型推断", "explanation": "参考说明"}
         for point in brief["key_points"]:
@@ -149,8 +149,9 @@ def render_document(meeting, question, result):
                   f"  发布/更新时间（服务报告）：{source.get('published_at') or 'unknown'}；读取状态：{source['read_status']}；正文哈希：{source.get('content_hash', 'unknown')}",
                   f"  读取方式：{source.get('read_method', 'unknown')}；检索时间：{source.get('retrieved_at', 'unknown')}"]
     lines += ["", "## 限制与未确定事项", ""] + [f"- {item}" for item in result.get("uncertainty", [])]
-    lines += ["- 引用关联已经过程序校验；引用是否在语义上支持主张，仍需人工判断。", ""]
-    lines += ["## 记录信息", "", "会议参考材料，最终判断由参会者作出。", "",
+    if result.get("evidence_status") != "model_explanation":
+        lines.append("- 引用关联已经过程序校验；引用是否在语义上支持主张，仍需人工判断。")
+    lines += ["", "## 记录信息", "", "会议参考材料，最终判断由参会者作出。", "",
               f"- 问题 ID：{question['id']}", f"- 问题版本：{question['version']}",
               f"- 生成时间：{datetime.now(timezone.utc).isoformat()}", f"- 证据状态：{result['evidence_status']}",
               f"- 依据发言：{', '.join(r['segment_id'] + '@' + str(r['revision']) for r in question['source_refs']) or '手动建立'}", ""]

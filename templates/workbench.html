@@ -7,7 +7,9 @@
   <title>真实交互</title>
   <link rel="stylesheet" href="/static/workbench.css">
   <link rel="stylesheet" href="/static/workbench-library.css">
+  <link rel="stylesheet" href="/static/workbench-layout.css">
   <script src="/static/workbench-feishu.js" defer></script>
+  <script src="/static/workbench-speech.js" defer></script>
   <script src="/static/workbench.js" defer></script>
 </head>
 <body>
@@ -31,6 +33,8 @@
     <symbol id="i-import" viewBox="0 0 24 24"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M2 15h10"></path><path d="m9 18 3-3-3-3"></path></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></symbol>
     <symbol id="i-sidebar" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18"></path></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></symbol>
+    <symbol id="i-columns" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18M15 3v18"></path></symbol>
     <symbol id="i-sys" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2"></rect><line x1="8" x2="16" y1="21" y2="21"></line><line x1="12" x2="12" y1="17" y2="21"></line></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" x2="12" y1="19" y2="22"></line></symbol>
     <symbol id="i-manual" viewBox="0 0 24 24"><path d="M12 20h9"></path><path d="M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z"></path><path d="m15 5 3 3"></path></symbol>
@@ -62,36 +66,55 @@
   </section>
 
   <div id="workspace" hidden data-route="meetings" data-mobile-nav="closed">
-    <aside class="app-sidebar" aria-label="主导航">
-      <a class="brand" href="#meetings"><span class="brand-mark" aria-hidden="true"><svg><use href="#i-wave"/></svg></span><span>真实交互</span></a>
-      <button id="new-meeting" class="sidebar-new" type="button"><svg><use href="#i-plus"/></svg><span>开始会议</span></button>
-      <button id="import-audio" class="sidebar-import" type="button"><svg><use href="#i-import"/></svg><span>导入音频</span></button>
-      <nav class="main-navigation" aria-label="工作区">
-        <button data-route="meetings" aria-current="page"><svg><use href="#i-meetings"/></svg>全部会议</button>
-        <button data-route="materials"><svg><use href="#i-file"/></svg>全部资料</button>
+    <aside id="app-navigation" class="app-sidebar" aria-label="主导航">
+      <div class="sidebar-heading">
+        <a class="brand" href="#meetings"><span class="brand-mark" aria-hidden="true"><svg><use href="#i-wave"/></svg></span><span>真实交互</span></a>
+        <button id="rail-toggle" type="button" aria-label="收起侧栏" title="收起侧栏" aria-controls="app-navigation" aria-expanded="true"><svg class="rail-desktop-icon" aria-hidden="true"><use href="#i-sidebar"/></svg><svg class="rail-mobile-icon" aria-hidden="true"><use href="#i-close"/></svg><span class="visually-hidden">收起侧栏</span></button>
+      </div>
+      <div class="sidebar-actions" role="group" aria-label="会议操作">
+        <button id="new-meeting" class="sidebar-new" type="button"><svg aria-hidden="true"><use href="#i-plus"/></svg><span>开始会议</span></button>
+        <button id="import-audio" class="sidebar-import" type="button"><svg aria-hidden="true"><use href="#i-import"/></svg><span>导入音频</span></button>
+      </div>
+      <div class="sidebar-content">
+        <div class="sidebar-section sidebar-workspace">
+          <h2 id="workspace-nav-heading">工作区</h2>
+          <nav class="main-navigation" aria-labelledby="workspace-nav-heading">
+            <button data-route="meetings" aria-current="page"><svg aria-hidden="true"><use href="#i-meetings"/></svg><span>全部会议</span></button>
+            <button data-route="materials"><svg aria-hidden="true"><use href="#i-file"/></svg><span>全部资料</span></button>
+          </nav>
+        </div>
+        <div id="current-meeting-nav" class="sidebar-section" hidden>
+          <h2>当前会议</h2>
+          <button id="return-meeting" class="current-meeting-link"><svg aria-hidden="true"><use href="#i-live"/></svg><span id="current-meeting-name"></span><svg aria-hidden="true"><use href="#i-chevron"/></svg></button>
+        </div>
+        <div class="sidebar-section recent-section"><h2>最近打开</h2><div id="recent-meetings"></div></div>
+      </div>
+      <nav class="sidebar-bottom" aria-label="辅助导航">
+        <button data-route="guide"><svg aria-hidden="true"><use href="#i-help"/></svg><span>如何使用</span></button>
+        <button data-route="settings"><svg aria-hidden="true"><use href="#i-settings"/></svg><span>设置</span></button>
       </nav>
-      <div id="current-meeting-nav" class="sidebar-section" hidden>
-        <h2>当前会议</h2>
-        <button id="return-meeting" class="current-meeting-link"><svg aria-hidden="true"><use href="#i-live"/></svg><span id="current-meeting-name"></span><svg aria-hidden="true"><use href="#i-chevron"/></svg></button>
-      </div>
-      <div class="sidebar-section recent-section"><h2>最近打开</h2><div id="recent-meetings"></div></div>
-      <div class="sidebar-bottom">
-        <button data-route="guide"><svg><use href="#i-help"/></svg>如何使用</button>
-        <button data-route="settings"><svg><use href="#i-settings"/></svg>设置</button>
-        <button id="rail-toggle" aria-label="收起侧栏" title="收起侧栏" aria-expanded="true"><svg aria-hidden="true"><use href="#i-sidebar"/></svg><span>收起侧栏</span></button>
-      </div>
     </aside>
     <div class="app-body">
       <header class="topbar">
         <button id="toggle-navigation" class="icon-button mobile-menu" aria-label="打开导航"><svg><use href="#i-menu"/></svg></button>
         <button id="back-library" class="icon-button" aria-label="返回全部会议" hidden><svg><use href="#i-back"/></svg></button>
         <span id="breadcrumb">工作区</span>
-        <div class="global-search"><svg aria-hidden="true"><use href="#i-search"/></svg><label for="library-search" class="visually-hidden">搜索会议或资料</label><input id="library-search" type="search" placeholder="搜索会议或资料" autocomplete="off"><kbd aria-hidden="true">⌘ K</kbd></div>
+        <div class="global-search"><svg aria-hidden="true"><use href="#i-search"/></svg><label id="library-search-label" for="library-search" class="visually-hidden">搜索会议或资料</label><input id="library-search" type="search" placeholder="搜索会议或资料" autocomplete="off" maxlength="200" aria-controls="meeting-search-popover" aria-expanded="false"><kbd aria-hidden="true">⌘ K</kbd></div>
+        <div id="meeting-search-popover" class="meeting-search-popover" popover="manual" role="region" aria-label="本场会议搜索结果">
+          <p id="meeting-search-status" class="meeting-search-status" role="status" aria-live="polite"></p>
+          <div id="meeting-search-results" class="meeting-search-results"></div>
+          <button id="search-library" class="text-button" type="button">搜索全部会议</button>
+        </div>
+        <div class="layout-switch" role="group" aria-label="界面布局">
+          <button type="button" data-layout="a" aria-pressed="true" aria-label="静阅布局" title="静阅：舒展双栏，专注阅读与查证"><svg aria-hidden="true"><use href="#i-sidebar"/></svg><span class="layout-name">静阅</span></button>
+          <button type="button" data-layout="b" aria-pressed="false" aria-label="全景布局" title="全景：多栏并行，同屏查看转写、问题与回答"><svg aria-hidden="true"><use href="#i-columns"/></svg><span class="layout-name">全景</span></button>
+        </div>
+        <span id="layout-status" class="visually-hidden" role="status" aria-live="polite"></span>
         <button data-route="guide" class="icon-button" aria-label="使用帮助"><svg><use href="#i-help"/></svg></button>
       </header>
       <main id="main" tabindex="-1">
         <section id="library-view" class="library-view" aria-labelledby="library-title">
-          <header class="page-heading"><div><h1 id="library-title">全部会议</h1><p id="library-description">从一次会议开始，把讨论中的问题变成有依据的资料。</p></div><div class="library-actions"><button id="library-import-audio"><svg><use href="#i-import"/></svg>导入音频</button><button id="library-new-meeting" class="primary"><svg><use href="#i-plus"/></svg>开始会议</button></div></header>
+          <header class="page-heading"><div><h1 id="library-title">全部会议</h1><p id="library-description">从一次会议开始，把讨论中的问题变成有依据的资料。</p></div><div class="library-actions"><button id="library-import-audio"><svg aria-hidden="true"><use href="#i-import"/></svg><span>导入音频</span></button><button id="library-new-meeting" class="primary"><svg aria-hidden="true"><use href="#i-plus"/></svg><span>开始会议</span></button></div></header>
           <div id="welcome-strip" class="library-demo"><button id="try-demo" class="text-button"><svg aria-hidden="true"><use href="#i-play"/></svg>体验示例会议</button></div>
           <section id="library-current" class="library-current" aria-label="进行中的会议" hidden><svg aria-hidden="true"><use href="#i-wave"/></svg><div><span class="library-eyebrow">进行中</span><h2 id="library-current-title"></h2><p id="library-current-meta" class="muted"></p></div><button id="library-resume" type="button" class="primary">回到会议 <svg aria-hidden="true"><use href="#i-arrow"/></svg></button></section>
           <div class="library-tools"><div class="library-filters" aria-label="按会议筛选"><button data-filter="all" aria-pressed="true">全部</button><button data-filter="active" aria-pressed="false">进行中</button><button data-filter="ended" aria-pressed="false">已结束</button><button data-filter="import" aria-pressed="false">音频导入</button></div><button id="library-sort" class="quiet-button" aria-label="切换时间排序">最近更新 ↓</button></div>
@@ -99,7 +122,7 @@
           <div id="library-columns" class="library-columns">
           <div class="library-table"><div class="library-column-head" aria-hidden="true"><span id="name-column">会议名称</span><span class="state-column">状态</span><span class="count-column">查证资料</span><span class="date-column">最近更新</span><span id="meeting-actions-column" hidden>操作</span></div><div id="library-list" role="list" aria-label="会议或资料列表"></div></div>
           <aside id="material-preview" class="library-preview" aria-labelledby="material-preview-title" hidden><div class="library-preview-head"><div><p class="library-eyebrow">资料预览</p><h2 id="material-preview-title"></h2></div><button id="material-open" type="button">在会议中打开 <svg aria-hidden="true"><use href="#i-arrow"/></svg></button></div><p id="material-preview-state" class="muted" role="status"></p><pre id="material-preview-body" tabindex="0" aria-label="Markdown 正文"></pre><button id="material-reload" type="button" class="text-button">重新读取</button></aside></div>
-          <div id="library-empty" class="library-empty" hidden><span class="empty-icon"><svg><use href="#i-meetings"/></svg></span><h2 id="library-empty-title">还没有会议</h2><p id="library-empty-message">点击“开始会议”，收听电脑声音并实时转写。</p><button id="empty-create" class="primary">开始第一场会议</button></div>
+          <div id="library-empty" class="library-empty" hidden><span class="empty-icon"><svg><use href="#i-meetings"/></svg></span><h2 id="library-empty-title">还没有会议</h2><p id="library-empty-message">点击“开始会议”，收听电脑声音并实时转写。</p><button id="empty-setup" type="button" data-pref-go="start">首次设置</button><button id="empty-create" class="primary">开始第一场会议</button></div>
           <p id="library-loading" class="muted" role="status" hidden>正在更新会议列表…</p>
         </section>
 
@@ -109,9 +132,12 @@
           <header class="meeting-heading"><div><span id="meeting-state" class="meeting-state">尚未开始</span><h1 id="session-title">会议</h1><div class="meeting-meta"><span id="meeting-date"></span><span id="scope-notice" class="fixture-label" hidden>示例会议</span></div></div><div class="meeting-primary-actions"><button id="start-listening" class="primary"><svg><use href="#i-wave"/></svg><span>开始收听</span></button><button id="stop-listening" hidden><svg><use href="#i-stop"/></svg>暂停收听</button><details class="meeting-more"><summary title="更多会议操作" aria-label="更多会议操作"><svg aria-hidden="true"><use href="#i-more"/></svg></summary><div><button id="show-meeting-info" aria-haspopup="dialog" aria-controls="meeting-info-dialog">会议信息</button><button id="show-activity" aria-haspopup="dialog" aria-controls="activity-dialog">运行记录</button><button id="open-meeting-folder"><svg aria-hidden="true"><use href="#i-folder"/></svg>会议文件夹</button></div></details><button id="end-meeting" disabled>结束会议</button></div></header>
           <div id="meeting-next-step" class="meeting-next-step"><div class="capture-reading"><span class="status-dot" aria-hidden="true"></span><strong id="capture-status">尚未开始收听</strong><meter id="capture-level" min="0" max="1" value="0" aria-label="实际音频电平" hidden></meter></div><label id="capture-source-field" class="capture-source-field"><span>音源</span><select id="capture-source" aria-describedby="capture-guidance"><option value="system">电脑声音</option><option value="microphone">麦克风</option><option value="both">电脑声音＋麦克风</option></select></label><div id="capture-inputs" class="capture-inputs" hidden><span id="system-input"><span><svg aria-hidden="true"><use href="#i-sys"/></svg>电脑声音</span><meter id="system-level" min="0" max="1" value="0" aria-label="电脑声音电平"></meter><span id="system-input-state"></span></span><span id="microphone-input"><span><svg aria-hidden="true"><use href="#i-mic"/></svg>麦克风</span><meter id="microphone-level" min="0" max="1" value="0" aria-label="麦克风电平"></meter><span id="microphone-input-state"></span></span></div><p id="capture-guidance">选择音源，再开始收听。</p><button id="open-microphone-settings" class="text-button" hidden>打开麦克风权限设置</button></div>
           </div>
-          <div id="import-progress" class="import-progress" hidden><div><span id="import-file-name"></span><span id="import-progress-label" role="status"></span></div><progress id="import-progress-bar" max="100" value="0" aria-label="音频转写进度"></progress><div class="import-tools"><button id="restart-import" hidden>重新选择音频</button><button id="download-transcript">导出完整转写 .md</button></div></div>
+          <div id="import-progress" class="import-progress" hidden><div><span id="import-file-name"></span><span id="import-progress-label" role="status"></span></div><progress id="import-progress-bar" max="100" value="0" aria-label="音频转写进度"></progress><div class="import-tools"><button id="continue-import" hidden>继续导入</button><button id="restart-import" hidden>重新选择音频</button><button id="download-transcript">导出完整转写 .md</button></div></div>
+          <div id="speech-meeting-status" class="inline-notice" hidden><span id="speech-meeting-state" role="status"></span><button id="revoke-speech" type="button" class="text-button" hidden>撤回音频上传授权</button></div>
+          <details id="speech-gaps" class="inline-notice" hidden><summary id="speech-gap-count"></summary><ul id="speech-gap-items" class="speech-gap-items"></ul></details>
           <div id="research-warning" class="inline-notice" hidden><span id="research-warning-text"></span><div><button id="authorize-research" class="text-button" hidden>启用本场查证</button><button data-route="settings" class="text-button">前往设置 <svg><use href="#i-arrow"/></svg></button></div></div>
           <div id="coordinator-warning" class="inline-notice" role="status" hidden><span id="coordinator-warning-text"></span><button id="retry-coordinator" class="text-button">重试问题识别</button></div>
+          <details id="detection-recovery" class="inline-notice" hidden><summary id="detection-recovery-summary"></summary><div id="detection-recovery-items"></div></details>
           <div id="demo-controls" class="demo-controls" hidden><span>示例资料 · 不使用麦克风，不调用联网服务</span><button id="run-demo" class="text-button">播放示例流程</button></div>
           <div class="meeting-toolbar">
             <div class="meeting-tools" role="group" aria-label="会议查证控制">
@@ -126,7 +152,13 @@
             <nav class="meeting-tabs" aria-label="会议内容"><button data-meeting-tab="transcript" aria-pressed="true">实时转写 <span id="transcript-count">0</span></button><button data-meeting-tab="summary" aria-pressed="false">纪要</button><button data-meeting-tab="questions" aria-pressed="false">查证问题 <span id="question-count">0</span></button><button data-meeting-tab="files" aria-pressed="false">会议文件</button></nav>
           </div>
           <div id="work-grid" class="meeting-content" data-meeting-tab="transcript" data-left-pane="transcript" data-mobile-panel="transcript">
-            <section id="meeting-files-panel" class="meeting-files-panel" aria-labelledby="meeting-files-heading" hidden><div class="section-heading"><h2 id="meeting-files-heading">每场会议，留下三份记录</h2><span id="archive-status" class="muted" role="status"></span></div><p id="archive-guidance" class="section-caption muted"></p><div id="meeting-files-list" class="meeting-files-list"></div><p id="archive-error" class="error-text" role="alert"></p><div id="meeting-file-preview" hidden><div class="section-heading"><h3 id="meeting-file-title"></h3><button id="close-file-preview" class="text-button">收起预览</button></div><article id="meeting-file-content" class="meeting-file-article"></article></div></section>
+            <section id="meeting-files-panel" class="meeting-files-panel" aria-labelledby="meeting-files-heading" hidden>
+              <div class="section-heading">
+                <h2 id="meeting-files-heading">会议文件</h2><span id="archive-status" class="muted" role="status"></span>
+                <button id="open-files-folder" type="button" class="text-button" disabled><svg aria-hidden="true"><use href="#i-folder"/></svg><span>打开文件夹</span></button>
+              </div>
+              <p id="archive-guidance" class="section-caption muted"></p><div id="meeting-files-list" class="meeting-files-list"></div><p id="archive-error" class="error-text" role="alert"></p><div id="meeting-file-preview" hidden><div class="section-heading"><h3 id="meeting-file-title"></h3><button id="close-file-preview" class="text-button">收起预览</button></div><article id="meeting-file-content" class="meeting-file-article"></article></div>
+            </section>
             <section id="transcript-panel" class="transcript-panel" aria-labelledby="transcript-heading">
               <div class="section-heading"><h2 id="transcript-heading">会议转写</h2><label class="follow-toggle"><input type="checkbox" id="follow-transcript" checked>跟随最新</label><span id="transcript-live-label" class="muted">等待收听</span></div>
               <div id="transcript-paging" class="transcript-paging" hidden><button type="button" id="older-transcript" class="text-button">查看更早发言</button><button type="button" id="latest-transcript" class="text-button" hidden>回到最新发言</button></div>
@@ -137,12 +169,12 @@
             <section id="results-panel" class="results-panel" aria-labelledby="result-heading" hidden>
               <header class="result-bar"><button id="back-questions" class="text-button"><svg aria-hidden="true"><use href="#i-back"/></svg><span id="back-questions-label">全部问题</span></button><h2 id="result-heading" class="visually-hidden">参考资料</h2><nav class="detail-tabs" aria-label="问题资料"><button data-detail="answer" aria-controls="answer-panel" aria-pressed="true">参考回答</button><button data-detail="sources" aria-controls="sources-panel" aria-pressed="false">来源 <span id="source-count">0</span></button><button data-detail="document" aria-controls="document-panel" aria-pressed="false">Markdown</button></nav></header>
               <div id="result-empty" class="empty-state" hidden>选择一个问题查看资料。</div>
-              <div id="result-content"><div class="detail-body scroll-region"><article class="reading-page"><header class="question-detail-heading"><h2 id="question-title"></h2><div class="detail-badges"><span id="question-state" class="badge"></span><span id="evidence-state" class="badge"></span><span id="result-version" class="version-label"></span></div><section id="question-failure" class="failure-panel" role="status" aria-live="polite" hidden><h3 id="question-failure-heading"></h3><p id="question-error"></p><p id="question-error-suggestion"></p><p id="question-error-note" class="muted" hidden></p><details id="question-error-details"><summary>错误详情</summary><dl id="question-error-facts"></dl></details></section></header><div class="article-tools"><details class="basis-details"><summary>问题从哪里来</summary><p id="question-trigger" class="muted"></p><button id="locate-question" type="button" class="text-button" hidden>在转写中定位</button></details><details class="question-menu"><summary>修改与操作</summary><div class="question-actions"><button id="approve-question" class="primary" hidden>确认查证</button><button id="edit-question">修改问题</button><button id="set-public-query" hidden>设置检索词</button><button id="prioritize-question" hidden>优先处理</button><button id="retry-question" hidden>重试</button><button id="cancel-question" class="danger" hidden>取消查证</button></div></details></div>
+              <div id="result-content"><div class="detail-body scroll-region"><article class="reading-page"><header class="question-detail-heading"><h2 id="question-title"></h2><div class="detail-badges"><span id="question-state" class="badge"></span><span id="evidence-state" class="badge"></span><button id="view-original" class="text-button" type="button" hidden>查看原文</button></div><section id="question-failure" class="failure-panel" role="status" aria-live="polite" hidden><h3 id="question-failure-heading"></h3><p id="question-error"></p><p id="question-error-suggestion"></p><p id="question-error-note" class="muted" hidden></p><div id="question-failure-actions" class="question-actions"></div><details id="question-error-details"><summary>错误详情</summary><dl id="question-error-facts"></dl></details></section></header><div class="article-tools"><details class="basis-details"><summary>问题从哪里来</summary><p id="question-trigger" class="muted"></p><button id="locate-question" type="button" class="text-button" hidden>在转写中定位</button></details><details class="question-menu"><summary>修改与操作</summary><div class="question-actions" id="question-menu-actions"><button id="approve-question" class="primary" hidden>确认查证</button><button id="edit-question">修改问题</button><button id="set-public-query" hidden>设置检索词</button><button id="prioritize-question" hidden>优先处理</button><button id="retry-question" hidden>重试</button><button id="cancel-question" class="danger" hidden>取消查证</button></div></details></div>
               <section id="research-progress" class="research-progress" aria-label="查证进度" hidden>
                 <div class="research-status"><span class="research-indicator" aria-hidden="true"></span><h3 id="research-status-title" role="status" aria-live="polite"></h3><span id="research-elapsed" class="research-elapsed"></span></div>
                 <p id="research-query" class="research-query" hidden></p><p id="research-wait" class="research-wait" role="status" hidden></p>
                 <div id="research-draft" class="research-draft" hidden><p class="research-draft-label">回答草稿 · 待核验</p><p id="research-draft-text"></p></div>
-                <details id="research-process" class="research-process"><summary>查证过程 <span id="research-source-count"></span></summary><ol id="research-events" class="research-events"></ol><div id="research-source-list" class="research-source-list"></div>
+                <details id="research-process" class="research-process"><summary>查证过程 <span id="research-source-count"></span><span id="result-version" class="version-label"></span></summary><ol id="research-events" class="research-events"></ol><div id="research-source-list" class="research-source-list"></div>
                   <details id="research-thinking" class="research-thinking" hidden><summary id="research-thinking-title">模型处理</summary><p id="research-model-detail"></p></details>
                 </details>
               </section>
@@ -153,20 +185,104 @@
         </section>
 
         <section id="guide-view" class="guide-view prose-view" hidden aria-labelledby="guide-title">
-          <header class="page-heading"><div><h1 id="guide-title">让会议中的问题，有据可查。</h1><p>首次使用，先在设置中准备本机转写和联网服务。</p></div></header>
-          <div class="guide-note"><h2>首次使用</h2><p>在“设置”检查并安装 Apple 中文识别模型，再填写文字模型的接口地址、模型名称与 APIKey，以及搜索服务的 APIKey。分别测试连接，保存设置后开始会议或导入录音。</p><p>本机转写无需 APIKey；只有问题识别、回答和 AI 纪要需要文字模型，网页查证另需搜索服务。</p><button data-route="settings">前往设置</button></div>
+          <header class="page-heading"><div><h1 id="guide-title">让会议中的问题，有据可查。</h1><p>首次使用，先在设置中检查语音转写方式。</p></div></header>
+          <div class="guide-note"><h2>首次使用</h2><p>先检查本机中文模型，再按需要设置 AI 查证和飞书同步。</p><button data-pref-go="start">打开首次设置</button></div>
           <ol class="usage-steps"><li><span class="step-number">1</span><div><h2>开始一场会议</h2><p>点击“开始会议”，输入名称并选择音源。线下讨论选“麦克风”；线上会议选“电脑声音＋麦克风”。首次使用按系统提示授权，暂停后可以切换音源。</p><p class="muted">麦克风使用系统当前输入设备。双路收听建议戴耳机，避免外放声音被麦克风重复收录。</p></div></li><li><span class="step-number">2</span><div><h2>正常讨论，随时提出查证</h2><p>转写出现在“实时转写”。讨论中说“查一下工作流的定义，给一些来源”，已启用的查证服务会识别请求。也能在“查证问题”里点“添加问题”。</p></div></li><li><span class="step-number">3</span><div><h2>查看资料，留下依据</h2><p>问题完成后打开参考回答、来源或 Markdown。资料会自动保存到本场会议文件夹；结束后可从“全部会议”或“全部资料”回看。</p></div></li></ol>
           <div class="guide-actions"><button id="guide-start" class="primary">开始会议</button><button id="guide-import">导入已有音频</button><button id="guide-demo">先体验示例</button></div>
           <div class="guide-note"><h2>已有录音？直接导入</h2><p>点击“导入音频”，选择文件并确认会议名称。音频会在本机直接转写，无需播放。转写完成后会议仍保持打开，问题识别和查证可以继续运行；也可以手动添加问题、确认公开检索词，再查看生成的参考资料。</p><p>支持 WAV、M4A、MP3、AIFF、CAF、FLAC，单个文件不超过 2 GB、六小时。停止导入会保留已完成的转写；原始文件保持原样。完整转写可导出为 Markdown。</p></div>
-          <div class="guide-note"><h2>开始前，知道这两件事</h2><p>本机转写与联网查证是两项能力。联网查证需要在“设置”里配置模型、搜索和相应会议的外发范围；未配置时会明确提示。</p><p>“暂停收听”只暂停采音；“结束会议”会停止接收新内容，并暂停未完成的查证。请等需要的资料完成后再结束。回答用于佐证讨论，最终判断仍由参会者作出。</p></div>
+          <div class="guide-note"><h2>开始前，知道这两件事</h2><p>Apple 中文识别在本机处理音频。选择云端转写时，由主持人确认接收服务和音源。联网查证单独配置和授权。</p><p>“暂停收听”只暂停采音；“结束会议”会停止接收新内容，并暂停未完成的查证。请等需要的资料完成后再结束。回答用于佐证讨论，最终判断仍由参会者作出。</p></div>
         </section>
 
-        <section id="settings-view" class="settings-view prose-view" hidden aria-labelledby="settings-title"><header class="page-heading provider-page-heading"><div><h1 id="settings-title">设置</h1><p>管理外观、本机转写和联网服务。</p><p id="service-settings-result" class="provider-result" role="status" aria-live="polite">正在读取服务设置…</p></div><button id="save-service-settings" form="service-settings-form" type="submit" class="primary" disabled>保存设置</button></header>
-          <section class="settings-section appearance-settings" aria-labelledby="appearance-title"><h2 id="appearance-title">外观</h2><div class="setting-row"><label for="theme-preference">主题</label><select id="theme-preference" aria-describedby="theme-help"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div><p id="theme-help" class="setting-note">立即生效，自动保存。</p></section>
-          <section class="settings-section" aria-labelledby="storage-settings-title"><h2 id="storage-settings-title">保存与回看</h2><div class="setting-row storage-location"><div><h3>会议文件保存位置</h3><p id="settings-output-root" class="storage-path">正在读取保存位置…</p></div><div class="storage-actions"><button id="settings-open-folder" type="button" disabled>打开文件夹</button><button id="settings-choose-folder" type="button" aria-describedby="settings-output-help" disabled>选择文件夹</button></div></div><p id="settings-output-help" class="setting-note">修改后仅新建会议使用此位置，已有会议资料不移动。</p><p id="storage-settings-result" class="provider-result" role="status" aria-live="polite"></p><p id="settings-retention" class="setting-note"></p></section>
-          <section class="settings-section"><h2>本机收听与转写</h2><div class="setting-row"><div><h3>系统声音与麦克风</h3><p id="settings-audio-state">请在桌面 App 中使用本机收听。</p></div><button id="check-model">检查中文模型</button></div><div class="setting-row"><div><h3>Apple 中文识别</h3><p id="settings-model-state">音频在本机处理，无需 APIKey。</p></div><button id="install-model">安装模型</button></div></section>
+        <section id="settings-view" class="settings-view prose-view" hidden aria-labelledby="settings-title"><header class="page-heading provider-page-heading"><div><h1 id="settings-title">设置</h1></div><div id="settings-save-toolbar" hidden><div class="provider-save"><button id="reload-service-settings" type="button" class="quiet-button">重新载入已保存的设置</button><button id="save-service-settings" type="submit" form="service-settings-form" class="primary" disabled>保存模型与搜索设置</button></div><p id="service-settings-result" class="provider-result" role="status" aria-live="polite"></p></div></header>
+          <div class="prefs-tabs" role="tablist" aria-label="设置分类">
+            <button type="button" role="tab" id="prefs-tab-start" aria-controls="prefs-pane-start" aria-selected="true" tabindex="0">首次使用</button>
+            <button type="button" role="tab" id="prefs-tab-audio" aria-controls="prefs-pane-audio" aria-selected="false" tabindex="-1">语音转写</button>
+            <button type="button" role="tab" id="prefs-tab-ai" aria-controls="prefs-pane-ai" aria-selected="false" tabindex="-1">模型与搜索</button>
+            <button type="button" role="tab" id="prefs-tab-feishu" aria-controls="prefs-pane-feishu" aria-selected="false" tabindex="-1">飞书同步</button>
+            <button type="button" role="tab" id="prefs-tab-general" aria-controls="prefs-pane-general" aria-selected="false" tabindex="-1">通用</button>
+          </div>
+          <div role="tabpanel" id="prefs-pane-start" aria-labelledby="prefs-tab-start" tabindex="0">
+<h2>你想怎样使用真实交互？</h2>
+            <p>只做转写，先检查本机中文模型即可。按需开启下面的功能。</p>
+            <button class="prefs-step" type="button" data-pref-go="audio" data-pref-step="audio"><span><strong>收听会议或导入录音</strong><span>选择实时会议和音频文件的转写方式。Apple 模型可在本机检查和安装。</span></span><span class="prefs-step-end"><span id="setup-audio">待检查</span> ›</span></button>
+<button class="prefs-step" type="button" data-pref-go="ai" data-pref-step="model"><span><strong>识别问题、生成 AI 纪要</strong><span>选择文字模型并测试连接，已有配置可直接切换。</span></span><span class="prefs-step-end"><span id="setup-model">待检查</span> ›</span></button>
+<button class="prefs-step" type="button" data-pref-go="ai" data-pref-step="search"><span><strong>为查证结果查找网页来源</strong><span>配置搜索服务并测试。Tavily 用独立密钥，使用同一地址的 DeepSeek 可复用模型密钥。</span></span><span class="prefs-step-end"><span id="setup-search">待检查</span> ›</span></button>
+<button class="prefs-step" type="button" data-pref-go="feishu" data-pref-step="sync"><span><strong>把查证结果发到飞书</strong><span>仅使用同步时需在本机安装并初始化飞书 CLI。连接账号、选文件夹；群提醒还需选择群聊。</span></span><span class="prefs-step-end"><span id="setup-sync">按需开启</span> ›</span></button>
+
+          </div>
+          <div role="tabpanel" id="prefs-pane-audio" aria-labelledby="prefs-tab-audio" tabindex="0" hidden>
+            <section class="settings-section"><h2>Apple 中文识别</h2>
+              <div class="setting-row"><div><h3>本机模型</h3><p id="settings-model-state">音频在本机处理，无需 API Key。</p><p id="settings-audio-state"></p></div><button id="check-model" type="button">检查模型</button><button id="install-model" type="button">安装模型</button></div>
+            </section>
+            <form id="speech-settings-form" autocomplete="off">
+              <section class="provider-section service-card" aria-labelledby="speech-default-heading">
+                <header class="provider-heading"><div><h2 id="speech-default-heading">默认转写方式</h2><p id="speech-active-settings" role="status"></p></div></header>
+                <fieldset id="speech-default-fields" disabled><div class="provider-grid">
+                  <div><label for="speech-live-provider">实时会议</label><select id="speech-live-provider"><option value="apple_local">Apple 中文识别</option><option value="dashscope" disabled>阿里云百炼</option></select></div>
+                  <div><label for="speech-file-provider">音频文件</label><select id="speech-file-provider"><option value="apple_local">Apple 中文识别</option><option value="dashscope" disabled>阿里云百炼</option><option value="deepseek" disabled>DeepSeek 官方 ASR</option></select></div>
+                </div><label class="provider-toggle"><input id="speech-fallback" type="checkbox" checked>云端实时转写中断时，尝试使用已安装的 Apple 中文模型</label></fieldset>
+              </section>
+              <section class="provider-section service-card" aria-labelledby="speech-cloud-heading">
+                <header class="provider-heading"><div><h2 id="speech-cloud-heading">云端语音转写</h2><p>测试会发送随 App 提供的中文样本，可能产生少量费用。</p></div></header>
+                <fieldset id="speech-cloud-fields" disabled>
+                  <label for="speech-cloud-provider">配置服务</label><select id="speech-cloud-provider"><option value="dashscope">阿里云百炼（Fun-ASR）</option><option value="deepseek">DeepSeek 官方 ASR</option></select>
+                  <div id="speech-dashscope-fields">
+                    <label for="speech-base-url">百炼服务地址</label><input type="url" id="speech-base-url" inputmode="url" placeholder="百炼控制台提供的 BaseURL" maxlength="1000" spellcheck="false">
+                    <p class="field-help">可填写百炼控制台显示的 Base URL，包括 <code>/compatible-mode/v1</code>。程序会按 Fun-ASR 原生接口进行实时和文件测试。</p>
+                    <div class="provider-grid"><div><label for="speech-live-model">实时模型</label><input id="speech-live-model" maxlength="160" spellcheck="false"></div><div><label for="speech-file-model">文件模型</label><input id="speech-file-model" maxlength="160" spellcheck="false"></div></div>
+                  </div>
+                  <p id="speech-deepseek-info" class="field-help" hidden>支持音频文件。接收地址为 https://api.deepseek.com/v1/tools/asr。</p>
+                  <div class="provider-key-label"><label for="speech-key">API Key <span id="speech-key-state"></span></label><button type="button" class="text-button" id="speech-clear-key">清除密钥</button></div>
+                  <input id="speech-key" type="password" autocomplete="new-password" maxlength="4096" spellcheck="false">
+                </fieldset>
+                <div id="speech-live-test-row" class="provider-test-row"><button type="button" id="speech-test-live" disabled>测试实时转写</button><p id="speech-live-result" class="provider-result" role="status"></p></div>
+                <div class="provider-test-row"><button type="button" id="speech-test-file" disabled>测试文件转写</button><p id="speech-file-result" class="provider-result" role="status"></p></div>
+                <button type="button" id="speech-cancel-test" class="text-button" hidden>取消本次测试</button>
+                <p id="speech-unsaved-settings" class="setting-note" role="status"></p>
+                <div class="speech-save-actions"><button id="speech-save" class="primary" disabled>保存并使用</button><button id="speech-reload" type="button" class="text-button">重新载入</button><p id="speech-settings-result" class="provider-result" role="status"></p></div>
+              </section>
+            </form>
+          </div>
+          <div role="tabpanel" id="prefs-pane-ai" aria-labelledby="prefs-tab-ai" tabindex="0" hidden>
+          <form id="service-settings-form" autocomplete="off">
+            <section class="settings-section provider-section service-card" aria-labelledby="model-service-title">
+              <header class="provider-heading"><div><h2 id="model-service-title">文字模型</h2><p>识别问题、整理参考回答、生成会议纪要。</p></div><span id="settings-reasoning-badge" class="badge">正在读取</span></header>
+              <fieldset id="model-service-fields" disabled>
+                <label class="provider-toggle" for="service-model-enabled"><input id="service-model-enabled" type="checkbox">启用文字模型</label>
+                <div class="provider-grid">
+                  <div class="provider-field"><label for="service-model-provider">接口类型</label><select id="service-model-provider"><option value="deepseek">DeepSeek（推荐）</option><option value="openai_compatible">OpenAI / 兼容接口</option></select></div>
+                  <div class="provider-field" id="service-deepseek-model-field"><label for="service-deepseek-model">模型名称</label><select id="service-deepseek-model"><option value="deepseek-flash">Flash</option><option value="deepseek-v4-pro">Pro</option></select></div>
+                  <div class="provider-field" id="service-model-profile-field" hidden><label for="service-model-profile">已保存的兼容接口</label><select id="service-model-profile"><option value="">新建配置</option></select></div>
+                  <div class="provider-field" id="service-model-name-field" hidden><label for="service-model-name">模型名称</label><input id="service-model-name" maxlength="160" placeholder="填写服务商提供的模型 ID" spellcheck="false" autocapitalize="off"></div>
+                  <div class="provider-field"><label for="service-model-url">接口地址（Base URL）</label><input id="service-model-url" type="url" required maxlength="1000" placeholder="https://api.example.com/v1" spellcheck="false" autocapitalize="off"></div>
+                </div>
+                <div class="provider-key-label"><label for="service-model-key">API Key <span id="service-model-key-state"></span></label><button id="clear-model-key" type="button" class="text-button">清除已存密钥</button></div><input id="service-model-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="填写密钥" spellcheck="false" autocapitalize="off">
+                <label for="service-model-detection">问题识别</label><select id="service-model-detection"><option value="fast">快速识别（推荐）</option><option value="inherit">沿用回答配置</option></select><p class="setting-note">快速识别在 OpenAI 兼容接口使用 medium 推理强度，在 DeepSeek 官方接口关闭思考。查证回答与纪要使用下方配置。</p>
+                <details class="provider-advanced"><summary>高级设置</summary><div class="provider-grid"><div><label for="service-model-effort">推理强度</label><select id="service-model-effort"><option value="default">服务商默认</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></div><div><label for="service-model-tokens">单次输出上限</label><input id="service-model-tokens" type="number" min="256" max="65536" step="1" required value="2048"></div><div><label for="service-model-token-parameter">输出上限参数</label><select id="service-model-token-parameter"><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></div><div><label for="service-model-timeout">模型等待时限（秒）</label><input id="service-model-timeout" type="number" min="15" max="600" step="1" required value="180"></div></div><label class="provider-toggle" for="service-model-json"><input id="service-model-json" type="checkbox">使用 JSON 输出格式</label><label id="model-thinking-row" class="provider-toggle" for="service-model-thinking"><input id="service-model-thinking" type="checkbox">启用 DeepSeek 思考模式</label><p class="setting-note">按服务商支持的参数填写。会议纪要会使用至少 8192 的输出上限。</p></details>
+                <div class="provider-test-row"><button id="test-model-service" type="button">测试模型连接</button><p id="model-test-result" class="provider-result" role="status" aria-live="polite"></p></div>
+              </fieldset>
+            </section>
+            <section class="settings-section provider-section service-card" aria-labelledby="search-service-title">
+              <header class="provider-heading"><div><h2 id="search-service-title">搜索服务</h2><p>查找网页来源和可引用的正文。</p></div><span id="settings-search-badge" class="badge">正在读取</span></header>
+              <fieldset id="search-service-fields" disabled>
+                <label class="provider-toggle" for="service-search-enabled"><input id="service-search-enabled" type="checkbox">启用网页搜索</label>
+                <div class="provider-grid">
+                  <div class="provider-field"><label for="service-search-provider">服务商</label><select id="service-search-provider"><option value="deepseek">DeepSeek Search</option><option value="tavily">Tavily</option></select></div>
+                  <div class="provider-field"><label for="service-search-url">接口地址（Base URL）</label><input id="service-search-url" type="url" required maxlength="1000" placeholder="https://api.tavily.com" spellcheck="false" autocapitalize="off"></div>
+                </div>
+                <label id="search-share-key-row" class="provider-toggle" for="service-search-shared-key"><input id="service-search-shared-key" type="checkbox">使用文字模型的 DeepSeek 密钥</label>
+                <div id="search-key-field"><div class="provider-key-label"><label for="service-search-key">API Key <span id="service-search-key-state"></span></label><button id="clear-search-key" type="button" class="text-button">清除已存密钥</button></div><input id="service-search-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="填写搜索服务密钥" spellcheck="false" autocapitalize="off"></div>
+                <div class="provider-test-row"><button id="test-search-service" type="button">测试搜索连接</button><p id="search-test-result" class="provider-result" role="status" aria-live="polite"></p></div>
+              </fieldset>
+            </section>
+            <p class="setting-note">保存后对新任务生效。密钥保存在本机，切回已保存的配置时可以留空。</p>
+            <p class="setting-note">连接测试发送固定测试内容，会产生一次对应服务调用。</p><p id="settings-authorization" class="setting-note"></p>
+          </form>
+          </div>
+          <div role="tabpanel" id="prefs-pane-feishu" aria-labelledby="prefs-tab-feishu" tabindex="0" hidden>
           <section id="feishu-section" class="settings-section provider-section feishu-section" aria-labelledby="feishu-title" hidden>
             <header class="provider-heading"><div><h2 id="feishu-title">飞书同步</h2><p>将会议中保存的查证结果同步为飞书云文档。</p></div><span id="feishu-badge" class="badge">未开启</span></header>
+            {% include 'feishu-setup-guide.html' %}
             <div class="feishu-help-row"><strong>飞书账号</strong><span class="feishu-help"><button type="button" aria-label="如何授权飞书账号" aria-expanded="false" aria-describedby="feishu-auth-tip">?</button><span role="tooltip" id="feishu-auth-tip" hidden>首次使用，在已装 Node.js 的终端运行 <code>npx @larksuite/cli@latest install</code>，再运行 <code>lark-cli config init</code>。回到这里点「刷新状态」和「连接飞书」，用保存文档的账号在授权页确认。企业限制授权时请联系管理员。</span></span></div>
             <p id="feishu-account" role="status">正在检查账号…</p>
             <div class="feishu-actions"><button id="feishu-connect" type="button">连接飞书</button><a id="feishu-auth-link" target="_blank" rel="noopener noreferrer" hidden>打开飞书授权页 ↗</a><button id="feishu-auth-done" type="button" hidden>我已完成授权</button><button id="feishu-refresh" type="button" class="text-button">刷新状态</button></div>
@@ -176,45 +292,25 @@
               <div class="feishu-help-row"><label for="feishu-delivery">如何接收</label><span class="feishu-help"><button type="button" aria-label="如何从手机接收结果或建群" aria-expanded="false" aria-describedby="feishu-chat-tip">?</button><span role="tooltip" id="feishu-chat-tip" hidden>仅同步云文档时，在手机飞书的云文档中打开所选文件夹。选群通知后，每份新结果还会以你的身份发到该群。需要新群时，在飞书消息页点「＋」发起群聊，邀请成员后回来搜索群名。请选择自己能发言的群。</span></span></div>
               <select id="feishu-delivery"><option value="folder">仅同步云文档</option><option value="chat">同步云文档并通知群聊</option></select>
               <div id="feishu-chat-controls" hidden><label for="feishu-chat-query">通知群聊</label><div class="feishu-input-action"><input id="feishu-chat-query" maxlength="100" placeholder="输入群名称" type="text"><button id="feishu-chat-search" type="button">搜索群聊</button></div><label for="feishu-chat-choice" class="visually-hidden">选择接收通知的群</label><select id="feishu-chat-choice"><option value="">请选择群聊</option></select></div>
-              <div class="feishu-actions"><button id="feishu-save" type="submit" disabled>保存飞书设置</button><button id="feishu-test" type="button" aria-describedby="feishu-test-info" disabled>发送测试</button></div><p id="feishu-test-info" class="feishu-caption"></p>
+              <div class="feishu-actions"><button id="feishu-save" type="submit" disabled>保存飞书设置</button><button id="feishu-test" type="button" aria-describedby="feishu-test-info" disabled>发送测试</button></div><p id="feishu-test-info" class="feishu-caption" role="status"></p>
             </fieldset></form><p id="feishu-feedback" class="provider-result" role="status" aria-live="polite"></p>
             <details id="feishu-recent"><summary>最近同步</summary><ul id="feishu-jobs"></ul></details>
           </section>
-          <form id="service-settings-form" autocomplete="off">
-            <section class="settings-section provider-section" aria-labelledby="model-service-title">
-              <header class="provider-heading"><div><h2 id="model-service-title">文字模型</h2><p>识别问题、整理参考回答、生成会议纪要。</p></div><span id="settings-reasoning-badge" class="badge">正在读取</span></header>
-              <fieldset id="model-service-fields" disabled>
-                <label class="provider-toggle" for="service-model-enabled"><input id="service-model-enabled" type="checkbox">启用文字模型</label>
-                <div class="provider-grid"><div><label for="service-model-provider">接口类型</label><select id="service-model-provider"><option value="deepseek">DeepSeek</option><option value="openai_compatible">OpenAI / 兼容接口</option></select></div><div><label for="service-model-name">模型名称</label><input id="service-model-name" maxlength="160" placeholder="填写服务商提供的模型 ID" spellcheck="false" autocapitalize="off"></div></div>
-                <label for="service-model-url">BaseURL</label><input id="service-model-url" type="url" required maxlength="1000" placeholder="https://api.example.com/v1" spellcheck="false" autocapitalize="off">
-                <div class="provider-key-label"><label for="service-model-key">APIKey <span id="service-model-key-state"></span></label><button id="clear-model-key" type="button" class="text-button">清除已存密钥</button></div><input id="service-model-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="填写密钥" spellcheck="false" autocapitalize="off">
-                <label for="service-model-detection">问题识别</label><select id="service-model-detection"><option value="fast">快速识别（推荐）</option><option value="inherit">沿用回答配置</option></select><p class="setting-note">快速识别降低识别阶段的推理开销，查证回答与纪要仍使用下方配置。</p>
-                <details class="provider-advanced"><summary>高级设置</summary><div class="provider-grid"><div><label for="service-model-effort">推理强度</label><select id="service-model-effort"><option value="default">服务商默认</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></div><div><label for="service-model-tokens">单次输出上限</label><input id="service-model-tokens" type="number" min="256" max="65536" step="1" required value="2048"></div><div><label for="service-model-token-parameter">输出上限参数</label><select id="service-model-token-parameter"><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></div><div><label for="service-model-timeout">模型等待时限（秒）</label><input id="service-model-timeout" type="number" min="15" max="600" step="1" required value="180"></div></div><label class="provider-toggle" for="service-model-json"><input id="service-model-json" type="checkbox">使用 JSON 输出格式</label><label id="model-thinking-row" class="provider-toggle" for="service-model-thinking"><input id="service-model-thinking" type="checkbox">启用 DeepSeek 思考模式</label><p class="setting-note">按服务商支持的参数填写。会议纪要会使用至少 8192 的输出上限。</p></details>
-                <div class="provider-test-row"><button id="test-model-service" type="button">测试模型连接</button><p id="model-test-result" class="provider-result" role="status" aria-live="polite"></p></div>
-              </fieldset>
-            </section>
-            <section class="settings-section provider-section" aria-labelledby="search-service-title">
-              <header class="provider-heading"><div><h2 id="search-service-title">搜索服务</h2><p>查找网页来源和可引用的正文。</p></div><span id="settings-search-badge" class="badge">正在读取</span></header>
-              <fieldset id="search-service-fields" disabled>
-                <label class="provider-toggle" for="service-search-enabled"><input id="service-search-enabled" type="checkbox">启用网页搜索</label>
-                <label for="service-search-provider">服务商</label><select id="service-search-provider"><option value="deepseek">DeepSeek Search</option><option value="tavily">Tavily</option></select>
-                <label for="service-search-url">BaseURL</label><input id="service-search-url" type="url" required maxlength="1000" placeholder="https://api.tavily.com" spellcheck="false" autocapitalize="off">
-                <label id="search-share-key-row" class="provider-toggle" for="service-search-shared-key"><input id="service-search-shared-key" type="checkbox">使用文字模型的 DeepSeek 密钥</label>
-                <div id="search-key-field"><div class="provider-key-label"><label for="service-search-key">APIKey <span id="service-search-key-state"></span></label><button id="clear-search-key" type="button" class="text-button">清除已存密钥</button></div><input id="service-search-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="填写搜索服务密钥" spellcheck="false" autocapitalize="off"></div>
-                <div class="provider-test-row"><button id="test-search-service" type="button">测试搜索连接</button><p id="search-test-result" class="provider-result" role="status" aria-live="polite"></p></div>
-              </fieldset>
-            </section>
+
+          </div>
+          <div role="tabpanel" id="prefs-pane-general" aria-labelledby="prefs-tab-general" tabindex="0" hidden>
+          <section class="settings-section appearance-settings" aria-labelledby="appearance-title"><h2 id="appearance-title">外观</h2><div class="setting-row"><label for="theme-preference">主题</label><select id="theme-preference" aria-describedby="theme-help"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div><p id="theme-help" class="setting-note">立即生效，自动保存。</p><div class="setting-row"><label for="layout-preference">界面布局</label><select id="layout-preference" aria-describedby="layout-help"><option value="a">静阅</option><option value="b">全景</option></select></div><p id="layout-help" class="setting-note">静阅以舒展双栏呈现内容；全景在宽窗口同屏展示转写、问题与回答。也可从右上角随时切换，选择自动保存。</p></section>
+          <section class="settings-section" aria-labelledby="storage-settings-title"><h2 id="storage-settings-title">保存与回看</h2><div class="setting-row storage-location"><div><h3>会议文件保存位置</h3><p id="settings-output-root" class="storage-path">正在读取保存位置…</p></div><div class="storage-actions"><button id="settings-open-folder" type="button" disabled>打开文件夹</button><button id="settings-choose-folder" type="button" aria-describedby="settings-output-help" disabled>选择文件夹</button></div></div><p id="settings-output-help" class="setting-note">修改后仅新建会议使用此位置，已有会议资料不移动。</p><p id="storage-settings-result" class="provider-result" role="status" aria-live="polite"></p><p id="settings-retention" class="setting-note"></p></section>
             <section class="settings-section provider-section" aria-labelledby="archive-settings-title">
               <header class="provider-heading"><div><h2 id="archive-settings-title">录音归档</h2></div></header>
               <fieldset id="archive-settings-fields" disabled>
                 <label class="provider-toggle" for="keep-original-caf"><input id="keep-original-caf" type="checkbox" aria-describedby="keep-original-caf-help">额外保留原始 CAF 录音</label>
                 <p id="keep-original-caf-help" class="setting-note">实时录音会后保存为 M4A。从下次开始收听生效，导入文件保留原格式。</p>
-              </fieldset>
+              <p id="archive-result" class="provider-result" role="status"></p></fieldset>
             </section>
-            <div class="provider-save"><button id="reload-service-settings" type="button" class="quiet-button">重新载入已保存的设置</button></div>
-            <p class="setting-note">保存后新任务立即生效；执行中的任务沿用原服务。密钥仅保存在本机，留空保留；更换地址需填写新密钥。</p>
-            <p class="setting-note">连接测试发送固定测试内容，会产生一次对应服务调用。</p><p id="settings-authorization" class="setting-note"></p>
-          </form>
+
+          </div>
+
         </section>
       </main>
     </div>
@@ -225,25 +321,28 @@
   <dialog id="activity-dialog" class="activity-dialog" aria-labelledby="activity-heading"><h2 id="activity-heading">运行记录</h2><ol id="activity-list" class="activity-list" tabindex="0" aria-label="本场会议运行记录"></ol><div class="dialog-actions"><button type="button" data-close-dialog="activity-dialog" autofocus>关闭</button></div></dialog>
   <dialog id="meeting-dialog" aria-labelledby="meeting-dialog-heading"><form id="meeting-form">
     <div class="dialog-icon"><svg><use href="#i-wave"/></svg></div><h2 id="meeting-dialog-heading">开始一场会议</h2><p id="meeting-dialog-intro">收听电脑上正在播放的会议声音，实时转写并整理查证资料。</p>
-    <label for="meeting-title">会议名称</label><input id="meeting-title" maxlength="120" required placeholder="例如：示例会议">
+    <label for="meeting-title">会议名称</label><input id="meeting-title" maxlength="120" required placeholder="请输入会议名称">
     <label for="meeting-scope">会议类型</label><select id="meeting-scope"><option value="real">正式会议</option><option value="synthetic">示例体验 · 无需录音</option></select>
     <div id="meeting-source-field"><label for="meeting-audio-source">收听音源</label><select id="meeting-audio-source" aria-describedby="meeting-audio-help"><option value="system">电脑声音</option><option value="microphone">麦克风</option><option value="both">电脑声音＋麦克风</option></select></div>
     <p id="meeting-audio-help" class="field-help">仅收听电脑上播放的声音。</p>
+    <fieldset id="meeting-upload-field" class="import-permissions" hidden><legend>云端转写</legend><p id="meeting-upload-scope" class="field-help" role="status"></p><label><input id="meeting-upload-agree" type="checkbox">同意上传上述音源进行实时转写</label></fieldset>
     <fieldset id="meeting-permissions-field" class="import-permissions"><legend>联网查证</legend><label><input id="meeting-research" type="checkbox" checked>允许本场转写发送到模型，自动查证公开资料</label><p id="meeting-research-help" class="field-help"></p></fieldset>
-    <p id="meeting-setup-warning" class="form-notice" hidden>查证服务尚未启用。你仍可开始本机转写，稍后前往设置连接服务。</p>
+    <p id="meeting-setup-warning" class="form-notice" hidden>查证服务尚未启用。你仍可开始语音转写。</p>
     <p id="meeting-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="meeting-dialog">取消</button><button id="meeting-submit" class="primary">创建并开始收听</button></div>
   </form></dialog>
   <dialog id="import-dialog" aria-labelledby="import-heading"><form id="import-form">
-    <div class="dialog-icon"><svg><use href="#i-import"/></svg></div><h2 id="import-heading">导入会议音频</h2><p>在本机转写录音，再识别问题、查证来源并保存资料。</p>
+    <div class="dialog-icon"><svg><use href="#i-import"/></svg></div><h2 id="import-heading">导入会议音频</h2><p id="import-intro">将录音转写为文字，并保存到会议。</p>
     <div class="audio-file-picker"><div><strong id="audio-file-name">尚未选择音频</strong><span id="audio-file-meta">WAV、M4A、MP3、AIFF、CAF、FLAC</span></div><button id="choose-audio" type="button">选择音频</button></div>
     <p id="import-desktop-help" class="field-help"></p><button id="import-install-model" type="button" hidden>安装中文模型</button>
     <label for="import-title">会议名称</label><input id="import-title" maxlength="120" required placeholder="默认使用音频文件名">
+    <fieldset id="import-upload-field" class="import-permissions" hidden><legend>云端转写</legend><p id="import-upload-scope" class="field-help" role="status"></p><label><input id="import-upload-agree" type="checkbox">同意上传选定文件进行转写</label></fieldset>
     <fieldset class="import-permissions"><legend>联网查证</legend><label><input id="import-model" type="checkbox" checked>允许本场转写发送到模型，识别待查证问题</label><label><input id="import-search" type="checkbox" checked>允许自动检索公开资料并生成参考回答</label><p id="import-services-help" class="field-help"></p></fieldset>
     <p id="import-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="import-dialog">取消</button><button id="import-submit" class="primary" disabled>导入并转写</button></div>
   </form></dialog>
-  <dialog id="permissions-dialog" aria-labelledby="permissions-heading"><form id="permissions-form"><h2 id="permissions-heading">本场联网查证</h2><p>音频留在本机，转写发送到已配置的模型。自动检索使用概括后的公开检索词；关闭自动检索时可逐条确认。</p><label class="permission-option"><input id="permissions-model" type="checkbox">允许转写发送到文字模型</label><label class="permission-option"><input id="permissions-search" type="checkbox">允许使用搜索服务</label><label class="permission-option"><input id="permissions-auto-search" type="checkbox">允许自动生成公开检索词并开始查证</label><p id="permissions-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="permissions-dialog">取消</button><button id="permissions-submit" class="primary">保存授权</button></div></form></dialog>
-  <dialog id="question-dialog" aria-labelledby="question-dialog-heading"><form id="question-form"><h2 id="question-dialog-heading">添加查证问题</h2><label for="question-input">想查证什么？</label><textarea id="question-input" rows="4" maxlength="300" required placeholder="例如：当前对工作流有哪些解释？请给出可靠来源和适用范围。"></textarea><div id="new-query-wrap" hidden><label for="new-public-query">可公开的搜索词</label><input id="new-public-query" maxlength="128" placeholder="工作流 定义 智能体"><p class="field-help">搜索词将发送到搜索服务，避免填写会议中的内部信息。</p></div><p id="question-dialog-context" class="field-help"></p><p id="question-dialog-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="question-dialog">取消</button><button id="question-submit" class="primary">开始查证</button></div></form></dialog>
-  <dialog id="search-query-dialog" aria-labelledby="search-query-heading"><form id="search-query-form"><h2 id="search-query-heading">公开检索词</h2><p id="search-query-context" class="query-context"></p><label for="public-query-input">允许发送到搜索服务的内容</label><textarea id="public-query-input" rows="3" maxlength="128" required placeholder="使用可公开的表述"></textarea><p id="search-query-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="search-query-dialog">取消</button><button id="search-query-submit" class="primary">保存并查证</button></div></form></dialog>
+  <dialog id="speech-consent-dialog" aria-labelledby="speech-consent-heading" aria-describedby="speech-consent-scope"><form id="speech-consent-form"><h2 id="speech-consent-heading">允许本场上传音频？</h2><p id="speech-consent-scope"></p><p id="speech-consent-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="speech-consent-dialog" autofocus>取消</button><button id="speech-consent-submit" class="primary">允许并开始收听</button></div></form></dialog>
+  <dialog id="permissions-dialog" aria-labelledby="permissions-heading"><form id="permissions-form"><h2 id="permissions-heading">本场联网查证</h2><p>此处只授权转写文字的发送与查证。自动检索使用概括后的公开检索词，关闭自动检索时可逐条确认。</p><label class="permission-option"><input id="permissions-model" type="checkbox">允许转写发送到文字模型</label><label class="permission-option"><input id="permissions-search" type="checkbox">允许使用搜索服务</label><label class="permission-option"><input id="permissions-auto-search" type="checkbox">允许自动生成公开检索词并开始查证</label><p id="permissions-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="permissions-dialog">取消</button><button id="permissions-submit" class="primary">保存授权</button></div></form></dialog>
+  <dialog id="question-dialog" aria-labelledby="question-dialog-heading"><form id="question-form"><h2 id="question-dialog-heading">添加查证问题</h2><label for="question-input">想查证什么？</label><textarea id="question-input" rows="4" maxlength="300" required placeholder="例如：当前对工作流有哪些解释？请给出可靠来源和适用范围。"></textarea><div id="new-query-wrap" hidden><label for="new-public-query">可公开的搜索词</label><input id="new-public-query" maxlength="128" placeholder="工作流 定义 智能体"><p class="field-help">仅填写允许外发的内容。</p><label><input id="new-force-web" type="checkbox"> 本次必须联网查证</label></div><p id="question-dialog-context" class="field-help"></p><p id="question-dialog-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="question-dialog">取消</button><button id="question-submit" class="primary">开始查证</button></div></form></dialog>
+  <dialog id="search-query-dialog" aria-labelledby="search-query-heading"><form id="search-query-form"><h2 id="search-query-heading">公开检索词</h2><p id="search-query-context" class="query-context"></p><label for="public-query-input">允许发送到搜索服务的内容</label><textarea id="public-query-input" rows="3" maxlength="128" required placeholder="使用可公开的表述"></textarea><p id="search-query-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="search-query-dialog">取消</button><button id="search-query-submit" class="primary">用此词联网查证</button></div></form></dialog>
   <div id="meeting-actions-menu" class="row-actions-menu" popover="auto" aria-label="会议操作"><button id="rename-meeting-action" type="button">重命名</button><button id="delete-meeting-action" class="danger" type="button">删除会议…</button></div>
   <dialog id="rename-meeting-dialog" aria-labelledby="rename-meeting-heading"><form id="rename-meeting-form"><h2 id="rename-meeting-heading">重命名会议</h2><label for="rename-meeting-title">会议名称</label><input id="rename-meeting-title" maxlength="120" required autocomplete="off"><p id="rename-meeting-error" class="error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close-dialog="rename-meeting-dialog">取消</button><button id="rename-meeting-submit" class="primary">保存名称</button></div></form></dialog>
   <dialog id="delete-meeting-dialog" aria-labelledby="delete-meeting-heading" aria-describedby="delete-meeting-description"><form id="delete-meeting-form"><h2 id="delete-meeting-heading">删除这场会议？</h2><p id="delete-meeting-description"></p><ul class="deletion-impact"><li>原始录音和导入音频的本机副本</li><li>全部转写、会议纪要</li><li>查证问题、参考回答、来源与历史版本</li></ul><p id="delete-meeting-counts" role="status">正在确认删除范围…</p><p class="deletion-note">会议专属文件夹内的全部文件（包括自行加入的文件）会一起删除。导入前的音频源文件不受影响。已同步的文档和群消息需在飞书中管理。</p><p id="delete-meeting-error" class="error-text" role="alert"></p><div class="dialog-actions"><button id="cancel-delete-meeting" type="button" data-close-dialog="delete-meeting-dialog" autofocus>取消</button><button id="confirm-delete-meeting" class="danger-solid" disabled>删除会议及全部文件</button></div></form></dialog>

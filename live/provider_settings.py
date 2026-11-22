@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from live.speech_settings import SpeechSettings
 from live.store import LiveError, require
 
 
@@ -79,8 +80,19 @@ class ModelService(BaseModel):
     def configured(self):
         return bool(self.name and (self.api_key or loopback_url(self.base_url)))
 
-    def payload(self, system, content, *, summary=False, detection=False):
-        fast = detection and self.detection_mode == "fast"
+    def public(self):
+        return {**self.model_dump(exclude={"api_key"}), "api_key_configured": bool(self.api_key)}
+
+    def official_deepseek(self):
+        return (self.provider == "deepseek" and origin(self.base_url) == ("https", "api.deepseek.com", 443)
+                and urlsplit(self.base_url).path in {"", "/v1"})
+
+    def profile_key(self):
+        url = "https://api.deepseek.com" if self.official_deepseek() else self.base_url
+        return self.provider, url, self.name
+
+    def payload(self, system, content, *, summary=False, detection=False, routing=False):
+        fast = (detection or routing) and self.detection_mode == "fast"
         tokens = min(max(self.max_tokens, 8192), 16384) if fast else max(self.max_tokens, 8192) if summary else self.max_tokens
         payload = {"model": self.name, "messages": [{"role": "system", "content": system},
                    {"role": "user", "content": json.dumps(content, ensure_ascii=False)}],
@@ -88,7 +100,11 @@ class ModelService(BaseModel):
         if self.json_mode:
             payload["response_format"] = {"type": "json_object"}
         thinking = "disabled" if fast else self.thinking
-        effort = "low" if fast and self.reasoning_effort in {"medium", "high", "xhigh", "max"} else self.reasoning_effort
+        effort = self.reasoning_effort
+        if fast and detection:
+            effort = "medium"
+        elif fast and effort in {"medium", "high", "xhigh", "max"}:
+            effort = "low"
         if self.provider == "deepseek":
             payload["thinking"] = {"type": thinking}
         if effort != "default" and (self.provider != "deepseek" or thinking == "enabled"):
@@ -121,10 +137,11 @@ class Services(BaseModel):
     model: ModelService
     search: SearchService
     keep_original_caf: bool = False
+    speech: SpeechSettings = Field(default_factory=SpeechSettings)
 
     def public(self):
         return {"revision": self.revision, "keep_original_caf": self.keep_original_caf,
-                "model": {**self.model.model_dump(exclude={"api_key"}), "api_key_configured": bool(self.model.api_key)},
+                "model": self.model.public(), "speech": self.speech.public(),
                 "search": {**self.search.model_dump(exclude={"api_key"}), "api_key_configured": bool(self.search.api_key),
                            "effective_key_configured": bool(self.search.key(self.model))}}
 
@@ -135,8 +152,15 @@ class Services(BaseModel):
                 "search_enabled": self.search.enabled and bool(self.search.key(self.model)),
                 "model_provider": self.model.provider, "model_name": self.model.name,
                 "model_destination": self.model.base_url, "search_provider": self.search.provider,
-                "search_destination": self.search.base_url, "speech_provider": "apple_local",
+                "search_destination": self.search.base_url, "speech_provider": self.speech.live_provider,
+                "speech_file_provider": self.speech.file_provider,
                 "settings_revision": self.revision}
+
+
+class SavedServices(Services):
+    # Older files contain only the active model. Keep inactive credentials out
+    # of the runtime configuration and expose only masked metadata to the UI.
+    model_profiles: list[ModelService] = Field(default_factory=list)
 
 
 class ModelUpdate(ModelService):
@@ -165,6 +189,8 @@ class SettingsUpdate(BaseModel):
     model: ModelUpdate
     search: SearchUpdate
     keep_original_caf: bool = False
+    # Ignore echoed fields from clients using Services.model_dump(). ASR has its own write path.
+    speech: dict | None = Field(default=None, exclude=True, repr=False)
 
 
 def from_environment(env=None):
@@ -191,12 +217,15 @@ class ProviderSettings:
         self.path = Path(path) if path else None
         self.lock = threading.RLock()
         self.current = None
+        self.model_profiles = []
         self.load_error = ""
         if self.path and (self.path.exists() or self.path.is_symlink()):
             try:
                 self._check_file()
-                require(self.path.stat().st_size <= 65536, "设置文件过大", 409)
-                self.current = Services.model_validate_json(self.path.read_text(encoding="utf-8"))
+                require(self.path.stat().st_size <= 4 * 1024 * 1024, "设置文件过大", 409)
+                saved = SavedServices.model_validate_json(self.path.read_text(encoding="utf-8"))
+                self.current = Services.model_validate(saved.model_dump(exclude={"model_profiles"}))
+                self.model_profiles = saved.model_profiles
                 self.path.chmod(0o600)
             except (OSError, ValueError, LiveError):
                 self.load_error = "已保存的服务设置无法读取，联网能力已关闭；请检查后重新保存。"
@@ -210,6 +239,18 @@ class ProviderSettings:
                 self.current = self.current.model_copy(update={
                     "model": self.current.model.model_copy(update={"enabled": False}),
                     "search": self.current.search.model_copy(update={"enabled": False})})
+        self.model_profiles = self._profiles_for(self.current.model)
+
+    def _profiles_for(self, active):
+        profiles = [active] if active.name else []
+        for profile in self.model_profiles:
+            if profile.profile_key() == active.profile_key():
+                continue
+            # Rotating or clearing the official account key applies to Flash and Pro.
+            if active.official_deepseek() and profile.official_deepseek():
+                profile = profile.model_copy(update={"api_key": active.api_key})
+            profiles.append(profile)
+        return profiles
 
     def _check_file(self):
         info = self.path.lstat()
@@ -217,7 +258,8 @@ class ProviderSettings:
 
     def public(self):
         with self.lock:
-            return {**self.current.public(), "editable": self.path is not None, "warning": self.load_error}
+            return {**self.current.public(), "model_profiles": [p.public() for p in self.model_profiles],
+                    "editable": self.path is not None, "warning": self.load_error}
 
     @staticmethod
     def _key(update, previous):
@@ -227,7 +269,7 @@ class ProviderSettings:
         if update.api_key:
             require(all(32 < ord(c) < 127 for c in update.api_key), "APIKey 格式无效", 400)
             return update.api_key
-        if origin(update.base_url) == origin(previous.base_url) and update.provider == previous.provider:
+        if previous and update.provider == previous.provider and origin(update.base_url) == origin(previous.base_url):
             return previous.api_key
         # Never forward an old credential to a newly selected destination.
         return ""
@@ -235,8 +277,12 @@ class ProviderSettings:
     def preview(self, update):
         with self.lock:
             require(update.revision == self.current.revision, "设置已在另一处更新，请重新载入后再保存。", 409)
+            selected = next((p for p in self.model_profiles if p.profile_key() == update.model.profile_key()), None)
+            if update.model.official_deepseek():
+                # Official root and /v1 use the same credential across model names.
+                selected = next((p for p in self.model_profiles if p.official_deepseek()), None)
             model = ModelService(**update.model.model_dump(exclude={"api_key", "clear_api_key"}),
-                                 api_key=self._key(update.model, self.current.model))
+                                 api_key=self._key(update.model, selected))
             search = SearchService(**update.search.model_dump(exclude={"api_key", "clear_api_key"}),
                                    api_key=self._key(update.search, self.current.search))
             if search.use_model_key:
@@ -244,7 +290,8 @@ class ProviderSettings:
                         "共用密钥仅适用于同一地址的 DeepSeek 模型与搜索。", 400)
             # Clients predating the archive preference save only model/search settings.
             keep_caf = update.keep_original_caf if "keep_original_caf" in update.model_fields_set else self.current.keep_original_caf
-            return Services(revision=self.current.revision + 1, model=model, search=search, keep_original_caf=keep_caf)
+            return Services(revision=self.current.revision + 1, model=model, search=search,
+                            keep_original_caf=keep_caf, speech=self.current.speech)
 
     def commit(self, candidate):
         with self.lock:
@@ -253,11 +300,15 @@ class ProviderSettings:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if self.path.exists() or self.path.is_symlink():
                 self._check_file()
+            profiles = self._profiles_for(candidate.model)
+            # The active model is already persisted by Services itself.
+            inactive = [p.model_dump() for p in profiles if p.profile_key() != candidate.model.profile_key()]
+            encoded = json.dumps({**candidate.model_dump(), "model_profiles": inactive}, ensure_ascii=False, indent=2) + "\n"
+            require(len(encoded.encode("utf-8")) <= 4 * 1024 * 1024, "模型配置列表过大", 409)
             fd, temporary = tempfile.mkstemp(prefix=".providers-", dir=self.path.parent)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as output:
-                    json.dump(candidate.model_dump(), output, ensure_ascii=False, indent=2)
-                    output.write("\n")
+                    output.write(encoded)
                     output.flush()
                     os.fsync(output.fileno())
                 os.replace(temporary, self.path)
@@ -265,4 +316,5 @@ class ProviderSettings:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
             self.current = candidate
+            self.model_profiles = profiles
             self.load_error = ""

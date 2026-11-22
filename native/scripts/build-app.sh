@@ -9,5 +9,8 @@ cp "$task_native_dir/Info.plist" "$task_app_dir/Contents/Info.plist"
 cp "$task_bin_dir/AudioHelper" "$task_app_dir/Contents/MacOS/AudioHelper"
 cp "$task_native_dir/../third_party/cicada/LICENSE" "$task_app_dir/Contents/Resources/Cicada-LICENSE"
 cp "$task_native_dir/../third_party/cicada/UPSTREAM.md" "$task_app_dir/Contents/Resources/Cicada-UPSTREAM.md"
+for task_sample in speech-probe-zh-CN.wav speech-probe-zh-CN.txt; do
+  cp "$task_native_dir/Sources/AudioCore/Resources/$task_sample" "$task_app_dir/Contents/Resources/$task_sample"
+done
 codesign --force --sign - --identifier com.zsjh.audiohelper "$task_app_dir"
 print -r -- "$task_app_dir"

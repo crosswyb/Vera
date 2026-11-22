@@ -12,7 +12,7 @@
 4. 配置 DeepSeek Search 或 Tavily 的地址与独立 Key，测试并保存。
 5. 导入一段测试音频或开始收听。真实会议按场授权；没有云配置也可本机录音与转写。
 
-详细流程、权限及免费分发的系统安全检查见 [安装与首次使用](native/DISTRIBUTION.md)。当前包为本机临时签名，未公证；第二台干净 Mac 的完整安装尚需验收。
+详细流程、权限及系统安全检查见 [安装与首次使用](native/DISTRIBUTION.md)。正式发布包使用 Developer ID 签名并完成 Apple 公证；具体结果见对应的 GitHub Release。第二台干净 Mac 的完整安装仍需验收。
 
 ## 会后资料
 
@@ -37,6 +37,8 @@ python3 -m venv .venv-live
 ```
 
 `requirements-build.lock` 记录验证构建所用的依赖版本。App 产物为 `native/build/ZSJHWorkbench.app`，分发包位于 `native/build/distribution/`；都不提交源码仓库。
+
+上述构建命令产生临时签名的开发包。面向其他用户分发时，按 [正式发布流程](native/RELEASING.md) 对提交后的源码重建、签名、公证和验证，再上传发布附件。`outputs/` 中的现场调试资料不提交。
 
 仅启动本机 Web 后端进行开发：
 

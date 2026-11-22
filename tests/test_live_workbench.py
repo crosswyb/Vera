@@ -504,6 +504,8 @@ class WorkbenchTest(unittest.TestCase):
         runtime.close()
         release.set()
         self.assertTrue(done.wait(2))
+        for future in list(runtime.worker_tasks):
+            future.result(timeout=2)
         self.assertFalse(self.wb.snapshot(self.owner, self.mid)["documents"])
 
     def test_publication_no_clobber_even_when_target_appears_during_save(self):
