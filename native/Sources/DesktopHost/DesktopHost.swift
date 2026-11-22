@@ -68,6 +68,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private let startupSpinner = NSProgressIndicator()
     private let startupExit = NSButton(title: "退出应用", target: nil, action: nil)
     private var startupFailed = false
+    private var checkingForUpdate = false
     private var status = "正在启动…" { didSet { publishNativeState() } }
     private let startItem = NSMenuItem(title: "开始收听", action: nil, keyEquivalent: "")
     private let stopItem = NSMenuItem(title: "停止收听", action: nil, keyEquivalent: "")
@@ -213,6 +214,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         let menu = NSMenu()
         let aboutItem = menu.addItem(withTitle: "关于真实交互", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
+        menu.addItem(withTitle: "检查更新…", action: #selector(checkForUpdate(_:)), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出真实交互", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         rootItem.submenu = menu; appMenu.addItem(rootItem)
@@ -234,6 +236,42 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "真实交互 · Vera"])
+    }
+
+    @objc private func checkForUpdate(_ sender: NSMenuItem) {
+        guard !checkingForUpdate else { return }
+        checkingForUpdate = true
+        sender.title = "正在检查更新…"
+        Task {
+            defer { checkingForUpdate = false; sender.title = "检查更新…" }
+            let alert = NSAlert()
+            var page: URL?
+            do {
+                let release = try await VeraRelease.latest()
+                guard let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+                      let build = Int(current) else { throw VeraRelease.Failure.invalidRelease }
+                if release.build > build {
+                    alert.messageText = "发现新版 Vera"
+                    alert.informativeText = "当前 build \(build)，新版 \(release.tag_name)。请在会议和查证结束后退出应用，将新版拖入“应用程序”并选择替换。会议文件和设置保存在应用之外。"
+                    page = VeraRelease.releasesPage.appendingPathComponent("tag").appendingPathComponent(release.tag_name)
+                } else {
+                    alert.messageText = "当前没有更新"
+                    alert.informativeText = "已安装 build \(build)，最新正式版为 \(release.tag_name)。"
+                }
+            } catch {
+                alert.messageText = "未能检查更新"
+                alert.informativeText = error.localizedDescription
+                page = VeraRelease.releasesPage
+            }
+            if page != nil { alert.addButton(withTitle: "打开发布页"); alert.addButton(withTitle: "稍后") }
+            else { alert.addButton(withTitle: "好") }
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                alert.beginSheetModal(for: window) { response in
+                    if response == .alertFirstButtonReturn, let page { NSWorkspace.shared.open(page) }
+                    done.resume()
+                }
+            }
+        }
     }
 
     private func buildStartupView() {

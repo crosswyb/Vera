@@ -22,6 +22,7 @@ rm -rf "$task_app_dir/Contents/Resources/backend" "$task_app_dir/Contents/Resour
 ditto "$task_backend_dir" "$task_app_dir/Contents/Resources/backend"
 ditto "$task_native_dir/build/ZSJHAudioHelper.app" "$task_app_dir/Contents/Resources/ZSJHAudioHelper.app"
 ditto "$task_native_dir/../third_party" "$task_app_dir/Contents/Resources/ThirdParty"
+cp "$task_native_dir/../LICENSE" "$task_app_dir/Contents/Resources/LICENSE"
 test -s "$task_app_dir/Contents/Resources/ZSJHAudioHelper.app/Contents/Resources/speech-probe-zh-CN.wav"
 task_python="${ZSJH_BUILD_PYTHON:-$task_native_dir/../.venv-live/bin/python}"
 "$task_python" "$task_native_dir/../tools/release_privacy.py" --app "$task_app_dir"

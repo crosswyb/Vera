@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish a verified Vera release to an existing private GitHub repository."""
+"""Publish verified Vera packages to the official repository or a private repository."""
 
 import argparse
 import hashlib
@@ -101,7 +101,7 @@ def main():
     project = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-dir", type=Path, required=True)
-    parser.add_argument("--repo", required=True, help="Existing private owner/repository")
+    parser.add_argument("--repo", required=True, help="Official Vera repository or private owner/repository")
     parser.add_argument("--notes-file", type=Path, required=True)
     arguments = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", arguments.repo):
@@ -135,8 +135,9 @@ def main():
     run(["xcrun", "stapler", "validate", assets[0]])
     run(["spctl", "--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=2", assets[0]])
     repository = json.loads(run(["gh", "repo", "view", arguments.repo, "--json", "visibility"]))
-    if repository.get("visibility") != "PRIVATE":
-        parser.error("Publishing is restricted to private GitHub repositories")
+    visibility = repository.get("visibility")
+    if visibility != "PRIVATE" and not (visibility == "PUBLIC" and arguments.repo.lower() == "crosswyb/vera"):
+        parser.error("Public distribution is limited to the official Vera repository")
     tag = f"v{receipt['version']}-build{receipt['build']}"
     for ref in (tag, "main"):
         remote = run(["gh", "api", f"repos/{arguments.repo}/commits/{ref}", "--jq", ".sha"])
@@ -159,10 +160,10 @@ def main():
         if remote_assets[asset.name].get("digest") != digest:
             raise RuntimeError("An uploaded release asset digest does not match")
     (directory / "delivery-verification.json").write_text(
-        json.dumps({"tag": tag, "commit": head, "private": True,
+        json.dumps({"tag": tag, "commit": head, "private": visibility == "PRIVATE",
                     "assets": sorted(remote_assets), "server_digests_match": True}, indent=2) + "\n"
     )
-    print(f"Published {tag}; four assets verified, private repository confirmed.")
+    print(f"Published {tag}; four assets verified ({visibility}).")
 
 
 if __name__ == "__main__":
