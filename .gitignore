@@ -26,3 +26,5 @@ dist/
 credentials.json
 providers.json
 *.log
+/CLAUDE.md
+/.claude/agents/
