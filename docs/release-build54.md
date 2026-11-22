@@ -36,6 +36,27 @@
 
 正式分发继续使用 Developer ID、安全时间戳、Hardened Runtime、Apple 公证和装订票据。签名、源码追溯和归档校验以随包的 `release-verification.json` 为准；流程见 [发布说明](../native/RELEASING.md)。隐私扫描覆盖源码历史、冻结后端和最终归档；Developer ID 证书身份及第三方署名仍为预期可读取信息。
 
+构建源码提交为 `a97cc7b5d9597387495ca50a28b1d637eab177c0`，记录在包内 `ZSJHSourceRevision`；此后的提交仅补充发布验证文档。
+
+| 最终发布检查 | 结果 |
+| --- | --- |
+| 8 个 Mach-O、内嵌音频 App 和主 App | Developer ID、安全时间戳、Hardened Runtime，严格签名验证通过 |
+| App 公证 | `Accepted`，`7a8a1a30-7d70-4a94-b111-3775aacececc` |
+| DMG 公证 | `Accepted`，`bf4c9b85-1a17-417d-b43d-1969577ab70d` |
+| App 与 DMG 票据、Gatekeeper | 全部通过；ZIP 解包后的 App 同样通过 |
+| 两份归档独立复验 | 18 项通过；App 的 144 个文件与链接完全一致，ZIP 737 项 CRC 校验通过 |
+| 隐私与冻结后端 | 源码完整可达历史、已签名 App、最终 DMG/ZIP 扫描通过；最终挂载包的隔离后端探针通过 |
+| 签名凭据清理 | 临时签名钥匙串已删除 |
+
+后端探针仅使用临时工作区和合成数据，不连接真实模型、搜索或飞书账号。安装包没有包含会议记录、服务 Key 或签名私钥。
+
+## SHA-256
+
+```text
+6c036b5a64a66b8f269c86fb5ccb1e858d1cec385d2f24c78e3f1285c90072bd  Vera-0.1.0-build54-apple-silicon.dmg
+80269255bce19dd07bd62b521eb7e832844526949eba9707a2a7d79dbfbf1aab  Vera-0.1.0-build54-apple-silicon.zip
+```
+
 ## 验证边界
 
 没有重新运行真实麦克风、真实云转写、付费模型或飞书通知；没有第二台干净 Mac。模拟磁盘错误后的封存恢复已验证，真实会议中磁盘耗尽再恢复尚未实测。当前命令行工具缺少 XCTest 模块，不能运行 `swift test`；使用可执行回归覆盖本次 Swift 行为，不能声称 XCTest 通过。长会识别准确率和睡眠、设备切换不属于本轮重新验收范围。
