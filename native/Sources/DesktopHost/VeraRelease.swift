@@ -5,6 +5,7 @@ struct VeraRelease: Decodable {
     let tag_name: String
     let build: Int
     let notes: String
+    let archive: Asset
 
     var page: URL { Self.releasesPage.appendingPathComponent("tag").appendingPathComponent(tag_name) }
 
@@ -12,14 +13,26 @@ struct VeraRelease: Decodable {
         case invalidRelease, http(Int)
         var errorDescription: String? {
             switch self {
-            case .invalidRelease: return "发布信息不完整，请到官方发布页核对。"
-            case let .http(status): return "GitHub 返回 HTTP \(status)，请稍后重试或打开发布页。"
+            case .invalidRelease: return "更新包信息不完整或不可信，请稍后重试。"
+            case let .http(status): return "更新服务返回 HTTP \(status)，请稍后重试。"
             }
         }
     }
 
     private enum CodingKeys: String, CodingKey { case tag_name, draft, prerelease, assets, body }
-    private struct Asset: Decodable { let name: String }
+    struct Asset: Decodable {
+        let id: Int64?
+        let name: String
+        let browser_download_url: URL?
+        let size: Int64?
+        let digest: String?
+
+        var sha256: String { String((digest ?? "").dropFirst(7)) }
+        var downloadURL: URL? {
+            guard let id, id > 0 else { return nil }
+            return URL(string: "https://api.github.com/repos/crosswyb/Vera/releases/assets/\(id)")
+        }
+    }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -28,7 +41,16 @@ struct VeraRelease: Decodable {
               tag_name.range(of: #"^v[0-9]+\.[0-9]+\.[0-9]+-build[1-9][0-9]*$"#, options: .regularExpression) != nil,
               let number = Int(tag_name.components(separatedBy: "-build").last ?? "") else { throw Failure.invalidRelease }
         let expected = "Vera-\(tag_name.dropFirst())-apple-silicon.dmg"
-        guard try values.decode([Asset].self, forKey: .assets).contains(where: { $0.name == expected }) else { throw Failure.invalidRelease }
+        let assets = try values.decode([Asset].self, forKey: .assets)
+        let archiveName = "Vera-\(tag_name.dropFirst())-apple-silicon.zip"
+        guard assets.contains(where: { $0.name == expected }),
+              let zip = assets.first(where: { $0.name == archiveName }),
+              zip.downloadURL != nil,
+              let size = zip.size, size > 0, size <= 1_073_741_824,
+              zip.digest?.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              zip.browser_download_url?.absoluteString == "https://github.com/crosswyb/Vera/releases/download/\(tag_name)/\(archiveName)"
+        else { throw Failure.invalidRelease }
+        archive = zip
         build = number
         notes = String((try values.decodeIfPresent(String.self, forKey: .body) ?? "").prefix(20_000))
     }
@@ -55,14 +77,26 @@ final class VeraUpdateChecker {
     private(set) var latest: VeraRelease?
     private(set) var checkedAt: Date?
     private(set) var failure: String?
+    private(set) var downloading = false
+    private(set) var prepared: URL?
+    private(set) var installing = false
+    private(set) var downloadedBytes: Int64 = 0
+    private(set) var totalBytes: Int64 = 0
+    var installBlockedReason = ""
     private var lastAttemptAt: Date?
     private let fetchLatest: () async throws -> VeraRelease
+    private let prepareUpdate: (VeraRelease, @escaping (Int64, Int64) -> Void) async throws -> URL
     var didChange: (() -> Void)?
+    var didPrepare: (() -> Void)?
 
-    init(version: String, build: Int?, fetchLatest: @escaping () async throws -> VeraRelease = { try await VeraRelease.latest() }) {
+    init(version: String, build: Int?, fetchLatest: @escaping () async throws -> VeraRelease = { try await VeraRelease.latest() },
+         prepareUpdate: @escaping (VeraRelease, @escaping (Int64, Int64) -> Void) async throws -> URL = { release, progress in
+             try await VeraUpdatePackage.prepare(release, progress: progress)
+         }) {
         currentVersion = version
         currentBuild = build
         self.fetchLatest = fetchLatest
+        self.prepareUpdate = prepareUpdate
     }
 
     var available: Bool {
@@ -72,7 +106,10 @@ final class VeraUpdateChecker {
 
     var payload: [String: Any] {
         let state: String
-        if checking { state = "checking" }
+        if installing { state = "installing" }
+        else if downloading { state = "downloading" }
+        else if checking { state = "checking" }
+        else if prepared != nil { state = "ready" }
         else if failure != nil { state = "error" }
         else if latest == nil { state = "idle" }
         else if available { state = "available" }
@@ -81,23 +118,62 @@ final class VeraUpdateChecker {
                 "currentBuild": currentBuild as Any? ?? NSNull(),
                 "latestVersion": latest?.tag_name as Any? ?? NSNull(),
                 "notes": latest?.notes ?? "", "error": failure ?? "",
+                "downloadedBytes": downloadedBytes, "totalBytes": totalBytes,
+                "downloadProgress": totalBytes > 0 ? min(1, Double(downloadedBytes) / Double(totalBytes)) : 0,
+                "installBlockedReason": installBlockedReason,
                 "checkedAt": checkedAt?.timeIntervalSince1970 as Any? ?? NSNull()]
     }
 
     func check(automatically: Bool = false, at now: Date = Date()) async {
-        guard !checking else { return }
+        guard !checking, !downloading, !installing else { return }
         if automatically, let lastAttemptAt, now.timeIntervalSince(lastAttemptAt) < Self.automaticInterval { return }
         lastAttemptAt = now
         checking = true
         failure = nil
         didChange?()
-        defer { checking = false; didChange?() }
         do {
             guard let currentBuild, currentBuild > 0 else { throw VeraRelease.Failure.invalidRelease }
-            latest = try await fetchLatest()
+            let release = try await fetchLatest()
+            if latest?.tag_name != release.tag_name || latest?.archive.digest != release.archive.digest { prepared = nil }
+            latest = release
             checkedAt = now
         } catch {
             failure = error.localizedDescription
         }
+        checking = false
+        didChange?()
+        guard available, prepared == nil, failure == nil, let release = latest else { return }
+        downloading = true
+        downloadedBytes = 0
+        totalBytes = release.archive.size ?? 0
+        didChange?()
+        do {
+            prepared = try await prepareUpdate(release) { [weak self] received, total in
+                Task { @MainActor in
+                    guard let self, self.downloading else { return }
+                    self.downloadedBytes = received
+                    self.totalBytes = total
+                    self.didChange?()
+                }
+            }
+            downloadedBytes = totalBytes
+        } catch {
+            failure = "更新下载或校验失败：\(error.localizedDescription)"
+        }
+        downloading = false
+        didChange?()
+        if prepared != nil { didPrepare?() }
+    }
+
+    func installationStarted() {
+        installing = true
+        failure = nil
+        didChange?()
+    }
+
+    func installationFailed(_ error: Error) {
+        installing = false
+        failure = error.localizedDescription
+        didChange?()
     }
 }

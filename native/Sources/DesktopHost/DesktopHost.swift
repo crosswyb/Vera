@@ -72,6 +72,10 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知版本",
         build: (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String).flatMap(Int.init))
     private var updateTask: Task<Void, Never>?
+    private var updateReadinessTask: Task<Void, Never>?
+    private var updateBackendBlockReason = "正在确认会议与任务状态…"
+    private var updatePromptVisible = false
+    private var updatePromptPending = false
     private let updateItem = NSMenuItem(title: "检查更新…", action: nil, keyEquivalent: "")
     private var status = "正在启动…" { didSet { publishNativeState() } }
     private let startItem = NSMenuItem(title: "开始收听", action: nil, keyEquivalent: "")
@@ -244,12 +248,26 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     @objc private func checkForUpdate(_ sender: NSMenuItem) {
+        if updates.prepared != nil {
+            Task { await promptToInstallUpdate() }
+            return
+        }
         checkForUpdates(showResult: true)
     }
 
     private func startUpdateChecks() {
         guard updateTask == nil else { return }
         updates.didChange = { [weak self] in self?.publishNativeState() }
+        updates.didPrepare = { [weak self] in Task { await self?.promptToInstallUpdate() } }
+        updateReadinessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let self, self.updates.prepared != nil, !self.updates.installing {
+                    await self.refreshUpdateReadiness()
+                    if self.updatePromptPending { await self.promptToInstallUpdate() }
+                }
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            }
+        }
         updateTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, !self.closing else { return }
@@ -266,33 +284,115 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private func checkForUpdates(showResult: Bool) {
-        guard !updates.checking, !closing else { return }
+        guard !updates.checking, !updates.downloading, !updates.installing, !closing else { return }
         Task {
             guard !updates.checking else { return }
             await updates.check()
             guard showResult, !closing else { return }
+            if updates.available, updates.failure == nil { return }
             let alert = NSAlert()
-            var page: URL?
             if let failure = updates.failure {
-                alert.messageText = "未能检查更新"
+                alert.messageText = updates.available ? "更新未完成" : "未能检查更新"
                 alert.informativeText = failure
-                page = VeraRelease.releasesPage
-            } else if let release = updates.latest, updates.available {
-                alert.messageText = "发现新版 Vera"
-                alert.informativeText = "当前 build \(updates.currentBuild ?? 0)，新版 \(release.tag_name)。可在设置 → 通用查看发布说明。请在会议和查证结束后退出应用，将新版拖入“应用程序”并选择替换。"
-                page = release.page
             } else {
                 alert.messageText = "当前没有更新"
                 alert.informativeText = "已安装 build \(updates.currentBuild ?? 0)，最新正式版为 \(updates.latest?.tag_name ?? "未知")。"
             }
-            if page != nil { alert.addButton(withTitle: "打开发布页"); alert.addButton(withTitle: "稍后") }
-            else { alert.addButton(withTitle: "好") }
-            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-                alert.beginSheetModal(for: window) { response in
-                    if response == .alertFirstButtonReturn, let page { NSWorkspace.shared.open(page) }
-                    done.resume()
-                }
+            alert.addButton(withTitle: "好")
+            await alert.beginSheetModal(for: window)
+        }
+    }
+
+    private var updateInstallBlockedReason: String {
+        if activeMeeting != nil || beginningCapture || fileTask != nil || activeOutbox != nil {
+            return "录音、导入或保存尚未完成，请完成后再安装更新。"
+        }
+        if !hostReady { return "会议服务尚未就绪，请稍后重试。" }
+        return updateBackendBlockReason
+    }
+
+    private func refreshUpdateReadiness() async {
+        do {
+            let data = try await request("/live/v2/home")
+            guard let home = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let readiness = home["update_readiness"] as? [String: Any],
+                  let allowed = readiness["can_install"] as? Bool, let reason = readiness["reason"] as? String,
+                  allowed == reason.isEmpty else { throw DesktopError(message: "无法确认会议与任务状态。") }
+            updateBackendBlockReason = reason
+        } catch { updateBackendBlockReason = "无法确认会议与任务状态，请稍后重试。" }
+        publishNativeState()
+    }
+
+    private func promptToInstallUpdate() async {
+        guard !updatePromptVisible, !updates.installing, !closing,
+              let release = updates.latest, let source = updates.prepared, let window else { return }
+        updatePromptPending = true
+        guard window.attachedSheet == nil else { return }
+        updatePromptVisible = true
+        defer { updatePromptVisible = false }
+        await refreshUpdateReadiness()
+        guard !closing, window.attachedSheet == nil else { return }
+        updatePromptPending = false
+        let alert = NSAlert()
+        alert.messageText = "新版 Vera 已下载"
+        let reason = updateInstallBlockedReason
+        alert.informativeText = "\(release.tag_name) 已下载并通过校验。现在安装并重新打开应用吗？会议文件和设置将保留。"
+            + (reason.isEmpty ? "" : "\n\n" + reason)
+        alert.addButton(withTitle: "安装并重新打开")
+        alert.addButton(withTitle: "稍后")
+        alert.buttons[0].isEnabled = reason.isEmpty
+        guard await alert.beginSheetModal(for: window) == .alertFirstButtonReturn else { return }
+        await refreshUpdateReadiness()
+        guard updateInstallBlockedReason.isEmpty else { return }
+        guard updates.latest?.tag_name == release.tag_name,
+              updates.latest?.archive.digest == release.archive.digest,
+              updates.prepared == source else {
+            // A newer download can finish while the confirmation remains open.
+            // Ask about that exact candidate before installing it.
+            updatePromptPending = true
+            return
+        }
+        await installPreparedUpdate()
+    }
+
+    private func installPreparedUpdate() async {
+        guard !updates.installing, !closing, updateInstallBlockedReason.isEmpty,
+              let source = updates.prepared, let release = updates.latest, let previousBuild = updates.currentBuild,
+              let executable = Bundle.main.executableURL else { return }
+        let process = Process()
+        do {
+            let plan = VeraUpdateInstallPlan(source: source, destination: Bundle.main.bundleURL,
+                version: String(release.tag_name.dropFirst().components(separatedBy: "-build")[0]), build: release.build,
+                previousBuild: previousBuild, team: try VeraUpdatePackage.signingTeam(Bundle.main.bundleURL), parentPID: getpid())
+            try plan.preflight()
+            let job = VeraUpdatePackage.cacheDirectory.appendingPathComponent("install-" + UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let planURL = job.appendingPathComponent("plan.json")
+            try JSONEncoder().encode(plan).write(to: planURL, options: .atomic)
+            process.executableURL = executable
+            process.arguments = ["--install-update", planURL.path]
+            process.environment = childEnvironment
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            updates.installationStarted()
+            try process.run()
+            let deadline = Date().addingTimeInterval(10)
+            while !FileManager.default.fileExists(atPath: planURL.appendingPathExtension("ready").path) {
+                guard process.isRunning, Date() < deadline else { throw DesktopError(message: "安装程序未能启动，当前 App 未作更改。") }
+                try await Task.sleep(for: .milliseconds(100))
             }
+            await refreshUpdateReadiness()
+            guard updateInstallBlockedReason.isEmpty else { throw DesktopError(message: updateInstallBlockedReason) }
+            NSApp.terminate(nil)
+        } catch {
+            if process.isRunning { process.terminate() }
+            updates.installationFailed(error)
+            let alert = NSAlert()
+            alert.messageText = "暂时无法安装更新"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "好")
+            alert.runModal()
         }
     }
 
@@ -489,7 +589,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private var canStart: Bool {
-        hostReady && pageLoaded && activeMeeting == nil && !beginningCapture
+        hostReady && pageLoaded && activeMeeting == nil && !beginningCapture && !updates.installing
             && (speechLiveProvider == "apple_local" ? modelState == "installed" : speechLiveReady)
     }
 
@@ -498,7 +598,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private var canImport: Bool {
-        hostReady && pageLoaded && activeMeeting == nil && !beginningCapture
+        hostReady && pageLoaded && activeMeeting == nil && !beginningCapture && !updates.installing
             && (speechFileProvider == "apple_local" ? fileModelState == "installed" : speechFileReady)
     }
 
@@ -510,8 +610,17 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private func publishNativeState() {
-        updateItem.isEnabled = !updates.checking
-        updateItem.title = updates.checking ? "正在检查更新…" : "检查更新…"
+        updates.installBlockedReason = updateInstallBlockedReason
+        updateItem.isEnabled = !updates.checking && !updates.downloading && !updates.installing
+        if updates.downloading {
+            updateItem.title = "正在下载更新…"
+        } else if updates.prepared != nil {
+            updateItem.title = "安装已下载的更新…"
+        } else if updates.checking {
+            updateItem.title = "正在检查更新…"
+        } else {
+            updateItem.title = "检查更新…"
+        }
         startItem.isEnabled = canStart; stopItem.isEnabled = canStop
         modelItem.isEnabled = hostReady
         installItem.isEnabled = hostReady && activeMeeting == nil && !beginningCapture
@@ -602,12 +711,11 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
               isWorkbenchFrame(message.frameInfo), let body = message.body as? [String: Any],
               body.count <= 5, Set(body.keys).isSubset(of: ["action", "meetingId", "fileId", "audioSource", "themePreference", "layoutPreference", "testId"]),
               let action = body["action"] as? String else { return }
+        guard !updates.installing || action == "requestState" else { return }
         switch action {
         case "requestState": publishNativeState()
         case "checkForUpdates": checkForUpdates(showResult: false)
-        case "openUpdateRelease":
-            let page = updates.available ? updates.latest?.page ?? VeraRelease.releasesPage : VeraRelease.releasesPage
-            NSWorkspace.shared.open(page)
+        case "installUpdate": Task { await promptToInstallUpdate() }
         case "refreshSpeechSettings": Task { try? await refreshSpeechConfiguration() }
         case "speechTest":
             guard let test = body["testId"] as? String, validMeetingID(test) else { return }
@@ -1782,7 +1890,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 
     func applicationWillTerminate(_ notification: Notification) {
         closing = true; healthTask?.cancel(); stopWatchdog?.cancel()
-        updateTask?.cancel()
+        updateTask?.cancel(); updateReadinessTask?.cancel()
         outboxTask?.cancel(); speechLeaseTask?.cancel(); fileLease?.revoke()
         fileTask?.cancel()
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "workbench")
@@ -1803,6 +1911,9 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 struct DesktopHostMain {
     @MainActor static func main() {
         signal(SIGPIPE, SIG_IGN)
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--install-update" {
+            exit(VeraUpdateInstallPlan.runHelper(planURL: URL(fileURLWithPath: CommandLine.arguments[2])))
+        }
         let app = NSApplication.shared
         let delegate = DesktopController()
         app.setActivationPolicy(.regular)

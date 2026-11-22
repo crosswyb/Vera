@@ -16,6 +16,8 @@ source = source.split(marker)[0].replace('import AudioCore\n', '')
     source + '\n' + (native / 'scripts/CaptureFinishSmoke.swift').read_text())
 PY
 swiftc -parse-as-library -swift-version 5 -target arm64-apple-macos26.0 \
-  "$task_native_dir"/Sources/AudioCore/*.swift "$task_native_dir/Sources/DesktopHost/VeraRelease.swift" "$task_fixture_dir/CaptureFinishFixture.swift" \
+  "$task_native_dir"/Sources/AudioCore/*.swift "$task_native_dir/Sources/DesktopHost/VeraRelease.swift" \
+  "$task_native_dir/Sources/DesktopHost/VeraUpdatePackage.swift" "$task_native_dir/Sources/DesktopHost/VeraUpdateInstaller.swift" \
+  "$task_fixture_dir/CaptureFinishFixture.swift" \
   -o "$task_fixture_dir/CaptureFinishSmoke"
 "$task_fixture_dir/CaptureFinishSmoke"
