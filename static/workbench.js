@@ -946,9 +946,10 @@
     $('service-model-enabled').checked = model.enabled;
     $('service-model-effort').value = model.reasoning_effort;
     $('service-model-detection').value = model.detection_mode ?? 'fast';
-    $('service-model-tokens').value = model.max_tokens;
+    $('service-model-token-mode').value = model.max_tokens == null ? 'auto' : 'custom';
+    $('service-model-tokens').value = model.max_tokens ?? 32768;
     $('service-model-timeout').value = model.timeout_seconds;
-    $('service-model-token-parameter').value = model.token_parameter;
+    $('service-model-token-parameter').value = model.token_parameter ?? 'auto';
     $('service-model-json').checked = model.json_mode;
     $('service-model-thinking').checked = model.thinking === 'enabled';
     $('service-model-key').value = '';
@@ -966,7 +967,7 @@
     const deepseek = provider === 'deepseek';
     return {provider, name: deepseek ? 'deepseek-flash' : '', base_url: deepseek ? deepSeekURL : 'https://api.openai.com/v1',
       enabled: true, json_mode: deepseek, reasoning_effort: 'default', detection_mode: 'fast', thinking: 'disabled',
-      max_tokens: 8192, timeout_seconds: 180, token_parameter: deepseek ? 'max_tokens' : 'max_completion_tokens'};
+      max_tokens: null, timeout_seconds: 180, token_parameter: 'auto'};
   }
   function matchingKeyDestination(kind) {
     const current = state.serviceSettings?.[kind];
@@ -985,6 +986,10 @@
     $('reload-service-settings').disabled = !owner || busy;
     text($('save-service-settings'), state.settingsBusy ? '处理中…' : '保存模型与搜索设置');
     $('model-thinking-row').hidden = $('service-model-provider').value !== 'deepseek';
+    const automaticTokens = $('service-model-token-mode').value === 'auto';
+    $('service-model-token-limit-field').hidden = automaticTokens;
+    $('service-model-tokens').disabled = automaticTokens;
+    $('service-model-tokens').required = !automaticTokens;
     let shared = $('service-model-provider').value === 'deepseek' && $('service-search-provider').value === 'deepseek';
     try { shared = shared && new URL($('service-model-url').value).origin === new URL($('service-search-url').value).origin; }
     catch { shared = false; }
@@ -1045,7 +1050,8 @@
       json_mode: $('service-model-json').checked, reasoning_effort: $('service-model-effort').value,
       detection_mode: $('service-model-detection').value,
       thinking: $('service-model-thinking').checked ? 'enabled' : 'disabled',
-      max_tokens: Number($('service-model-tokens').value), token_parameter: $('service-model-token-parameter').value,
+      max_tokens: $('service-model-token-mode').value === 'auto' ? null : Number($('service-model-tokens').value),
+      token_parameter: $('service-model-token-parameter').value,
       timeout_seconds: Number($('service-model-timeout').value),
     }, search: {
       provider: $('service-search-provider').value, base_url: $('service-search-url').value.trim(),

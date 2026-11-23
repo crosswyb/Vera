@@ -840,7 +840,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 ZSJH_LIVE_MODEL_PROVIDER=deepseek
                 ZSJH_LIVE_MODEL_NAME=deepseek-flash
                 ZSJH_LIVE_MODEL_THINKING=disabled
-                ZSJH_LIVE_MODEL_MAX_TOKENS=8192
+                ZSJH_LIVE_MODEL_MAX_TOKENS=auto
                 ZSJH_LIVE_MODEL_API_KEY=
                 ZSJH_LIVE_MODEL_REQUEST_LIMIT=0
                 ZSJH_WB_MODEL_REQUEST_LIMIT=unlimited

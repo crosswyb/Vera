@@ -180,7 +180,7 @@ class TextModel:
                 choice = result["choices"][0]
                 answer = choice["message"]["content"]
                 if choice.get("finish_reason") == "length":
-                    metadata = {"max_tokens": payload[self.config.token_parameter], "finish_reason": "length",
+                    metadata = {"max_tokens": payload[self.config.output_token_parameter], "finish_reason": "length",
                                 "request_id": reservation, **usage}
                     self.budget.record(reservation, {**usage, "finish_reason": "length", "max_tokens": metadata["max_tokens"]})
                     code = "output_token_limit" if usage.get("completion_tokens", 0) >= metadata["max_tokens"] else "output_incomplete"
