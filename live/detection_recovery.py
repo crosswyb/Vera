@@ -351,6 +351,23 @@ class DetectionRecovery:
             require(not m['research_paused'] and not self.blocked_reason(m), '请先恢复本场自动查证并检查授权', 409)
             task = self.store._get(db, 'wb_detection_task', tid)
             require(task['meeting_id'] == mid and task['state'] == 'needs_review', '该补偿项无需重试', 409)
+            proposals = [task['proposal']] if task.get('proposal') else [
+                failure['proposal'] for failure in task.get('known_failures', [])]
+            questions = {q['id']: q for q in self._items(db, 'wb_question', mid)}
+            for proposal in proposals:
+                target = proposal.get('question_id')
+                if proposal.get('kind') not in ('revise_question', 'cancel_candidate') or not isinstance(target, str):
+                    continue
+                question = questions.get(target)
+                require(question and question['version'] == proposal.get('expected_version', 1) and not question['basis_stale']
+                        and question['state'] not in {'cancelled', 'paused', 'outcome_unknown'},
+                        '关联问题版本或状态已变化。请打开最新问题核对范围，旧操作不能重试。', 409)
+            current = self._final_utterances(db, m)
+            target_refs = {(ref['segment_id'], ref['revision']) for ref in task['source_refs']}
+            positions = [i for i, s in enumerate(current) if (s['id'], s['revision']) in target_refs]
+            require(positions, '原发言已更正或撤回，请在转写中查看最新版本', 409)
+            context = {j for i in positions for j in range(max(0, i - 6), min(len(current), i + 7))}
+            task['context_refs'] = refs_of([current[j] for j in sorted(context)])
             task.update(state='pending', max_attempts=task['attempts'] + 1, next_at=0, updated_at=time.time())
             self.store._put(db, 'wb_detection_task', tid, task)
             self.clear_detection_service_error(m)

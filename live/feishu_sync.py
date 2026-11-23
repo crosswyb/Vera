@@ -15,6 +15,7 @@ import time
 from contextlib import closing
 
 from live.store import LiveError, require, uid
+from live.source_reader import needs_internal_records, restricted_meeting_context, restrict_public_query
 
 
 SETTING = 'wb_feishu_settings'
@@ -37,7 +38,7 @@ def _settings(db, pid):
 
 def _result_signature(question):
     result = question['result']
-    fields = ('answer', 'brief', 'claims', 'uncertainty', 'evidence_status', 'original_evidence')
+    fields = ('answer', 'brief', 'claims', 'uncertainty', 'evidence_status', 'original_evidence', 'analysis')
     material = {field: result.get(field) for field in fields}
     material['title'] = question['title']
     source_fields = ('id', 'title', 'url', 'published_at', 'read_status', 'content_hash')
@@ -46,6 +47,21 @@ def _result_signature(question):
 
 
 class FeishuSync:
+    def _shareable(self, db, meeting, question):
+        if meeting.get('data_scope') != 'real':
+            return True
+        result = question.get('result') or {}
+        if (question.get('evidence_need') != 'public' or result.get('evidence_status') not in {'supported', 'mixed'}
+                or not result.get('claims') or result.get('meeting_evidence')
+                or needs_internal_records({**question, 'evidence_need': None})
+                or restrict_public_query(question.get('public_query', ''))
+                or restrict_public_query(question.get('title', '')) or question.get('defer_research')):
+            return False
+        segments = [json.loads(row[0]) for row in db.execute(
+            """SELECT data FROM records WHERE kind='wb_segment' AND json_extract(data,'$.meeting_id')=?
+               AND json_extract(data,'$.type')='transcript.final' ORDER BY json_extract(data,'$.event_seq')""", (meeting['id'],))]
+        return not restricted_meeting_context(segments, question.get('source_refs', []))
+
     def __init__(self, store, cli):
         self.store, self.cli = store, cli
         with self.store.transaction() as db:
@@ -96,7 +112,8 @@ class FeishuSync:
     def enqueue_saved(self, db, meeting, question, document):
         pid = meeting['project_id']
         settings = _settings(db, pid)
-        if not settings['enabled'] or document['state'] != 'saved' or document.get('basis_stale') or question.get('basis_stale'):
+        if (not settings['enabled'] or document['state'] != 'saved' or document.get('basis_stale')
+                or question.get('basis_stale') or not self._shareable(db, meeting, question)):
             return
         signature = _result_signature(question)
         refs = dict(doc_id=document['id'], doc_hash=document['hash'], version=document['question_version'],
@@ -139,7 +156,8 @@ class FeishuSync:
         if (not doc or not meeting or not question or meeting['state'] not in {'active', 'ended'}
                 or question['state'] not in {'completed', 'insufficient'} or doc['state'] != 'saved'
                 or question['version'] != job['version'] or question['generation'] != job['generation']
-                or question.get('basis_stale') or doc.get('basis_stale') or doc['hash'] != job['doc_hash']):
+                or question.get('basis_stale') or doc.get('basis_stale') or doc['hash'] != job['doc_hash']
+                or not self._shareable(db, meeting, question)):
             return None
         answer = ((question.get('result') or {}).get('brief') or {}).get('short_answer', '')
         if question['state'] == 'insufficient':

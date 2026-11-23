@@ -189,6 +189,8 @@ class QuestionDecision(Contract):
     source_refs: list[SourceRef] = Field(default_factory=list, max_length=12)
     public_query: str = Field(default="", max_length=128)
     scope_changed: bool = True
+    recheck_meeting: bool = False
+    defer_research: bool = False
     evidence_need: Literal['public', 'internal', 'mixed', 'explanation'] | None = None
     grounding_quote: str = Field(default="", max_length=500)
     grounding_quote_id: str = Field(default="", max_length=120)
@@ -251,13 +253,45 @@ class SearchDecision(Contract):
         return self
 
 
+class AnalysisItem(Contract):
+    text: str = Field(min_length=1, max_length=500)
+    claim_indices: list[Annotated[int, Field(ge=1, le=12)]] = Field(default_factory=list, max_length=3)
+
+
+class AnalysisSection(Contract):
+    layout: Literal["paragraphs", "steps", "points"]
+    items: list[AnalysisItem] = Field(min_length=1, max_length=8)
+
+
+class MeetingReply(Contract):
+    status: Literal["answered", "partial", "follow_up", "missing"]
+    short_answer: str = Field(min_length=1, max_length=360)
+    gap: str = Field(default="", max_length=180)
+    evidence_ids: list[int] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def support_required(self):
+        if self.status != "missing" and not self.evidence_ids:
+            raise ValueError("meeting replies require transcript evidence")
+        if self.status in {"partial", "missing"} and not self.gap.strip():
+            raise ValueError("partial or missing replies must name the gap")
+        return self
+
+
+class MeetingEvidence(SourceRef):
+    quote: str = Field(min_length=1, max_length=500)
+
+
 class ResearchAnswer(Contract):
     answer: str = Field(min_length=1, max_length=6000)
     claims: list[Claim] = Field(default_factory=list, max_length=12)
     uncertainty: list[str] = Field(default_factory=list, max_length=12)
-    evidence_status: Literal["supported", "mixed", "insufficient", "model_explanation"]
+    evidence_status: Literal["supported", "mixed", "insufficient", "model_explanation", "meeting_context"]
     # Older saved answers remain readable without a generated brief.
     brief: AnswerBrief | None = None
+    analysis: list[AnalysisSection] | None = Field(default=None, min_length=1, max_length=4)
+    meeting_evidence: list[MeetingEvidence] | None = Field(default=None, max_length=4)
+    meeting_resolution: Literal["answered", "partial", "follow_up", "missing"] | None = None
 
 
 class CitationChoice(Contract):

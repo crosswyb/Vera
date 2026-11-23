@@ -12,12 +12,12 @@ from collections import Counter
 from pathlib import Path
 
 from live.artifact_writer import digest, render_document
-from live.meeting_archive import MeetingArchive
+from live.meeting_archive import MeetingArchive, distinct_utterances
 from live.meeting_storage import MeetingStorage
 from live.original_evidence import target_for, target_key, with_original_evidence
 from live.output_validation import failure_message, output_presentation
 from live.failure_diagnostics import historical_question_details, read_historical_ledger, request_details
-from live.source_reader import is_grounded_explanation, needs_internal_records
+from live.source_reader import is_grounded_explanation, needs_internal_records, relevance_terms, restricted_meeting_context, restrict_public_query, validate_result
 from live.detection_recovery import DetectionRecovery
 from live.speech_workbench import CAPTURE_SAVED, SpeechWorkbench
 from live.store import LiveError, require, uid
@@ -45,13 +45,15 @@ def coordinator_lane(meeting):
 def research_priority(question):
     if question.get("manual_requested") or question.get("priority", 0):
         return 0
-    return 1 if question.get("request_kind") == "explicit" else 2
+    return 1 if question.get("request_kind") == "explicit" and not question.get('defer_research') else 2
 
 
 def wait_for_public_query(meeting, question):
     """Do not queue an external lookup without a permissible search term."""
     if (meeting['data_scope'] == 'real' and question['state'] in UNSTARTED
-            and question.get('evidence_need') in {'public', 'mixed'} and not question['public_query']):
+            and question.get('evidence_need') in {'public', 'mixed'}
+            and (not question['public_query'] or (question.get('public_query_origin') == 'model'
+                 and restrict_public_query(question['public_query'])))):
         question.update(state='needs_query', stage='请补充允许公开发送的检索词，再开始查证')
 
 
@@ -546,7 +548,8 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                         'epoch': m['transcript_revision_epoch'], 'segment_id': sid, 'revision': value.revision,
                     }])[-64:]
                     for q in self._items(db, "wb_question", mid):
-                        if any(ref["segment_id"] == sid for ref in q["source_refs"]):
+                        answer_refs = (q.get("result") or {}).get("meeting_evidence", [])
+                        if any(ref["segment_id"] == sid for ref in q["source_refs"] + answer_refs):
                             q.update(state="needs_review", generation=q["generation"] + 1, basis_stale=True,
                                      stage="依据已更正，请确认问题范围", updated_at=time.time())
                             self.store._put(db, "wb_question", q["id"], q)
@@ -597,10 +600,10 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
             s = self.store._get(db, "wb_segment", m["id"] + ":" + ref["segment_id"])
             require(s["revision"] == ref["revision"] and s["type"] == "transcript.final", "依据发言已被更正或撤回", 409)
 
-    def _discussion_context(self, db, meeting, question):
+    def _discussion_context(self, db, meeting, question, *, segments=None):
         """Pin relevant final utterances to this run without sending the whole meeting."""
-        segments = sorted((s for s in self._items(db, "wb_segment", meeting["id"])
-                           if s["type"] == "transcript.final"), key=lambda s: s["event_seq"])
+        if segments is None:
+            segments = self._final_utterances(db, meeting)
         basis_ids = {r["segment_id"] for r in question["source_refs"]}
         positions = [i for i, s in enumerate(segments) if s["id"] in basis_ids]
         if not positions:
@@ -614,12 +617,31 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
             is_basis = segment["id"] in basis_ids
             limit = basis_limit if is_basis else 1000
             context.append({"segment_id": segment["id"], "revision": segment["revision"],
-                            "text": segment["text"][:limit], "is_basis": is_basis,
+                            "text": segment["text"][:limit], "is_basis": is_basis, "event_seq": segment["event_seq"],
                             "truncated": len(segment["text"]) > limit})
         return context
 
+    def _final_utterances(self, db, meeting):
+        return sorted((s for s in self._items(db, "wb_segment", meeting["id"])
+                       if s["type"] == "transcript.final"), key=lambda s: s["event_seq"])
+
+    def _related_utterances(self, question, segments, context):
+        terms = relevance_terms(question['title'] + ' ' + (question.get('grounding_quote') or ''))
+        used = {s['segment_id'] for s in context}
+        matches = []
+        for s in segments:
+            if s['id'] in used:
+                continue
+            rank = len(terms & relevance_terms(s['text']))
+            if rank:
+                matches.append((rank, s['event_seq'], s))
+        return [{'segment_id': s['id'], 'revision': s['revision'], 'event_seq': s['event_seq'],
+                 'text': s['text'][:1000], 'truncated': len(s['text']) > 1000}
+                for _, _, s in sorted(matches, key=lambda row: row[:2], reverse=True)[:5]]
+
     def _new_question(self, db, m, title, refs, origin="manual", public_query="", candidate=False,
-                      original_target=None, anchor_ref=None, evidence_need=None, grounding=None, web_search_requested=False):
+                      original_target=None, anchor_ref=None, evidence_need=None, grounding=None, web_search_requested=False,
+                      defer_research=False):
         require(m["state"] == "active" or (origin == "coordinator" and m["state"] == "ended"), "会议已结束", 409)
         self._refs(db, m, refs)
         title = title.strip()
@@ -648,6 +670,7 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
         q = {"id": uid("question"), "meeting_id": m["id"], "project_id": m["project_id"], "title": title,
              "original_title": title, "version": 1, "generation": 1, "state": state, "stage": "等待研究",
              "origin": origin, "manual_requested": origin == "manual", "request_kind": "inferred" if candidate else "explicit",
+             "defer_research": defer_research,
              "source_refs": refs, "public_query": public_query.strip(),
              "public_query_origin": "model" if public_query.strip() and origin == "coordinator" else "owner" if public_query.strip() else "", "priority": 0,
              "created_at": time.time(), "updated_at": time.time(), "basis_stale": False,
@@ -883,6 +906,15 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                     self.store._put(db, "wb_question", q["id"], q)
                     continue
                 self._refs(db, m, q["source_refs"])
+                segments = self._final_utterances(db, m)
+                restricted = m['data_scope'] == 'real' and restricted_meeting_context(segments, q['source_refs'])
+                if (q.get('public_query_origin') == 'model' and not q.get('web_search_requested')
+                        and not needs_internal_records(q) and (restricted or (
+                            m['data_scope'] == 'real' and restrict_public_query(q['public_query'])))):
+                    q.update(state='needs_query', stage='请核对并填写允许公开发送的检索词')
+                    q.pop('progress', None)
+                    self.store._put(db, "wb_question", q["id"], q)
+                    continue
                 schedule["priority_streak"] = min(3, schedule["priority_streak"] + 1) if research_priority(q) < 2 else 0
                 schedule["realtime_streak"] = min(3, schedule.get("realtime_streak", 0) + 1) if coordinator_lane(m) == "realtime" else 0
                 self.store._put(db, "wb_schedule", principal["project_id"], schedule)
@@ -892,7 +924,12 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                 self.store._put(db, "wb_question", q["id"], q)
                 self._event(db, m, "research.started", {"question_id": q["id"]})
                 self._save(db, m)
-                return {"meeting": m, "question": {**q, "discussion_context": self._discussion_context(db, m, q)}}
+                context = self._discussion_context(db, m, q, segments=segments)
+                local = needs_internal_records(q) and not q.get('web_search_requested')
+                related = self._related_utterances(q, segments, context) if local else []
+                return {"meeting": m, "question": {**q, "discussion_context": context or (related[:3] if local else []),
+                                                    "related_context": related if context else related[3:],
+                                                    "restricted_context": restricted}}
             return None
 
     def blocked_reason(self, meeting, question=None):
@@ -937,13 +974,25 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
         prompts, credentials and model reasoning are never progress payloads.
         """
         with self.store.transaction() as db:
-            q, _ = self._valid_work(db, principal, work)
+            q, m = self._valid_work(db, principal, work)
             if kind == 'model_dispatch_check':
+                require(not self.blocked_reason(m, q), "查证授权已变更", 403)
+                if needs_internal_records(q) and not q.get('web_search_requested'):
+                    refs = work['question'].get('discussion_context', []) + work['question'].get('related_context', [])
+                    self._refs(db, m, refs)
                 return
             p = q.setdefault("progress", {"events": [], "sources": []})
             now = time.time()
             p["updated_at"] = now
-            if kind == "search_query":
+            if kind == 'verified_brief':
+                result = validate_result(details)
+                by_id = {source['id']: source for source in result['sources']}
+                p['verified_brief'] = {'text': result['brief']['short_answer'], 'caveat': result['brief']['caveat'],
+                    'sources': [{'url': by_id[c['source_id']]['url'], 'title': by_id[c['source_id']]['title'],
+                                 'quote': c['quote']} for c in result['claims'][:2]]}
+                self._event(db, m, 'research.brief_ready', {'question_id': q['id'], 'version': q['version']})
+                self._save(db, m)
+            elif kind == "search_query":
                 p["query"] = str(details.get("query", ""))[:128]
             elif kind == "sources_ready":
                 from live.source_reader import source_url
@@ -1004,12 +1053,16 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
         return q, m
 
     def finish(self, principal, work, result):
-        from live.source_reader import validate_result
         result = validate_result(result)
         with self.store.transaction() as db:
             q, m = self._valid_work(db, principal, work)
+            refs = result.get('meeting_evidence', [])
+            self._refs(db, m, refs)
+            for ref in refs:
+                segment = self.store._get(db, 'wb_segment', m['id'] + ':' + ref['segment_id'])
+                require(ref['quote'] in segment['text'], '会中引文未在转写中找到', 409)
             result = with_original_evidence(q, result)
-            q.update(state="completed" if result["evidence_status"] in {"supported", "mixed", "model_explanation"} else "insufficient",
+            q.update(state="insufficient" if result["evidence_status"] == "insufficient" else "completed",
                      stage="publishing", result=result, error=None, error_details=None, updated_at=time.time())
             if q.get("progress"):
                 q["progress"].update(finished_at=time.time(), updated_at=time.time())
@@ -1250,6 +1303,14 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                     size += len(s["text"])
                     new_size += len(s["text"])
                 cursor = batch[-1]["event_seq"] if len(batch) < len(unread) else m["semantic_seq"]
+                if batch and m['mode'] != 'demo':
+                    kept = {s['id'] for s in distinct_utterances(segments)}
+                    context = [s for s in context if s['id'] in kept]
+                    batch = [s for s in batch if s['id'] in kept]
+                    if not batch:
+                        m.update(coordinator_cursor=cursor, coordinator_state='pending' if m['semantic_seq'] > cursor else 'idle')
+                        self._save(db, m)
+                        continue
                 if m["coordinator_state"] == "retry_wait":
                     self._event(db, m, "coordinator.retrying", {"attempt": retry["attempts"], "max_attempts": len(COORDINATOR_RETRY_DELAYS)})
                     retry["state"] = "running"
@@ -1325,7 +1386,7 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                 query = decision.public_query if m["data_scope"] == "synthetic" or m.get("permissions", {}).get("auto_search") else ""
                 created = self._new_question(db, m, decision.title, refs, origin="coordinator", public_query=query,
                     candidate=decision.kind == "candidate", original_target=target, anchor_ref=anchor,
-                    evidence_need=decision.evidence_need, grounding=grounding)
+                    evidence_need=decision.evidence_need, grounding=grounding, defer_research=decision.defer_research)
                 if created["id"] not in known_questions:
                     progress += 1
                     known_questions.add(created["id"])
@@ -1352,6 +1413,22 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                                 "范围未变的补充不能替换问题或检索词", 400)
                         require(not target or target_key(target_for({**q, "original_target": target})) == target_key(target_for(q)),
                                 "范围未变的补充不能替换原文目标", 400)
+                        if (decision.recheck_meeting and q.get('evidence_need') == decision.evidence_need == 'internal'
+                                and not q.get('web_search_requested') and q['state'] in {'running', 'completed', 'insufficient'}
+                                and anchor not in q['source_refs']):
+                            q['history'].append({k: q[k] for k in ('title', 'version', 'result', 'source_refs', 'public_query')})
+                            origin = q.get('anchor_ref') or q['source_refs'][0]
+                            combined = q['source_refs'] + [ref for ref in refs if ref not in q['source_refs']]
+                            recent = [ref for ref in combined if ref != origin][-11:]
+                            q.update(version=q['version'] + 1, generation=q['generation'] + 1, source_refs=[origin, *recent],
+                                     last_mention_refs=refs, state='queued', stage='核对新的会中证据',
+                                     result=None, error=None, error_details=None, updated_at=time.time())
+                            q.pop('progress', None)
+                            refresh_index = self._mark_document_stale(db, q) or refresh_index
+                            self.store._put(db, 'wb_question', q['id'], q)
+                            self._event(db, m, 'question.meeting_evidence_added', {'question_id': q['id'], 'source_refs': refs})
+                            progress += 1
+                            continue
                         progress += self._mention_question(db, m, q, refs, decision.evidence_need, grounding, query)
                         continue
                     query = decision.public_query if m["data_scope"] == "synthetic" or m.get("permissions", {}).get("auto_search") else ""
