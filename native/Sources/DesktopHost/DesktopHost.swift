@@ -720,7 +720,10 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         case "requestState": publishNativeState()
         case "checkForUpdates": checkForUpdates(showResult: false)
         case "openUpdateRelease":
-            if updates.available, let release = updates.latest { openExternal(release.page) }
+            if updates.failure != nil {
+                let page = updates.available ? updates.latest?.page : nil
+                openExternal(page ?? VeraRelease.releasesPage)
+            }
         case "installUpdate": Task { await promptToInstallUpdate() }
         case "refreshSpeechSettings": Task { try? await refreshSpeechConfiguration() }
         case "speechTest":

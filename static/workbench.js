@@ -920,7 +920,7 @@
     $('check-updates').disabled = !desktop || !update || busy;
     text($('check-updates'), checking ? '正在检查…'
       : failed && ['download', 'archive'].includes(failureStage) ? '重试下载' : '检查更新');
-    $('open-update-release').hidden = !desktop || !available || (!failed && !update?.error);
+    $('open-update-release').hidden = !desktop || (!failed && !update?.error);
     $('install-update').hidden = !desktop || !ready && !installing;
     $('install-update').disabled = !desktop || !ready || Boolean(blockedReason);
     text($('install-update'), installing ? '正在安装…' : '安装并重新打开');

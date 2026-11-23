@@ -123,6 +123,24 @@ struct ReleaseCheckSmoke {
         candidate = try release(59)
         await rejected.check()
         try require(validations == 2 && rejected.prepared != nil, "A new release did not clear the previous rejection")
+        var temporaryFailures = 0
+        let recovered = VeraUpdateChecker(version: "0.1.0", build: 57, fetchLatest: {
+            temporaryFailures += 1
+            if temporaryFailures == 1 { throw URLError(.timedOut) }
+            return newer
+        }, prepareUpdate: { _, _, _ in URL(fileURLWithPath: "/tmp/synthetic-update.app") })
+        await recovered.check(automatically: true)
+        try require(temporaryFailures == 2 && recovered.prepared != nil && recovered.failure == nil,
+                    "One version check timeout should recover without a user action")
+        var persistentFailures = 0
+        let unavailable = VeraUpdateChecker(version: "0.1.0", build: 57, fetchLatest: {
+            persistentFailures += 1
+            throw URLError(.timedOut)
+        })
+        await unavailable.check(automatically: true)
+        try require(persistentFailures == 2 && unavailable.payload["failureStage"] as? String == "check",
+                    "A persistent timeout should stop after one recovery attempt")
+        print("PASS: a temporary check timeout recovers automatically, and a persistent timeout stops after two requests")
         print("PASS: release validation, automatic interval, manual retry, failed refresh, older release, and shared requests")
         if CommandLine.arguments.contains("--live") {
             let live = try await VeraRelease.latest()

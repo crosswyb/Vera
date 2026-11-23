@@ -107,6 +107,7 @@ Object.assign(update, {state:'error', failureStage:'check', error:'请求超时'
 render();
 assert.match($('update-status').textContent, /未能检查更新.*请求超时/);
 assert.equal($('check-updates').disabled, false);
+assert.equal($('open-update-release').hidden, false);
 desktop = false;
 Object.assign(update, {state:'ready', available:true});
 render();
@@ -116,6 +117,7 @@ assert.equal($('update-available').hidden, true);
 assert.equal($('install-update').hidden, true);
 assert.equal($('install-update').disabled, true);
 assert.equal($('update-download').hidden, true);
+assert.equal($('open-update-release').hidden, true);
 """
         subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')], check=True)
 

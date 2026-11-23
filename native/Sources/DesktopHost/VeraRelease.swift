@@ -65,6 +65,28 @@ struct VeraRelease: Decodable {
         guard http.statusCode == 200 else { throw Failure.http(http.statusCode) }
         return try JSONDecoder().decode(VeraRelease.self, from: data)
     }
+
+    /// Give a temporary transport failure one more attempt within this check.
+    static func retryNetworkRequest<T>(_ attempt: () async throws -> T) async throws -> T {
+        do { return try await attempt() }
+        catch {
+            guard isTemporaryNetworkFailure(error) else { throw error }
+            try await Task.sleep(for: .seconds(1))
+            return try await attempt()
+        }
+    }
+
+    private static func isTemporaryNetworkFailure(_ error: Error) -> Bool {
+        if case Failure.http(let status) = error {
+            return [408, 500, 502, 503, 504].contains(status)
+        }
+        switch (error as? URLError)?.code {
+        case .timedOut, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .notConnectedToInternet:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// The menu and workbench share one result and one in-flight request.
@@ -141,7 +163,7 @@ final class VeraUpdateChecker {
         didChange?()
         do {
             guard let currentBuild, currentBuild > 0 else { throw VeraRelease.Failure.invalidRelease }
-            let release = try await fetchLatest()
+            let release = try await VeraRelease.retryNetworkRequest(fetchLatest)
             if latest?.tag_name != release.tag_name || latest?.archive.digest != release.archive.digest {
                 prepared = nil
                 rejectedArchiveMessage = nil
@@ -185,7 +207,7 @@ final class VeraUpdateChecker {
             prepared = try await prepareUpdate(release, { [weak self] received, total in
                 Task { @MainActor in
                     guard let self, self.prepareStage == .downloading else { return }
-                    self.downloadedBytes = max(self.downloadedBytes, received)
+                    self.downloadedBytes = received
                     self.totalBytes = total
                     self.didChange?()
                 }

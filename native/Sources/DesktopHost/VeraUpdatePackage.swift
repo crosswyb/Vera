@@ -176,6 +176,14 @@ final class VeraArchiveDownload: NSObject, URLSessionDownloadDelegate, @unchecke
 
     static func fetch(_ url: URL, to destination: URL, expectedSize: Int64,
                       progress: @escaping (Int64, Int64) -> Void) async throws {
+        try await VeraRelease.retryNetworkRequest {
+            try await fetchOnce(url, to: destination, expectedSize: expectedSize, progress: progress)
+        }
+    }
+
+    private static func fetchOnce(_ url: URL, to destination: URL, expectedSize: Int64,
+                                  progress: @escaping (Int64, Int64) -> Void) async throws {
+        progress(0, expectedSize)
         let delegate = VeraArchiveDownload(destination: destination, expectedSize: expectedSize, progress: progress)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
