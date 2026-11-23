@@ -73,7 +73,7 @@ def render_transcript(meeting, segments):
         lines += ["本场没有已确认的转录文字。请检查录音与识别状态；此文件不代表识别成功。", ""]
     for index, s in enumerate(segments, 1):
         source = "文字补充" if s["capture_epoch"] == "manual" else SOURCE_LABELS[s["source"]]
-        service = {"apple_local": "Apple 中文识别", "dashscope": "阿里云百炼", "deepseek": "DeepSeek"}
+        service = {"apple_local": "Apple 中文识别", "dashscope": "阿里云百炼", "deepseek": "DeepSeek 官方 ASR"}
         label = service.get(s.get("provider"), "Apple 中文识别") if s["capture_epoch"] != "manual" else "手动"
         lines += [f"## S{index:04d} · {clock(s.get('audio_start_ms'))} · {source}", "",
                   f"录音段：{s['capture_epoch']} · 识别服务：{label} · 识别时间：{s.get('occurred_at', '')}", "", s["text"], ""]

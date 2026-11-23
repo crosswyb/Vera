@@ -59,6 +59,28 @@ class MeetingSearchTest(unittest.TestCase):
         self.assertEqual(self.search("   ").status_code, 400)
         self.assertEqual(self.search("x" * 201).status_code, 400)
 
+    def test_search_pages_each_result_type(self):
+        with self.store.transaction() as db:
+            for i in range(25):
+                segment = {"meeting_id": self.mid, "segment_id": f"page-{i}", "revision": 1,
+                           "event_seq": i, "type": "transcript.final", "text": "分页关键词"}
+                self.store._put(db, "wb_segment", f"{self.mid}:page-{i}", segment)
+        first = self.client.get(f"/live/v2/meetings/{self.mid}/search",
+                                query_string={"q": "分页关键词"}, headers=self.headers).get_json()
+        second = self.client.get(f"/live/v2/meetings/{self.mid}/search",
+                                 query_string={"q": "分页关键词", "segment_offset": 20},
+                                 headers=self.headers).get_json()
+        self.assertEqual(first["segment_total"], 25)
+        self.assertTrue(first["more_segments"])
+        self.assertEqual(len(second["segments"]), 5)
+        self.assertFalse(second["more_segments"])
+        self.assertEqual(second["segments"][0]["event_seq"], 4)
+
+    def test_search_rejects_invalid_paging_position(self):
+        response = self.client.get(f"/live/v2/meetings/{self.mid}/search",
+                                   query_string={"q": "关键词", "segment_offset": -1}, headers=self.headers)
+        self.assertEqual(response.status_code, 400)
+
     def test_search_is_confined_to_authorized_meeting(self):
         other = self.wb.create(self.owner, NewMeeting(title="另一次会议", data_scope="synthetic"))["id"]
         self.wb.utterance(self.owner, other, Utterance(segment_id="other", text="仅在另一会议的工单"))

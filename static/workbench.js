@@ -27,11 +27,15 @@
   function syncMeetingPanels() {
     const grid = $('work-grid');
     const reading = grid.dataset.mobilePanel === 'results';
+    const searching = grid.dataset.leftPane === 'search';
+    const searchDetail = searching && reading;
     const wide = wideMeeting();
     const triple = layoutPreference === 'b' && window.matchMedia('(min-width:1201px)').matches;
-    grid.dataset.layoutMode = triple ? 'triple' : wide ? reading ? 'reading' : 'overview' : 'single';
-    $('questions-panel').hidden = reading && !wide;
-    $('results-panel').hidden = !(reading || triple);
+    grid.dataset.layoutMode = searchDetail ? 'search-detail' : triple ? 'triple' : wide ? reading ? 'reading' : 'overview' : 'single';
+    $('questions-panel').hidden = (reading && !wide) || searchDetail;
+    $('results-panel').hidden = searchDetail ? false : !(reading || triple);
+    const searchPanel = $('meeting-search-panel');
+    if (searchPanel) searchPanel.hidden = !searching;
   }
   function applyLayout(value = layoutPreference, persist = false) {
     layoutPreference = layoutValues.has(value) ? value : 'a';
@@ -60,8 +64,9 @@
     storageSettings: null, storageRequest: null, storageRefreshPending: false, storageError: '',
     clearModelKey: false, clearSearchKey: false, manageTarget: null, deletionReady: false,
     snapshotReceivedAt: 0, serverOffset: 0, transcriptHistory: null, transcriptNavigationSequence: 0, returnNote: null,
+    searchReturn: false,
   };
-  const meetingSearch = {timer: null, controller: null, sequence: 0, previousFocus: null};
+  const meetingSearch = {timer: null, controller: null, sequence: 0, previousFocus: null, full: null, preview: null};
   applyLayout();
   const feishu = window.createFeishuSettings({api, state, $, element, text, safeURL});
   const speech = window.createSpeechSettings({api, state, $, text, nativeAvailable, postNative, time, audioTime, renderRuntime:renderSpeechRuntime});
@@ -367,6 +372,7 @@
     const find = () => [...$('transcript-list').children].find(row => row.dataset.segmentId === segment.segment_id);
     if (!current()) return;
     $('follow-transcript').checked = false;
+    state.searchReturn = false;
     setMeetingTab('transcript');
     if (!find()) {
       const page = await api(`/live/v2/meetings/${encodeURIComponent(mid)}/segments?before=${segment.event_seq + 1}`);
@@ -386,6 +392,108 @@
       row.scrollIntoView({block: 'center'});
     }
   }
+  function fullSearchFromResult(query, result) {
+    return {query, segments: [...result.segments], questions: [...result.questions],
+      segmentOffset: result.segments.length, questionOffset: result.questions.length,
+      segmentTotal: result.segment_total ?? result.segments.length,
+      questionTotal: result.question_total ?? result.questions.length,
+      moreSegments: Boolean(result.more_segments), moreQuestions: Boolean(result.more_questions),
+      filter: 'all', loading: false};
+  }
+  function searchResultButton(row, query, mid, full = false) {
+    const button = element('button', full ? 'meeting-search-full-hit' : 'meeting-search-hit');
+    button.type = 'button';
+    if (full) button.append(element('span', 'meeting-search-full-kind', row.segment_id ? '转写' : '查证问题'));
+    button.append(searchExcerpt(row.text || row.title, query), element('span', full ? 'meeting-search-full-meta' : 'meeting-search-meta',
+      row.segment_id ? `${sources[row.source] || '发言'} · ${time(segmentTime(row))}` : questionStates[row.state] || row.state));
+    button.addEventListener('click', () => perform(button, async () => {
+      if (row.segment_id) {
+        closeMeetingSearch();
+        await locateSearchSegment(row, mid);
+      } else if (mid === state.meetingId) {
+        state.searchReturn = full;
+        closeMeetingSearch();
+        await selectMeeting(mid, row.id);
+        $('question-title').tabIndex = -1;
+        $('question-title').focus({preventScroll: true});
+      }
+    }));
+    return button;
+  }
+  function renderFullMeetingSearch() {
+    const full = meetingSearch.full;
+    if (!full) return;
+    text($('meeting-search-query'), `搜索“${full.query}”`);
+    for (const button of $('meeting-search-filters').querySelectorAll('button')) {
+      const filter = button.dataset.searchFilter;
+      const count = filter === 'segments' ? full.segmentTotal : filter === 'questions' ? full.questionTotal : full.segmentTotal + full.questionTotal;
+      text(button.querySelector('span'), count);
+      button.setAttribute('aria-pressed', String(filter === full.filter));
+    }
+    const groups = full.filter === 'segments' ? [['转写', full.segments, full.moreSegments]]
+      : full.filter === 'questions' ? [['查证问题', full.questions, full.moreQuestions]]
+      : [['转写', full.segments, full.moreSegments], ['查证问题', full.questions, full.moreQuestions]];
+    const list = $('meeting-search-full-list');
+    list.replaceChildren();
+    let loaded = 0;
+    for (const [label, rows] of groups) {
+      if (!rows.length) continue;
+      loaded += rows.length;
+      const section = element('section', 'meeting-search-full-group');
+      section.append(element('h3', '', label));
+      for (const row of rows) section.append(searchResultButton(row, full.query, state.meetingId, true));
+      list.append(section);
+    }
+    if (!loaded) empty(list, '本场没有匹配结果，可以换个关键词。');
+    const loadedCount = full.filter === 'segments' ? full.segments.length : full.filter === 'questions' ? full.questions.length : full.segments.length + full.questions.length;
+    const total = full.filter === 'segments' ? full.segmentTotal : full.filter === 'questions' ? full.questionTotal : full.segmentTotal + full.questionTotal;
+    text($('meeting-search-count'), total ? `已加载 ${loadedCount} / ${total} 条结果` : '没有匹配结果');
+    const more = full.filter === 'segments' ? full.moreSegments : full.filter === 'questions' ? full.moreQuestions : full.moreSegments || full.moreQuestions;
+    $('meeting-search-load-more').hidden = !more;
+    $('meeting-search-load-more').disabled = full.loading;
+    text($('meeting-search-full-status'), full.loading ? '正在加载更多结果…' : total ? '结果来自本场会议的全部已保存转写和查证问题。' : '');
+  }
+  async function loadMoreMeetingSearch() {
+    const full = meetingSearch.full;
+    if (!full || full.loading) return;
+    const more = full.filter === 'segments' ? full.moreSegments : full.filter === 'questions' ? full.moreQuestions : full.moreSegments || full.moreQuestions;
+    if (!more) return;
+    full.loading = true;
+    renderFullMeetingSearch();
+    try {
+      const result = await api(`/live/v2/meetings/${encodeURIComponent(state.meetingId)}/search?q=${encodeURIComponent(full.query)}&segment_offset=${full.segmentOffset}&question_offset=${full.questionOffset}`);
+      if (meetingSearch.full !== full) return;
+      full.segments.push(...result.segments);
+      full.questions.push(...result.questions);
+      full.segmentOffset += result.segments.length;
+      full.questionOffset += result.questions.length;
+      full.segmentTotal = result.segment_total ?? full.segmentTotal;
+      full.questionTotal = result.question_total ?? full.questionTotal;
+      full.moreSegments = Boolean(result.more_segments);
+      full.moreQuestions = Boolean(result.more_questions);
+    } catch (error) {
+      if (meetingSearch.full === full) notice(error.message, true);
+    } finally {
+      if (meetingSearch.full === full) { full.loading = false; renderFullMeetingSearch(); }
+    }
+  }
+  async function openFullMeetingSearch() {
+    const query = $('library-search').value.trim();
+    if (!query || state.route !== 'meeting' || !state.snapshot) return;
+    closeMeetingSearch();
+    const preview = meetingSearch.preview;
+    if (preview?.query === query) meetingSearch.full = fullSearchFromResult(query, preview.result);
+    else {
+      try {
+        const result = await api(`/live/v2/meetings/${encodeURIComponent(state.meetingId)}/search?q=${encodeURIComponent(query)}`);
+        meetingSearch.full = fullSearchFromResult(query, result);
+      } catch (error) { notice(error.message, true); return; }
+    }
+    state.searchReturn = false;
+    setMeetingTab('search', false);
+    renderFullMeetingSearch();
+    $('meeting-search-heading').focus({preventScroll: true});
+  }
   async function runMeetingSearch() {
     meetingSearch.controller?.abort();
     const sequence = ++meetingSearch.sequence;
@@ -400,6 +508,8 @@
     try {
       const result = await api(`/live/v2/meetings/${encodeURIComponent(mid)}/search?q=${encodeURIComponent(query)}`, {signal: controller.signal});
       if (sequence !== meetingSearch.sequence || mid !== state.meetingId || state.route !== 'meeting') return;
+      meetingSearch.preview = {query, result};
+      if (meetingSearch.full && meetingSearch.full.query !== query) meetingSearch.full = fullSearchFromResult(query, result);
       const groups = [['发言', result.segments, result.more_segments], ['查证问题', result.questions, result.more_questions]];
       let count = 0;
       for (const [label, rows, more] of groups) {
@@ -407,25 +517,11 @@
         count += rows.length;
         const section = element('section', 'meeting-search-group');
         section.append(element('h2', '', `${label} · ${more ? '最近 ' : ''}${rows.length}${more ? ' 条' : ''}`));
-        for (const row of rows) {
-          const button = element('button', 'meeting-search-hit');
-          button.type = 'button';
-          button.append(searchExcerpt(row.text || row.title, query), element('span', 'meeting-search-meta',
-            row.segment_id ? `${sources[row.source] || '发言'} · ${time(segmentTime(row))}` : questionStates[row.state] || row.state));
-          button.addEventListener('click', () => perform(button, async () => {
-            closeMeetingSearch();
-            if (row.segment_id) await locateSearchSegment(row, mid);
-            else if (mid === state.meetingId) {
-              await selectMeeting(mid, row.id);
-              $('question-title').tabIndex = -1;
-              $('question-title').focus({preventScroll: true});
-            }
-          }));
-          section.append(button);
-        }
+        for (const row of rows) section.append(searchResultButton(row, query, mid));
         container.append(section);
       }
       text($('meeting-search-status'), count ? `本场找到 ${count}${result.more_segments || result.more_questions ? ' 条以上' : ' 条'}匹配结果` : '本场没有匹配结果，可以换个关键词。');
+      if (meetingSearch.full?.query === query) renderFullMeetingSearch();
     } catch (error) {
       if (error.name !== 'AbortError' && sequence === meetingSearch.sequence) text($('meeting-search-status'), `搜索未完成：${error.message}`);
     }
@@ -440,6 +536,7 @@
     clearTimeout(meetingSearch.timer);
     $('meeting-search-results').replaceChildren();
     text($('meeting-search-status'), $('library-search').value.trim() ? '正在搜索本场会议…' : '输入关键词，查找本场发言或问题。');
+    meetingSearch.preview = null;
     meetingSearch.timer = setTimeout(runMeetingSearch, 180);
   }
   const materialShelf = {filter:'all', id:'', requestKey:'', request:null};
@@ -688,6 +785,9 @@
     state.snapshot = null;
     state.meetingId = '';
     state.transcriptHistory = state.returnNote = null;
+    state.searchReturn = false;
+    meetingSearch.full = null;
+    meetingSearch.preview = null;
     $('transcript-list').replaceChildren();
     state.selectedQuestionId = '';
     state.homeRequest = null;
@@ -1202,6 +1302,8 @@
     state.meetingId = id;
     state.selection += 1;
     state.queueFilter = 'all';
+    meetingSearch.full = null;
+    meetingSearch.preview = null;
     $('follow-transcript').checked = true;
     $('work-grid').dataset.leftPane = 'transcript';
     state.transcriptHistory = state.returnNote = null;
@@ -2238,22 +2340,23 @@
   function setMeetingTab(panel, updateURL = true) {
     const grid = $('work-grid');
     if (grid.dataset.mobilePanel !== panel && panel !== 'transcript') state.transcriptNavigationSequence += 1;
-    if (grid.dataset.leftPane !== panel && ['summary','files','transcript'].includes(panel)) filePreviewRequest++;
+    if (grid.dataset.leftPane !== panel && ['summary','files','transcript','search'].includes(panel)) filePreviewRequest++;
     grid.dataset.mobilePanel = panel;
     highlightQuestionNote();
-    grid.dataset.meetingTab = panel === 'results' ? 'questions' : panel;
-    if (['transcript','files','summary'].includes(panel)) grid.dataset.leftPane = panel;
+    grid.dataset.meetingTab = panel === 'results' ? 'questions' : panel === 'search' ? 'transcript' : panel;
+    if (['transcript','files','summary','search'].includes(panel)) grid.dataset.leftPane = panel;
     syncMeetingPanels();
     if (panel !== 'results') state.returnNote = null;
-    text($('back-questions-label'), state.returnNote ? '返回发言' : '全部问题');
-    $('meeting-files-panel').hidden = grid.dataset.leftPane === 'transcript';
+    text($('back-questions-label'), state.searchReturn ? '返回搜索结果' : state.returnNote ? '返回发言' : '全部问题');
+    $('meeting-files-panel').hidden = !['summary','files'].includes(grid.dataset.leftPane);
     text($('meeting-files-heading'), grid.dataset.leftPane === 'summary' ? '会议纪要' : '会议文件');
     if (panel === 'summary') {
       const oldPreview = $('meeting-file-title').textContent;
       if (oldPreview !== '会议纪要') $('meeting-file-preview').hidden = true;
       if (state.snapshot?.meeting?.base_files?.summary?.state === 'saved') previewMeetingFile(state.meetingId, 'summary');
     }
-    document.querySelectorAll('button[data-meeting-tab]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.meetingTab === (panel === 'results' ? 'questions' : panel))));
+    const activeTab = panel === 'results' ? 'questions' : panel === 'search' ? 'transcript' : panel;
+    document.querySelectorAll('button[data-meeting-tab]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.meetingTab === activeTab)));
     if (updateURL && state.route === 'meeting' && state.meetingId) history.replaceState(null, '', meetingHash());
     if (panel === 'results') revealAnswer();
   }
@@ -2633,6 +2736,13 @@
   document.querySelectorAll('button[data-route]').forEach(button => button.addEventListener('click', () => setRoute(button.dataset.route)));
   $('back-library').addEventListener('click', () => setRoute('meetings'));
   $('back-questions').addEventListener('click', () => {
+    if (state.searchReturn) {
+      state.searchReturn = false;
+      setMeetingTab('search');
+      renderFullMeetingSearch();
+      $('meeting-search-heading').focus({preventScroll: true});
+      return;
+    }
     const from = state.returnNote;
     setMeetingTab(from ? 'transcript' : 'questions');
     if (!from) return;
@@ -2738,9 +2848,19 @@
     else buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
   });
   $('search-library').addEventListener('click', () => {
-    state.search = $('library-search').value;
-    setRoute('meetings');
-    $('library-search').focus();
+    openFullMeetingSearch();
+  });
+  $('close-meeting-search').addEventListener('click', () => {
+    state.searchReturn = false;
+    setMeetingTab('transcript');
+    $('transcript-heading').focus({preventScroll: true});
+  });
+  $('meeting-search-load-more').addEventListener('click', loadMoreMeetingSearch);
+  $('meeting-search-filters').addEventListener('click', event => {
+    const button = event.target.closest('[data-search-filter]');
+    if (!button || !meetingSearch.full) return;
+    meetingSearch.full.filter = button.dataset.searchFilter;
+    renderFullMeetingSearch();
   });
   window.addEventListener('resize', () => {
     if ($('meeting-search-popover').matches(':popover-open')) positionMeetingSearch();
