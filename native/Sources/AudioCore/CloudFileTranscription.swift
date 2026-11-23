@@ -80,14 +80,19 @@ struct CloudAudioChunker {
     let earliest: Int
     let latest: Int
     let pause: Int
+    private let expectedFrames: Int?
+    private let tailWindow: Int
     private var samples: [Int16] = []
     private var quietFrames = 0
     private(set) var sentFrames = 0
 
-    init(rate: Int = SpeechPCM.rate, minimumSeconds: Int = 20, maximumSeconds: Int = 60) {
+    init(rate: Int = SpeechPCM.rate, minimumSeconds: Int = 20, maximumSeconds: Int = 60,
+         expectedFrames: Int? = nil) {
         earliest = minimumSeconds * rate
         latest = maximumSeconds * rate
         pause = rate * 8 / 10
+        self.expectedFrames = expectedFrames
+        tailWindow = rate * 2
     }
 
     mutating func next(_ buffer: [Int16], from offset: inout Int) -> [Int16]? {
@@ -98,6 +103,9 @@ struct CloudAudioChunker {
             offset += 1
             let count = samples.count + offset - start
             if count >= latest || (count >= earliest && quietFrames >= pause) {
+                // Keep a short tail with the previous audio. DashScope can
+                // reject an isolated tail even though the preceding slice worked.
+                if let expectedFrames, abs(expectedFrames - sentFrames - count) <= tailWindow { continue }
                 samples.append(contentsOf: buffer[start..<offset])
                 return finish()
             }
@@ -328,6 +336,14 @@ final class CloudFileRecognition {
             do { (text, response) = try await receive(outgoing) }
             catch {
                 try check()
+                // A file import can replay this chunk without publishing any
+                // partial text. Keep the settings probe to a single transfer.
+                if attempt == 0, config.provider == "dashscope", lease != nil,
+                   let code = (error as? URLError)?.code,
+                   code == .timedOut || code == .networkConnectionLost {
+                    try await Task.sleep(for: .seconds(1))
+                    continue
+                }
                 throw CloudSpeechError.openNetwork(error)
             }
             try check()

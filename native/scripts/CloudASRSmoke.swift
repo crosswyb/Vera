@@ -78,17 +78,20 @@ private final class FixtureHTTPProtocol: URLProtocol, @unchecked Sendable {
         var frameBytes = 4093
         var stall = false
         var disconnect = false
+        var timeoutBeforeResponse = false
     }
     private static let planLock = NSLock()
-    private static var plan = Plan(body: Data())
+    private static var plans = [Plan(body: Data())]
+    private static var starts = 0
     private static var delivered = 0
     private static var stops = 0
     private let deliveryLock = NSRecursiveLock()
     private var stopped = false
 
-    static func install(_ plan: Plan) -> URLSession {
+    static func install(_ plan: Plan, then nextPlans: Plan...) -> URLSession {
         planLock.lock()
-        Self.plan = plan
+        plans = [plan] + nextPlans
+        starts = 0
         delivered = 0
         stops = 0
         planLock.unlock()
@@ -103,13 +106,24 @@ private final class FixtureHTTPProtocol: URLProtocol, @unchecked Sendable {
         return (delivered, stops)
     }
 
+    static var requestCount: Int {
+        planLock.lock()
+        defer { planLock.unlock() }
+        return starts
+    }
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
         Self.planLock.lock()
-        let plan = Self.plan
+        let plan = Self.plans[min(Self.starts, Self.plans.count - 1)]
+        Self.starts += 1
         Self.planLock.unlock()
+        if plan.timeoutBeforeResponse {
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+            return
+        }
         let response = HTTPURLResponse(url: request.url!, statusCode: plan.status, httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": plan.contentType])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -175,6 +189,7 @@ struct CloudASRSmoke {
         try await bothSourcesStopConcurrently()
         try await fileRequests()
         try await fileStreaming()
+        try await fileTransferRetry()
         try await filePipeline()
         print("Cloud ASR fixtures passed: protocol and revisions, missing tail, durable seal retry, bounded reconnects and cancellation, two recordings, bounded streaming file responses and chunk continuity.")
     }
@@ -575,6 +590,16 @@ struct CloudASRSmoke {
         if let last = chunker.finish() { chunks.append(last) }
         try require(chunks.map(\.count) == [29, 60, 5] && chunks.flatMap { $0 } == original && chunker.sentFrames == original.count,
                     "pause chunking dropped or duplicated PCM")
+
+        // A 16 ms remainder at a hard cut was rejected by the live provider.
+        let samplesWithTail = Array(repeating: Int16(600), count: 90 * SpeechPCM.rate + 256)
+        var tailChunker = CloudAudioChunker(minimumSeconds: 60, maximumSeconds: 90,
+                                           expectedFrames: samplesWithTail.count)
+        var tailOffset = 0
+        let prematureChunk = tailChunker.next(samplesWithTail, from: &tailOffset)
+        let finalChunk = tailChunker.finish()
+        try require(prematureChunk == nil && finalChunk == samplesWithTail,
+                    "a very short tail was split into its own upload or lost")
     }
 
     private static func fileStreaming() async throws {
@@ -663,6 +688,52 @@ struct CloudASRSmoke {
         print("Streaming failures passed: bounded events/JSON, malformed and truncated tails, HTTP/provider errors, disconnect, cancellation and lease revocation.")
     }
 
+    private static func fileTransferRetry() async throws {
+        let dashScope = try config("dashscope", "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation")
+        let timeout = FixtureHTTPProtocol.Plan(body: Data(), timeoutBeforeResponse: true)
+        let partial = FixtureHTTPProtocol.Plan(
+            body: Data("data: {\"output\":{\"text\":\"临时文本\"}}\n\n".utf8), disconnect: true)
+        let recovered = FixtureHTTPProtocol.Plan(body: Data("data: {\"output\":{\"text\":\"重试结果\"}}\n\n".utf8))
+        for interrupted in [timeout, partial] {
+            let worker = try CloudFileRecognition(config: dashScope, lease: SpeechLease(seconds: 30),
+                                                   session: FixtureHTTPProtocol.install(interrupted, then: recovered))
+            defer { worker.close() }
+            let result = try await worker.transcribe([1])
+            try require(result == "重试结果" && FixtureHTTPProtocol.requestCount == 2,
+                        "interrupted transfer did not retry once with a fresh response")
+        }
+        for (plan, expected, count) in [
+            (timeout, CloudSpeechError.timeout, 2),
+            (.init(body: Data(), status: 401), .permission, 1),
+        ] {
+            let worker = try CloudFileRecognition(config: dashScope, lease: SpeechLease(seconds: 30),
+                                                   session: FixtureHTTPProtocol.install(plan))
+            defer { worker.close() }
+            do {
+                _ = try await worker.transcribe([1])
+                try require(false, "failed transfer was accepted")
+            } catch let error as CloudSpeechError {
+                try require(error == expected && FixtureHTTPProtocol.requestCount == count,
+                            "transfer failure had the wrong outcome or retry budget")
+            }
+        }
+
+        let lease = SpeechLease(seconds: 30)
+        let worker = try CloudFileRecognition(config: dashScope, lease: lease,
+                                               session: FixtureHTTPProtocol.install(timeout, then: recovered))
+        defer { worker.close() }
+        let task = Task { try await worker.transcribe([1]) }
+        try await wait("initial transfer did not start") { FixtureHTTPProtocol.requestCount == 1 }
+        lease.revoke()
+        do {
+            _ = try await task.value
+            try require(false, "transfer completed after permission to upload was revoked")
+        } catch CloudSpeechError.authorizationEnded {
+            try require(FixtureHTTPProtocol.requestCount == 1, "revoked transfer uploaded again")
+        }
+        print("File transfer retry passed: timeout before response, disconnect after partial SSE, retry budget, authorization.")
+    }
+
     private static func filePipeline() async throws {
         let directory = try tempDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -680,9 +751,7 @@ struct CloudASRSmoke {
             active += 1
             maximumActive = max(maximumActive, active)
             defer { active -= 1 }
-            // Force later requests to finish first. Publication must still
-            // follow audio order and advance only the contiguous checkpoint.
-            try await Task.sleep(for: .milliseconds(index == 1 ? 300 : index == 2 ? 150 : 50))
+            try await Task.sleep(for: .milliseconds(20))
             return (Data("{\"output\":{\"text\":\"合成片段\(index)\"}}".utf8),
                     HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
         })
@@ -694,9 +763,9 @@ struct CloudASRSmoke {
         try await worker.run(url: audio, meetingID: "synthetic-meeting", epoch: "fixture-file", speech: config,
                              lease: SpeechLease(seconds: 30))
         print("File pipeline: 420 seconds synthetic audio, \(requests) requests, maximum concurrency \(maximumActive), elapsed \(started.duration(to: .now))")
-        try require(requests == 3 && maximumActive == 3, "DashScope file imports still use short serial requests")
-        try require(texts == ["合成片段1", "合成片段2", "合成片段3"] && ends == [180000, 360000, 420000],
-                    "out-of-order ASR completion reordered text or skipped a checkpoint")
+        try require(requests == 5 && maximumActive == 1, "DashScope file import exceeded its slice or concurrency budget")
+        try require(texts == (1...5).map { "合成片段\($0)" } && ends == [90000, 180000, 270000, 360000, 420000],
+                    "serial ASR import reordered text or skipped a checkpoint")
 
         var failureRequests = 0
         var failureEnds: [Int] = []
@@ -704,9 +773,11 @@ struct CloudASRSmoke {
         let failing = FileTranscription(cloudTransport: { request in
             failureRequests += 1
             let index = failureRequests
-            try await Task.sleep(for: .milliseconds(index == 2 ? 80 : 10))
+            if index == 2 || index == 3 {
+                throw URLError(.networkConnectionLost)
+            }
             return (Data("{\"output\":{\"text\":\"合成片段\(index)\"}}".utf8),
-                    HTTPURLResponse(url: request.url!, statusCode: index == 2 ? 503 : 200, httpVersion: nil, headerFields: nil)!)
+                    HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
         })
         failing.onEvent = { event in
             if event.type == "import.progress" { failureEnds.append(event.audioEndMS ?? -1) }
@@ -717,8 +788,8 @@ struct CloudASRSmoke {
                                   lease: SpeechLease(seconds: 30))
             try require(false, "failed middle chunk was marked as completed")
         } catch CloudSpeechError.unavailable { }
-        try require(failureRequests == 3 && failureEnds == [180000] && failureTexts == ["合成片段1"],
-                    "a later successful chunk advanced past the failed middle chunk")
+        try require(failureRequests == 3 && failureEnds == [90000] && failureTexts == ["合成片段1"],
+                    "an exhausted retry advanced the checkpoint or submitted a later slice")
 
         var resumedEvents: [AudioEvent] = []
         let resumedBody = try largeFileResponse(text: "恢复合成片段")
@@ -729,8 +800,10 @@ struct CloudASRSmoke {
         resumed.onEvent = { resumedEvents.append($0) }
         try await resumed.run(url: audio, meetingID: "synthetic-meeting", epoch: "fixture-file", speech: config,
                               lease: SpeechLease(seconds: 30), startMS: 180000, revision: 2, initialSequence: 17)
-        try require(resumedEvents.map(\.seq) == [18, 19, 20, 21] &&
-                    resumedEvents.filter { $0.type == "transcript.final" }.map { $0.audioStartMS ?? -1 } == [180000, 360000] &&
+        // A checkpoint saved by the older 180-second policy still resumes
+        // at the saved audio position, using the new 90-second limit.
+        try require(resumedEvents.map(\.seq) == [18, 19, 20, 21, 22, 23] &&
+                    resumedEvents.filter { $0.type == "transcript.final" }.map { $0.audioStartMS ?? -1 } == [180000, 270000, 360000] &&
                     resumedEvents.filter { $0.type == "transcript.final" }.allSatisfy { $0.text == "恢复合成片段" },
                     "resume reused old event IDs or restarted from the beginning of the recording")
         let alreadyRecognized = FileTranscription(cloudTransport: { _ in
@@ -752,7 +825,7 @@ struct CloudASRSmoke {
             try await cancellation.run(url: audio, meetingID: "synthetic-meeting", epoch: "fixture-file", speech: config,
                                        lease: SpeechLease(seconds: 30))
         }
-        try await wait("parallel requests did not start", until: { cancelledRequests == 3 })
+        try await wait("file request did not start", until: { cancelledRequests == 1 })
         let cancellationStart = ContinuousClock.now
         cancelledRun.cancel()
         do {

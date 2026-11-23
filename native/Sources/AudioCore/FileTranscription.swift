@@ -174,14 +174,18 @@ public final class FileTranscription {
         let decoder = try await FileAudioDecoder.open(AVURLAsset(url: url))
         defer { decoder.cancel() }
         let pcm = SpeechPCM()
-        let parallelRequests = config.provider == "dashscope" ? 3 : 1
-        var chunker = CloudAudioChunker(minimumSeconds: config.provider == "dashscope" ? 120 : 20,
-                                       maximumSeconds: config.provider == "dashscope" ? 180 : 60)
+        let requestedStartMS = max(0, min(startMS, info.durationMS))
+        let startFrame = Int((Double(requestedStartMS) * Double(SpeechPCM.rate) / 1000).rounded())
+        let durationFrames = Int((Double(info.durationMS) * Double(SpeechPCM.rate) / 1000).rounded())
+        // Concurrent inline WAV uploads can consume most of the request
+        // deadline on slow links. Keep a single upload in flight.
+        let parallelRequests = 1
+        var chunker = CloudAudioChunker(minimumSeconds: config.provider == "dashscope" ? 60 : 20,
+                                       maximumSeconds: config.provider == "dashscope" ? 90 : 60,
+                                       expectedFrames: config.provider == "dashscope" ? durationFrames - startFrame : nil)
         var sequence = max(0, initialSequence)
         var pending: [(task: Task<String, Error>, frames: Int, endFrame: Int, last: Bool)] = []
         defer { for chunk in pending { chunk.task.cancel() } }
-        let requestedStartMS = max(0, min(startMS, info.durationMS))
-        let startFrame = Int((Double(requestedStartMS) * Double(SpeechPCM.rate) / 1000).rounded())
         var remainingPrefixFrames = startFrame
         var publishedMS = requestedStartMS
         func event(_ type: String) -> AudioEvent {
