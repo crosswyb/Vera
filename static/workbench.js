@@ -332,16 +332,8 @@
       if (!usable || document.activeElement !== previous) $('main').focus({preventScroll: true});
     }
   }
-  function closeMeetingSearchOnBlur(event) {
-    if (event?.relatedTarget) {
-      if (!event.relatedTarget.closest('.global-search, #meeting-search-popover')) closeMeetingSearch();
-      return;
-    }
-    // Some focus changes have no destination. Wait for the browser to finish
-    // focusing before deciding whether it left the input/results as a whole.
-    setTimeout(() => {
-      if (!document.activeElement?.closest('.global-search, #meeting-search-popover')) closeMeetingSearch();
-    }, 0);
+  function closeMeetingSearchFromOutside(event) {
+    if (!event.target.closest('.global-search, #meeting-search-popover')) closeMeetingSearch();
   }
   function positionMeetingSearch() {
     const bounds = document.querySelector('.global-search').getBoundingClientRect();
@@ -2883,8 +2875,9 @@
     if (event.relatedTarget && !event.relatedTarget.closest('.global-search, #meeting-search-popover')) meetingSearch.previousFocus = event.relatedTarget;
     openMeetingSearch();
   });
-  document.querySelector('.global-search').addEventListener('focusout', closeMeetingSearchOnBlur);
-  $('meeting-search-popover').addEventListener('focusout', closeMeetingSearchOnBlur);
+  // macOS WebKit can blur the input on mouse-down without focusing the button.
+  // Keep the popover open until focus enters another control or an outside click occurs.
+  document.addEventListener('focusin', closeMeetingSearchFromOutside);
   $('library-search').addEventListener('keydown', event => {
     if (event.key !== 'ArrowDown' || !$('meeting-search-popover').matches(':popover-open')) return;
     event.preventDefault();
@@ -3322,7 +3315,7 @@
     }
   });
   document.addEventListener('click', (event) => {
-    if (!event.target.closest('.global-search, #meeting-search-popover')) closeMeetingSearch();
+    closeMeetingSearchFromOutside(event);
     for (const menu of document.querySelectorAll('.session-menu, .meeting-more')) {
       if (!menu.contains(event.target) || menu.matches('.meeting-more') && event.target.closest('button')) menu.open = false;
     }

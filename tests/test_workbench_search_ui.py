@@ -21,7 +21,10 @@ class SearchUIRegressionTests(unittest.TestCase):
         self.run_javascript(r"""
 const assert = require('node:assert/strict');
 const src = require('node:fs').readFileSync(process.argv[1], 'utf8');
-const document = {activeElement: null};
+const focusEvents = new Map();
+const listenForFocus = (target, type, handler) => focusEvents.set(target + ':' + type, handler);
+const document = {activeElement: null, addEventListener: (type, handler) => listenForFocus('document', type, handler),
+  querySelector: () => ({addEventListener: (type, handler) => listenForFocus('input-wrapper', type, handler)})};
 const node = id => ({id, isConnected:true, closest(){return this.inside ? this : null;},
   focus(){document.activeElement = this;}, blur(){document.activeElement = document.body;},
   setAttribute(){}});
@@ -33,10 +36,13 @@ const input = $('library-search'), panel = $('meeting-search-popover');
 input.inside = panel.inside = true;
 panel.open = true; panel.matches = () => panel.open; panel.hidePopover = () => {panel.open=false;};
 panel.contains = candidate => candidate === panel;
+panel.addEventListener = (type, handler) => listenForFocus('panel', type, handler);
 const meetingSearch = {sequence:0, previousFocus:null};
 const code = src.slice(src.indexOf('  function closeMeetingSearch('), src.indexOf('  function positionMeetingSearch('));
-eval(code + ';globalThis.closeSearch = closeMeetingSearch;' +
-  ';globalThis.leaveSearch = typeof closeMeetingSearchOnBlur === "function" ? closeMeetingSearchOnBlur : () => {};');
+const focusListeners = src.slice(src.indexOf("  $('library-search').addEventListener('focus'"),
+  src.indexOf("  $('library-search').addEventListener('keydown'"));
+input.addEventListener = (type, handler) => listenForFocus('input', type, handler);
+eval(code + focusListeners + ';globalThis.closeSearch = closeMeetingSearch;');
 (async () => {
   const oldButton = node('prior-button');
   const detached = {...node('detached'), isConnected:false};
@@ -51,13 +57,15 @@ eval(code + ';globalThis.closeSearch = closeMeetingSearch;' +
   closeSearch(true);
   assert.equal(document.activeElement, oldButton);
   panel.open=true; document.activeElement=document.body;
-  leaveSearch({relatedTarget:panel}); await new Promise(resolve => setTimeout(resolve, 5));
-  assert.equal(panel.open, true, 'Do not close while browser focus is moving from input to a result');
+  // macOS WKWebView blurs the input without focusing the clicked button.
+  focusEvents.get('input-wrapper:focusout')?.({relatedTarget:null});
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(panel.open, true, 'Keep results available between mouse-down and click');
   document.activeElement=panel;
-  leaveSearch(); await new Promise(resolve => setTimeout(resolve, 5));
-  assert.equal(panel.open, true, 'Moving within search must retain results');
+  focusEvents.get('document:focusin')?.({target:panel});
+  assert.equal(panel.open, true, 'Moving keyboard focus within search must retain results');
   document.activeElement=oldButton;
-  leaveSearch(); await new Promise(resolve => setTimeout(resolve, 5));
+  focusEvents.get('document:focusin')?.({target:oldButton});
   assert.equal(panel.open, false, 'Tabbing outside must dismiss results');
 })().catch(error => {console.error(error); process.exitCode=1;});
 """)
