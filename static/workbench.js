@@ -248,21 +248,28 @@
   }));
   function setRoute(route, updateHistory = true) {
     closeMeetingSearch();
-    if (route !== state.route) state.transcriptNavigationSequence += 1;
+    if (route !== state.route) {
+      state.transcriptNavigationSequence += 1;
+      if (state.route === 'materials') {
+        closeMaterialReading();
+        materialShelf.request?.abort();
+        materialShelf.requestKey = '';
+      }
+    }
     state.route = ['meetings', 'materials', 'meeting', 'guide', 'settings'].includes(route) ? route : 'meetings';
     $('workspace').dataset.route = state.route;
     $('workspace').dataset.mobileNav = 'closed';
     $('toggle-navigation').setAttribute('aria-expanded', 'false');
-    for (const name of ['library', 'meeting', 'guide', 'settings']) $(name + '-view').hidden = name === 'library' ? !['meetings', 'materials'].includes(state.route) : name !== state.route;
+    for (const name of ['library', 'materials', 'meeting', 'guide', 'settings']) $(name + '-view').hidden = (name === 'library' ? 'meetings' : name) !== state.route;
     for (const button of document.querySelectorAll('button[data-route]')) {
       if (button.dataset.route === state.route) button.setAttribute('aria-current', 'page');
       else button.removeAttribute('aria-current');
     }
     $('back-library').hidden = state.route !== 'meeting';
     text($('breadcrumb'), state.route === 'meeting' ? state.snapshot?.meeting?.title || '会议' : {meetings:'工作区', materials:'工作区', guide:'如何使用', settings:'设置'}[state.route]);
-    const searchLabel = state.route === 'meeting' ? '搜索本场发言或问题' : state.route === 'materials' ? '搜索资料' : '搜索会议';
+    const searchLabel = state.route === 'meeting' ? '搜索本场发言或问题' : state.route === 'materials' ? '搜索资料标题或会议名称' : '搜索会议';
     $('library-search').placeholder = searchLabel;
-    $('library-search').value = state.route === 'meeting' ? '' : state.search;
+    $('library-search').value = state.route === 'meeting' ? '' : state.route === 'materials' ? materialShelf.search : state.search;
     text($('library-search-label'), searchLabel);
     if (updateHistory) {
       const hash = state.route === 'meeting' ? meetingHash() : `#${state.route}`;
@@ -539,62 +546,354 @@
     meetingSearch.preview = null;
     meetingSearch.timer = setTimeout(runMeetingSearch, 180);
   }
-  const materialShelf = {filter:'all', id:'', requestKey:'', request:null};
-  const desktopLibrary = matchMedia('(min-width: 981px)');
+  const materialShelf = {
+    search:'', scope:null, beforeSearch:null, id:'', limit:40, reading:false, listScroll:0,
+    requestKey:'', request:null, content:null, raw:false, signature:''
+  };
+  const narrowMaterials = matchMedia('(max-width: 740px)');
   const documentLabels = {saved:'已保存', pending:'待保存', save_failed:'保存失败', conflict:'保留人工修改'};
-  function previewLibraryMaterial(record, force = false) {
-    const pane = $('material-preview');
-    const key = record && JSON.stringify([record.id, record.version, record.state, record.basis_stale]);
-    pane.hidden = !record;
-    if (!force && materialShelf.requestKey === key) return;
+  const materialDate = new Intl.DateTimeFormat('zh-CN', {month:'numeric', day:'numeric'});
+  const materialTime = new Intl.DateTimeFormat('zh-CN', {hour:'2-digit', minute:'2-digit', hour12:false});
+  const materialMonth = new Intl.DateTimeFormat('zh-CN', {year:'numeric', month:'long'});
+  function formatMaterialDate(value, format = materialDate) {
+    const parsed = date(value);
+    return parsed ? format.format(parsed) : '—';
+  }
+
+  // Format the blocks emitted by artifact_writer. Text nodes keep both generated and edited documents inert.
+  function renderMaterialBody() {
+    const target = $('material-preview-body');
+    const content = materialShelf.content;
+    target.replaceChildren();
+    if (content === null) return;
+    if (!content.trim()) { target.append(element('p', '', '文档内容为空。')); return; }
+    if (materialShelf.raw) { target.append(element('pre', '', content)); return; }
+
+    let block = null;
+    let code = null;
+    let fence = '';
+    let firstContent = true;
+    for (const line of content.split(/\r?\n/)) {
+      if (code) {
+        if (line.trim().startsWith(fence)) { code = null; fence = ''; }
+        else code.append(document.createTextNode(line + '\n'));
+        continue;
+      }
+      const fenceStart = line.trim().match(/^(\x60{3,}|~{3,})/);
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      const item = line.match(/^([-+*]|\d+[.)])\s+(.+)$/);
+      const quote = line.match(/^\s*>\s?(.*)$/);
+      if (!line.trim()) { block = null; continue; }
+      if (firstContent && heading?.[1] === '#' && heading[2].trim() === $('material-preview-title').textContent.trim()) {
+        firstContent = false;
+        continue;
+      }
+      firstContent = false;
+      if (fenceStart) {
+        fence = fenceStart[1];
+        code = element('code');
+        const pre = element('pre');
+        pre.append(code);
+        target.append(pre);
+        block = null;
+      } else if (heading) {
+        target.append(element(heading[1].length <= 2 ? 'h4' : 'h5', '', heading[2]));
+        block = null;
+      } else if (item) {
+        const tag = /^\d/.test(item[1]) ? 'ol' : 'ul';
+        if (block?.localName !== tag) {
+          block = element(tag);
+          if (tag === 'ol') block.start = Number.parseInt(item[1], 10);
+          target.append(block);
+        }
+        block.append(element('li', '', item[2]));
+      } else if (quote && (block?.localName === 'ol' || block?.localName === 'ul') && line.startsWith(' ')) {
+        block.lastElementChild.append(element('blockquote', '', quote[1]));
+      } else if (quote) {
+        if (block?.localName !== 'blockquote') { block = element('blockquote'); target.append(block); }
+        else block.append(document.createTextNode('\n'));
+        block.append(document.createTextNode(quote[1]));
+      } else if (/^\s+/.test(line) && (block?.localName === 'ol' || block?.localName === 'ul')) {
+        block.lastElementChild.append(document.createTextNode('\n' + line.trim()));
+      } else {
+        if (block?.localName !== 'p') { block = element('p'); target.append(block); }
+        else block.append(document.createTextNode('\n'));
+        block.append(document.createTextNode(line));
+      }
+    }
+  }
+
+  function previewLibraryMaterial(record, force = false, meetingTitle = '') {
+    const key = record ? JSON.stringify([record.id, record.title, record.version, record.state, record.basis_stale]) : '';
+    text($('material-context'), record && meetingTitle ? meetingTitle + ' · ' + calendarDate(record.created_at) : '');
+    if (!force && materialShelf.requestKey === key && (key || $('material-preview-title').textContent)) return;
     materialShelf.request?.abort();
-    materialShelf.request = null; materialShelf.requestKey = key;
-    text($('material-preview-body'), '');
-    if (!record) { text($('material-preview-title'), ''); text($('material-preview-state'), ''); return; }
-    text($('material-preview-title'), record.title);
-    text($('material-preview-state'), '正在读取文档…');
-    const controller = new AbortController(), token = state.token;
+    materialShelf.request = null;
+    materialShelf.requestKey = key;
+    materialShelf.content = null;
+    if (!force) materialShelf.raw = false;
+    $('material-source').hidden = true;
+    $('material-open').hidden = !record;
+    $('material-reload').hidden = true;
+    $('material-scroll').scrollTop = 0;
+    renderMaterialBody();
+    text($('material-preview-title'), record ? record.title || '未命名资料' : '请选择一份资料');
+    text($('material-preview-state'), record ? '正在读取文档…' : '');
+    if (!record) return;
+
+    const controller = new AbortController();
+    const token = state.token;
     materialShelf.request = controller;
     const current = () => materialShelf.request === controller && state.token === token && state.route === 'materials';
-    api(`/live/v2/artifacts/${encodeURIComponent(record.id)}`, {signal:controller.signal}).then(result => {
+    api('/live/v2/artifacts/' + encodeURIComponent(record.id), {signal:controller.signal}).then(result => {
       if (!current()) return;
       const file = result.document || record;
-      const labels = [`第 ${record.version} 版`, documentLabels[file.state] || file.state || '状态未知'];
+      const labels = ['第 ' + record.version + ' 版', documentLabels[file.state] || file.state || '状态未知'];
       if (file.basis_stale) labels.push('依据已更正，仅供历史参考');
       if (file.externally_modified) labels.push('显示磁盘中的人工修改');
       if (file.on_disk === false && file.state === 'saved') labels.push('磁盘文件不存在，显示登记内容');
       text($('material-preview-state'), labels.join(' · '));
-      text($('material-preview-body'), result.content || '文档内容为空。');
-    }).catch(error => { if (current() && !controller.signal.aborted) text($('material-preview-state'), `未能读取文档：${error.message}`); });
+      materialShelf.content = result.content || '';
+      updateMaterialSource();
+      $('material-reload').hidden = false;
+    }).catch(error => {
+      if (!current() || controller.signal.aborted) return;
+      text($('material-preview-state'), '未能读取文档：' + error.message);
+      $('material-reload').hidden = false;
+    });
+  }
+
+  function updateMaterialSource() {
+    $('material-source').hidden = materialShelf.content === null;
+    text($('material-source'), materialShelf.raw ? '查看阅读版' : '查看 Markdown');
+    renderMaterialBody();
+  }
+
+  function materialMatch(label, query, className) {
+    const node = element('span', className);
+    const index = query ? label.toLocaleLowerCase().indexOf(query) : -1;
+    if (index < 0) { text(node, label); return node; }
+    node.append(document.createTextNode(label.slice(0, index)),
+      element('mark', '', label.slice(index, index + query.length)),
+      document.createTextNode(label.slice(index + query.length)));
+    return node;
+  }
+
+  function renderMaterialCatalog(groups, count, query) {
+    const catalog = $('materials-catalog');
+    const picker = $('materials-scope');
+    const scroll = catalog.scrollTop;
+    const focused = catalog.contains(document.activeElement) ? document.activeElement.dataset.materialScope : null;
+    function scopeButton(id, title, total, meeting = null) {
+      const button = element('button', 'materials-meeting-row');
+      button.type = 'button';
+      button.dataset.materialScope = id;
+      button.title = title;
+      button.setAttribute('aria-pressed', String(materialShelf.scope === id));
+      const tally = (meeting ? formatMaterialDate(meeting.created_at) + ' · ' : '') + total + ' 份';
+      button.append(icon(meeting ? 'folder' : 'file'), materialMatch(title, query, 'materials-meeting-name'),
+        element('span', 'materials-tally', tally));
+      return button;
+    }
+    const allTitle = query ? '全部搜索结果' : '全部资料';
+    const allButton = scopeButton('', allTitle, count);
+    const options = [new Option(allTitle, '')];
+    const content = [allButton];
+    let month = '';
+    let list = null;
+    for (const {meeting, count:total} of groups) {
+      const label = formatMaterialDate(meeting.created_at, materialMonth);
+      if (label !== month) {
+        month = label;
+        list = element('ul', 'materials-rows');
+        content.push(element('h3', 'materials-month', label), list);
+      }
+      const title = meeting.title || '未命名会议';
+      const item = element('li');
+      item.append(scopeButton(meeting.id, title, total, meeting));
+      list.append(item);
+      options.push(new Option(title, meeting.id));
+    }
+    catalog.replaceChildren(...content);
+    catalog.scrollTop = scroll;
+    if (focused !== null) [...catalog.querySelectorAll('button')].find(node => node.dataset.materialScope === focused)?.focus({preventScroll:true});
+    picker.replaceChildren(...options);
+    picker.value = materialShelf.scope;
+    text($('materials-meeting-count'), groups.length + ' 场');
+  }
+
+  function renderMaterials() {
+    if (!state.home) return;
+    const meetings = state.home.meetings || [];
+    const records = state.home.materials || [];
+    const meetingIndex = new Map(meetings.map(meeting => [meeting.id, meeting]));
+    const query = materialShelf.search.trim().toLocaleLowerCase();
+    const selectedMeeting = $('materials-meeting-filter').value;
+    const selectedStatus = $('materials-status').value;
+    const descending = $('materials-sort').value === 'new';
+    const filtered = records.filter(record => {
+      const meeting = meetingIndex.get(record.meeting_id);
+      if (query && ![record.title, meeting?.title].some(value => (value || '').toLocaleLowerCase().includes(query))) return false;
+      if (selectedMeeting === 'active' && meeting?.state !== 'active') return false;
+      if (selectedMeeting === 'ended' && meeting?.state === 'active') return false;
+      if (selectedMeeting === 'import' && meeting?.input_kind !== 'audio_file') return false;
+      if (selectedStatus === 'saved') return record.state === 'saved';
+      if (selectedStatus === 'stale') return record.basis_stale;
+      if (selectedStatus === 'trouble') return ['save_failed', 'conflict'].includes(record.state);
+      return true;
+    });
+    const counts = new Map();
+    for (const record of filtered) counts.set(record.meeting_id, (counts.get(record.meeting_id) || 0) + 1);
+    const groups = meetings.filter(meeting => counts.has(meeting.id))
+      .sort((a, b) => b.created_at - a.created_at)
+      .map(meeting => ({meeting, count:counts.get(meeting.id)}));
+    const firstVisit = materialShelf.scope === null;
+    if (firstVisit) materialShelf.scope = groups[0]?.meeting.id || '';
+    if (materialShelf.scope && !counts.has(materialShelf.scope)) materialShelf.scope = '';
+    const scopedMeeting = meetingIndex.get(materialShelf.scope);
+    const rows = filtered.filter(record => !materialShelf.scope || record.meeting_id === materialShelf.scope)
+      .sort((a, b) => (a.created_at - b.created_at) * (descending ? -1 : 1));
+    const visible = rows.slice(0, materialShelf.limit);
+    if (firstVisit && !query && !narrowMaterials.matches) materialShelf.id = visible[0]?.id || '';
+    const selected = visible.find(record => record.id === materialShelf.id);
+    if (!selected) { materialShelf.id = ''; materialShelf.reading = false; }
+    $('materials-view').dataset.reading = String(materialShelf.reading);
+    const signature = JSON.stringify([records.length, counts.size, materialShelf.scope, materialShelf.id, query, selectedMeeting,
+      selectedStatus, descending, visible, rows.length, groups.map(({meeting, count}) => [meeting.id, meeting.title, meeting.created_at, count])]);
+    if (signature !== materialShelf.signature) {
+      materialShelf.signature = signature;
+      text($('materials-total'), countsForLibrary(records) + ' 场会议 · ' + records.length + ' 份资料');
+      renderMaterialCatalog(groups, filtered.length, query);
+      text($('materials-scope-title'), scopedMeeting?.title || (query ? '全部搜索结果' : '全部会议的资料'));
+      text($('materials-count'), rows.length + ' 份资料' + (scopedMeeting ? ' · ' + formatMaterialDate(scopedMeeting.created_at) : ''));
+      renderMaterialRows(visible, rows.length, meetingIndex, query, Boolean(records.length));
+    }
+    previewLibraryMaterial(selected, false, meetingIndex.get(selected?.meeting_id)?.title);
+  }
+
+  function countsForLibrary(records) {
+    return new Set(records.map(record => record.meeting_id)).size;
+  }
+
+  function renderMaterialRows(visible, total, meetingIndex, query, hasRecords) {
+    const list = $('materials-list');
+    const scroll = list.scrollTop;
+    const focused = list.contains(document.activeElement) ? document.activeElement.dataset.materialId : null;
+    const content = [];
+    if (visible.length) {
+      const entries = element('ul', 'materials-rows');
+      for (const record of visible) {
+        const item = element('li');
+        const button = element('button', 'materials-file');
+        button.type = 'button';
+        button.dataset.materialId = record.id;
+        button.setAttribute('aria-current', String(record.id === materialShelf.id));
+        button.setAttribute('aria-controls', 'material-preview');
+        const name = element('span', 'materials-file-name');
+        name.append(materialMatch(record.title || '未命名资料', query, 'materials-file-title'));
+        const meeting = meetingIndex.get(record.meeting_id);
+        if (!materialShelf.scope) name.append(materialMatch(meeting?.title || '未命名会议', query, 'materials-file-context'));
+        const meta = element('span', 'materials-file-meta');
+        const when = element('time', '', formatMaterialDate(record.created_at, materialShelf.scope ? materialTime : materialDate));
+        const created = date(record.created_at);
+        if (created) when.dateTime = created.toISOString();
+        meta.append(when);
+        if (record.state !== 'saved') {
+          const status = element('span', 'materials-file-status', documentLabels[record.state] || record.state || '状态未知');
+          status.dataset.state = record.state;
+          meta.append(status);
+        }
+        if (record.basis_stale) meta.append(element('span', 'materials-file-status', '待复核'));
+        button.append(icon('file'), name, meta);
+        item.append(button);
+        entries.append(item);
+      }
+      content.push(entries);
+      if (visible.length < total) {
+        const more = element('button', 'text-button materials-more', '再显示 ' + Math.min(40, total - visible.length) + ' 份');
+        more.type = 'button';
+        more.id = 'materials-more';
+        content.push(more);
+      }
+    } else {
+      const message = element('div', 'materials-empty');
+      message.append(element('h3', '', hasRecords ? '没有匹配的资料' : '资料会在这里汇集'),
+        element('p', '', hasRecords ? '试试其他关键词，或清除筛选。' : '从会议里的「查证问题」生成的资料会出现在这里。'));
+      if (hasRecords) {
+        const reset = element('button', 'text-button', '清除搜索和筛选');
+        reset.type = 'button';
+        reset.id = 'materials-reset';
+        message.append(reset);
+      }
+      content.push(message);
+    }
+    list.replaceChildren(...content);
+    list.scrollTop = scroll;
+    if (focused) [...list.querySelectorAll('[data-material-id]')].find(node => node.dataset.materialId === focused)?.focus({preventScroll:true});
+  }
+
+  function searchMaterials(value) {
+    let restore = null;
+    if (!materialShelf.search.trim() && value.trim()) {
+      materialShelf.beforeSearch = {
+        scope:materialShelf.scope, id:materialShelf.id, limit:materialShelf.limit, raw:materialShelf.raw,
+        listScroll:$('materials-list').scrollTop, catalogScroll:$('materials-catalog').scrollTop
+      };
+      materialShelf.scope = '';
+      materialShelf.id = '';
+      $('materials-catalog').scrollTop = 0;
+    } else if (materialShelf.search.trim() && !value.trim()) {
+      restore = materialShelf.beforeSearch;
+      materialShelf.beforeSearch = null;
+      if (restore) { materialShelf.scope = restore.scope; materialShelf.id = restore.id; }
+    }
+    materialShelf.search = value;
+    materialShelf.reading = false;
+    materialShelf.limit = restore?.limit || 40;
+    $('materials-list').scrollTop = 0;
+    renderMaterials();
+    if (restore) {
+      materialShelf.raw = restore.raw;
+      updateMaterialSource();
+      $('materials-list').scrollTop = restore.listScroll;
+      $('materials-catalog').scrollTop = restore.catalogScroll;
+    }
+  }
+
+  function switchMaterialScope(scope) {
+    if (scope === materialShelf.scope) return;
+    materialShelf.scope = scope;
+    materialShelf.limit = 40;
+    $('materials-list').scrollTop = 0;
+    renderMaterials();
+  }
+
+  function closeMaterialReading(focus = false) {
+    const wasReading = materialShelf.reading;
+    materialShelf.reading = false;
+    $('materials-view').dataset.reading = 'false';
+    if (wasReading) $('materials-list').scrollTop = materialShelf.listScroll;
+    if (focus) ($('materials-list').querySelector('[aria-current="true"]') || $('materials-list')).focus({preventScroll:true});
   }
   function renderLibrary() {
     const home = state.home;
     if (!home) return;
-    const materials = state.route === 'materials';
-    const canManage = !materials && home.member?.role === 'owner';
+    if (state.route === 'materials') { renderMaterials(); renderRecent(); return; }
+    const canManage = home.member?.role === 'owner';
     $('meeting-actions-column').hidden = !canManage;
     document.querySelector('.library-column-head').classList.toggle('has-meeting-actions', canManage);
     const meetings = home.meetings || [];
     const query = state.search.trim().toLocaleLowerCase();
-    let rows = materials ? home.materials || [] : meetings;
-    rows = rows.filter(row => {
-      const meeting = materials ? meetings.find(m => m.id === row.meeting_id) : row;
-      if (query && !`${row.title} ${materials ? meeting?.title || '' : ''}`.toLocaleLowerCase().includes(query)) return false;
-      if (state.filter === 'import' && meeting?.input_kind !== 'audio_file') return false;
-      if (state.filter === 'active' && meeting?.state !== 'active') return false;
-      if (state.filter === 'ended' && meeting?.state === 'active') return false;
-      return !materials || materialShelf.filter === 'all' || (materialShelf.filter === 'saved' && row.state === 'saved') || (materialShelf.filter === 'stale' && row.basis_stale) || (materialShelf.filter === 'trouble' && ['save_failed','conflict'].includes(row.state));
-    }).slice().sort((a, b) => ((materials ? a.created_at : a.updated_at || a.created_at) - (materials ? b.created_at : b.updated_at || b.created_at)) * (state.descending ? -1 : 1));
-    text($('library-title'), materials ? '全部资料' : '全部会议');
-    text($('library-description'), materials ? `已登记 ${home.materials?.length || 0} 份资料` : `${meetings.length} 场会议 · ${meetings.filter(m => m.state === 'active').length} 场进行中`);
-    text($('name-column'), materials ? '资料名称' : '会议名称');
-    text(document.querySelector('.count-column'), materials ? '版本' : '全部文件');
-    document.querySelector('.count-column').title = materials ? '查证文档版本' : '含查证文档、录音、转写及纪要；查证问题数量见会议名称下方';
-    text(document.querySelector('.date-column'), materials ? '生成时间' : '最近更新');
-    text($('library-sort'), `${materials ? '生成时间' : '最近更新'} ${state.descending ? '↓' : '↑'}`);
-    $('welcome-strip').hidden = materials || Boolean(query) || home.project?.data_scope !== 'synthetic';
-    $('library-new-meeting').hidden = materials;
-    $('library-import-audio').hidden = materials;
+    const rows = meetings.filter(meeting => {
+      if (query && !(meeting.title || '').toLocaleLowerCase().includes(query)) return false;
+      if (state.filter === 'import' && meeting.input_kind !== 'audio_file') return false;
+      if (state.filter === 'active' && meeting.state !== 'active') return false;
+      if (state.filter === 'ended' && meeting.state === 'active') return false;
+      return true;
+    }).sort((a, b) => ((a.updated_at || a.created_at) - (b.updated_at || b.created_at)) * (state.descending ? -1 : 1));
+    text($('library-description'), `${meetings.length} 场会议 · ${meetings.filter(m => m.state === 'active').length} 场进行中`);
+    text($('library-sort'), `最近更新 ${state.descending ? '↓' : '↑'}`);
+    $('welcome-strip').hidden = Boolean(query) || home.project?.data_scope !== 'synthetic';
     const active = state.route === 'meetings' && !query && ['all','active'].includes(state.filter) && (meetings.find(m => m.state === 'active' && m.id === state.native?.meetingId) || meetings.find(m => m.state === 'active' && m.id === state.meetingId) || meetings.find(m => m.state === 'active'));
     $('library-current').hidden = !active;
     if (active) {
@@ -602,42 +901,31 @@
       text($('library-current-meta'), [active.input_kind === 'audio_file' ? '音频导入' : active.mode === 'demo' ? '示例会议' : '会议进行中', `${active.question_count ?? 0} 个查证问题`, `${active.document_count ?? 0} 份文件`].join(' · '));
       $('library-resume').dataset.meetingId = active.id;
     }
-    $('material-filters').hidden = !materials;
-    $('library-columns').classList.toggle('with-preview', materials && rows.length > 0);
-    const selected = materials && (rows.find(r => r.id === materialShelf.id) || rows[0]);
-    materialShelf.id = selected?.id || '';
-    previewLibraryMaterial(desktopLibrary.matches && selected || null);
-    const signature = JSON.stringify([state.route, state.filter, materialShelf.filter, materialShelf.id, state.search, state.descending, canManage, rows]);
+    const signature = JSON.stringify([state.route, state.filter, state.search, state.descending, canManage, rows]);
     if (signature !== state.librarySignature) {
       state.librarySignature = signature;
       const list = $('library-list');
       const focused = list.contains(document.activeElement) ? document.activeElement.dataset.rowId : null;
       list.replaceChildren(...rows.map(row => {
-        const meeting = materials ? meetings.find(m => m.id === row.meeting_id) : row;
         const wrap = element('div', canManage ? 'library-entry meeting-entry' : 'library-entry'); wrap.setAttribute('role', 'listitem');
         const button = element('button', 'library-row');
         button.dataset.rowId = row.id;
-        button.dataset.meetingId = materials ? row.meeting_id : row.id;
+        button.dataset.meetingId = row.id;
         button.title = row.title || '未命名';
-        if (materials) {
-          button.dataset.materialQuestion = row.question_id;
-          button.setAttribute('aria-current', String(row.id === materialShelf.id));
-          button.setAttribute('aria-controls', 'material-preview');
-        }
         const name = element('span', 'library-name');
-        const paper = element('span', 'paper-icon'); paper.append(icon(materials ? 'file' : 'meetings'));
+        const paper = element('span', 'paper-icon'); paper.append(icon('meetings'));
         const copy = element('span', 'library-name-copy');
         copy.append(element('span', 'row-title', row.title || '未命名'));
-        copy.append(element('span', 'row-subtitle', materials ? meeting?.title || '会议资料' : `${row.input_kind === 'audio_file' ? '音频导入' : row.data_scope === 'synthetic' ? '示例会议' : '正式会议'} · ${row.question_count || 0} 个查证问题`));
+        copy.append(element('span', 'row-subtitle', `${row.input_kind === 'audio_file' ? '音频导入' : row.data_scope === 'synthetic' ? '示例会议' : '正式会议'} · ${row.question_count || 0} 个查证问题`));
         name.append(paper, copy);
         const status = element('span', 'row-state');
         status.dataset.state = row.state;
         status.dataset.stale = String(Boolean(row.basis_stale));
-        status.append(element('span', 'status-dot'), document.createTextNode(materials ? row.basis_stale ? '待复核' : documentLabels[row.state] || row.state : row.state === 'active' ? '进行中' : meetingStates[row.state] || row.state));
-        const updated = materials ? row.created_at : row.updated_at || row.created_at;
+        status.append(element('span', 'status-dot'), document.createTextNode(row.state === 'active' ? '进行中' : meetingStates[row.state] || row.state));
+        const updated = row.updated_at || row.created_at;
         const dateNode = element('time', 'row-date', calendarDate(updated));
         if (date(updated)) dateNode.dateTime = date(updated).toISOString();
-        button.append(name, status, element('span', 'row-count', materials ? `v${row.version}` : `${row.document_count || 0} 份`), dateNode);
+        button.append(name, status, element('span', 'row-count', `${row.document_count || 0} 份`), dateNode);
         wrap.append(button);
         if (canManage) {
           const actions = element('button', 'meeting-row-actions');
@@ -652,11 +940,10 @@
       if (focused) [...list.querySelectorAll('button')].find(node => node.dataset.rowId === focused)?.focus({preventScroll:true});
     }
     $('library-empty').hidden = Boolean(rows.length);
-    $('empty-create').hidden = Boolean(query) || materials || state.filter !== 'all';
+    $('empty-create').hidden = Boolean(query) || state.filter !== 'all';
     $('empty-setup').hidden = $('empty-create').hidden || Boolean(state.home?.meetings?.length);
-    const filteredMaterials = materials && (materialShelf.filter !== 'all' || state.filter !== 'all');
-    text($('library-empty-title'), query ? '没有找到匹配内容' : filteredMaterials ? '暂无符合筛选的资料' : materials ? '资料会在这里汇集' : state.filter === 'all' ? '开始你的第一场会议' : '暂无符合筛选的会议');
-    text($('library-empty-message'), query ? '试试更短的关键词，或清除搜索。' : filteredMaterials ? '切换资料状态或会议筛选查看其他资料。' : materials ? '打开一场会议，在“查证问题”中添加问题；生成的 Markdown 会出现在这里。' : state.filter === 'all' ? '第一次使用？先设置语音转写，再决定是否开启 AI 查证和飞书同步。' : '切换“全部”查看已有会议。');
+    text($('library-empty-title'), query ? '没有找到匹配内容' : state.filter === 'all' ? '开始你的第一场会议' : '暂无符合筛选的会议');
+    text($('library-empty-message'), query ? '试试更短的关键词，或清除搜索。' : state.filter === 'all' ? '第一次使用？先设置语音转写，再决定是否开启 AI 查证和飞书同步。' : '切换“全部”查看已有会议。');
     renderRecent();
   }
   function closeMeetingActions() {
@@ -781,6 +1068,11 @@
     state.request = null;
     state.token = '';
     state.home = null;
+    materialShelf.request?.abort();
+    Object.assign(materialShelf, {search:'', scope:null, beforeSearch:null, id:'', limit:40, reading:false, listScroll:0,
+      requestKey:'', request:null, content:null, raw:false, signature:''});
+    for (const id of ['materials-meeting-filter', 'materials-status']) $(id).value = 'all';
+    $('materials-sort').value = 'new';
     feishu.reset(); preference = 'start';
     state.snapshot = null;
     state.meetingId = '';
@@ -2807,24 +3099,57 @@
     const actions = event.target.closest('[data-manage-meeting]');
     if (actions) { showMeetingActions(actions); return; }
     const row = event.target.closest('[data-meeting-id]');
-    if (row?.dataset.materialQuestion && state.route === 'materials' && desktopLibrary.matches) {
-      materialShelf.id = row.dataset.rowId; renderLibrary(); return;
-    }
-    if (row) selectMeeting(row.dataset.meetingId, row.dataset.materialQuestion || '', row.dataset.materialQuestion ? 'document' : 'answer');
+    if (row) selectMeeting(row.dataset.meetingId);
   });
-  $('library-resume').addEventListener('click', event => { if (event.currentTarget.dataset.meetingId) selectMeeting(event.currentTarget.dataset.meetingId); });
-  $('material-filters').addEventListener('click', event => {
-    const btn = event.target.closest('[data-material-filter]'); if (!btn) return;
-    materialShelf.filter = btn.dataset.materialFilter;
-    for (const item of $('material-filters').querySelectorAll('button')) item.setAttribute('aria-pressed', String(btn === item));
-    renderLibrary();
+  $('library-resume').addEventListener('click', event => {
+    if (event.currentTarget.dataset.meetingId) selectMeeting(event.currentTarget.dataset.meetingId);
+  });
+  $('materials-catalog').addEventListener('click', event => {
+    const button = event.target.closest('[data-material-scope]');
+    if (button) switchMaterialScope(button.dataset.materialScope);
+  });
+  $('materials-scope').addEventListener('change', event => switchMaterialScope(event.currentTarget.value));
+  for (const id of ['materials-meeting-filter', 'materials-status', 'materials-sort']) $(id).addEventListener('change', () => {
+    materialShelf.limit = 40;
+    $('materials-list').scrollTop = 0;
+    renderMaterials();
+    if (id === 'materials-sort') $('materials-list').querySelector('[aria-current="true"]')?.scrollIntoView({block:'nearest'});
+  });
+  $('materials-list').addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.dataset.materialId) {
+      materialShelf.id = button.dataset.materialId;
+      materialShelf.listScroll = $('materials-list').scrollTop;
+      materialShelf.reading = narrowMaterials.matches;
+      renderMaterials();
+      if (narrowMaterials.matches) $('material-preview-title').focus({preventScroll:true});
+    } else if (button.id === 'materials-more') {
+      const next = materialShelf.limit;
+      materialShelf.limit += 40;
+      renderMaterials();
+      $('materials-list').querySelectorAll('[data-material-id]')[next]?.focus();
+    } else if (button.id === 'materials-reset') {
+      $('library-search').value = '';
+      $('materials-meeting-filter').value = $('materials-status').value = 'all';
+      searchMaterials('');
+      $('library-search').focus();
+    }
+  });
+  $('material-back').addEventListener('click', () => closeMaterialReading(true));
+  $('material-source').addEventListener('click', () => {
+    materialShelf.raw = !materialShelf.raw;
+    updateMaterialSource();
   });
   $('material-open').addEventListener('click', () => {
-    const r = state.home?.materials?.find(row => row.id === materialShelf.id);
-    if (r) selectMeeting(r.meeting_id, r.question_id, 'document');
+    const record = state.home?.materials?.find(row => row.id === materialShelf.id);
+    if (record) selectMeeting(record.meeting_id, record.question_id, 'document');
   });
-  $('material-reload').addEventListener('click', () => { const r = state.home?.materials?.find(row => row.id === materialShelf.id); if (r) previewLibraryMaterial(r, true); });
-  desktopLibrary.addEventListener('change', () => { if (state.route === 'materials') renderLibrary(); });
+  $('material-reload').addEventListener('click', () => {
+    const record = state.home?.materials?.find(row => row.id === materialShelf.id);
+    if (record) previewLibraryMaterial(record, true, state.home.meetings.find(meeting => meeting.id === record.meeting_id)?.title);
+  });
+  narrowMaterials.addEventListener('change', () => closeMaterialReading());
   $('meeting-actions-menu').addEventListener('toggle', event => {
     if (event.newState === 'closed') document.querySelectorAll('.meeting-row-actions[aria-expanded="true"]').forEach(button => button.setAttribute('aria-expanded', 'false'));
   });
@@ -2872,9 +3197,13 @@
   });
   $('library-search').addEventListener('input', (event) => {
     if (state.route === 'meeting') { openMeetingSearch(); return; }
+    if (state.route === 'materials') { if (!event.isComposing) searchMaterials(event.target.value); return; }
     state.search = event.target.value;
-    if (!['meetings', 'materials'].includes(state.route)) setRoute('meetings');
+    if (state.route !== 'meetings') setRoute('meetings');
     renderLibrary();
+  });
+  $('library-search').addEventListener('compositionend', (event) => {
+    if (state.route === 'materials') searchMaterials(event.target.value);
   });
   $('library-search').addEventListener('pointerdown', () => {
     if (document.activeElement !== $('library-search')) meetingSearch.previousFocus = document.activeElement;
