@@ -18,7 +18,7 @@ from live.model_budget import ModelBudget
 from live.model_transport import ModelSessions, model_headers, model_http_error, retry_after_seconds
 from live.model_stream import CompletionLimit, STREAM_WIRE_LIMIT, read_completion
 from live.failure_diagnostics import RequestOutcomeUnknown, describe_failure, request_details, transport_details
-from live.detection import DetectionBatch, parse_detection, quote_options
+from live.detection import DetectionBatch, normalize_question_reference, parse_detection, quote_options
 from live.original_evidence import official_source, target_for
 from live.output_validation import OutputValidationError, issues_for
 from live.meeting_archive import distinct_utterances, validate_summary
@@ -245,7 +245,7 @@ class TextModel:
             content['recovery_context'] = {'kind': task['kind'],
                 'handled_actions': work.get('handled_detection_actions', []),
                 'deferred_proposals': work.get('deferred_detection_proposals', [])}
-            content['recovery_instruction'] = '对照已提交动作和已有问题，不因换措辞重复建题。scan 只补充尚未处理的问题；deferred_proposals 已有独立纠正任务，不在扫描中代替它结案。'
+            content['recovery_instruction'] = '对照已提交动作和已有问题，不因换措辞重复建题。scan 只补充尚未处理的问题；deferred_proposals 已有独立纠正任务，不在扫描中代替它结案。其中 dismissed 项已被用户忽略，不再返回对应问题。'
             if task['kind'] == 'scan' and task.get('known_failures'):
                 hint_fields = ('kind', 'title', 'question_id', 'expected_version', 'scope_changed',
                                'evidence_need', 'external_fact', 'public_query', 'original_target')
@@ -254,7 +254,7 @@ class TextModel:
                     for failure in task['known_failures']]
                 content['recovery_instruction'] += ' unverified_proposals 仅供核对。仅在本段新发言确有依据时返回对应动作，保留有效标题和查证目标；找不到原话就不要补写。'
         if task and task['kind'] == 'correction':
-            content.update(previous_proposal=task['proposal'], validation_feedback=task['issues'],
+            content.update(previous_proposal=normalize_question_reference(task['proposal'], work['questions']), validation_feedback=task['issues'],
                 correction_instruction='只修正 previous_proposal 对应的一个问题，逐字保留已有的有效标题、类型和范围。选择正确原话编号，不得输出空列表或换题；不能修正则保留错误供人工核对。')
             content['action_limit'] = 1
         system = COORDINATOR_SYSTEM + '\nJSON Schema：\n' + json.dumps(Decisions.model_json_schema(), ensure_ascii=False)

@@ -316,6 +316,7 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
             final_segments = [s for s in all_segments if s["type"] == "transcript.final"]
             processed = sum(s["event_seq"] <= m["coordinator_cursor"] for s in final_segments)
             recovery = self.detection_task_snapshot(db, m)
+            dismissed = sum(t['state'] == 'dismissed' for t in self._detection_tasks(db, mid))
             return {"server_time": time.time(), "meeting": m, "segments": segments,
                     "transcript_page": {"has_more": has_earlier, "next_before": segments[0]['event_seq'] if has_earlier else None,
                                         "revision_epoch": m.get('transcript_revision_epoch', 0),
@@ -328,7 +329,8 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                                             "strategy": "import" if m.get("input_kind") == "audio_file" else "live",
                                             "recovering": sum(t['state'] in {'pending', 'running'} for t in recovery),
                                             "needs_review": sum(t['state'] == 'needs_review' for t in recovery),
-                                            "complete": processed == len(final_segments) and not recovery,
+                                            "dismissed": dismissed,
+                                            "complete": processed == len(final_segments) and not recovery and not dismissed,
                                             "held_questions": sum(self._automation_held(m, q) for q in questions)},
                     "activity": activity, "speech_gaps": self._speech_gaps(db, m),
                     "counts": counts, "capabilities": self.capabilities,
@@ -610,7 +612,8 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
     def _refs(self, db, m, refs):
         for ref in refs:
             s = self.store._get(db, "wb_segment", m["id"] + ":" + ref["segment_id"])
-            require(s["revision"] == ref["revision"] and s["type"] == "transcript.final", "依据发言已被更正或撤回", 409)
+            require(s["revision"] == ref["revision"] and s["type"] == "transcript.final", "依据发言已被更正或撤回", 409,
+                    code='source_revision_stale')
 
     def _discussion_context(self, db, meeting, question, *, segments=None):
         """Pin relevant final utterances to this run without sending the whole meeting."""
@@ -1411,9 +1414,13 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
             else:
                 q = self.store._get(db, "wb_question", decision.question_id)
                 supplied = next((old for old in work["questions"] if old["id"] == q["id"]), None)
-                require(supplied is not None and q["meeting_id"] == m["id"] and q["version"] == decision.expected_version
-                        and q["version"] == supplied["version"] and q["generation"] == supplied["generation"]
-                        and q["state"] not in {"cancelled", "paused", "outcome_unknown"} and not q["basis_stale"], "问题版本或操作状态已失效", 409)
+                require(supplied is not None and q["meeting_id"] == m["id"], '引用的问题不在本场识别上下文中', 409,
+                        code='question_not_found')
+                require(q["version"] == decision.expected_version and q["version"] == supplied["version"],
+                        '问题已有新版本', 409, code='question_version_stale')
+                require(q["generation"] == supplied["generation"], '问题操作状态已变化', 409, code='question_state_stale')
+                require(q["state"] not in {"cancelled", "paused", "outcome_unknown"} and not q["basis_stale"],
+                        '问题当前状态不允许自动补充', 409, code='question_unavailable')
                 if decision.kind == "cancel_candidate":
                     require(q["state"] == "candidate", "模型只能直接取消尚未批准的候选", 409)
                     q.update(state="cancelled", generation=q["generation"] + 1)

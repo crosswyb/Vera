@@ -1389,20 +1389,23 @@
     const pendingSegments = Math.max(0, progress?.pending || 0);
     const deferredDetection = Math.max(0, progress?.recovering || 0);
     const detectionReview = Math.max(0, progress?.needs_review || 0);
+    const dismissedDetection = Math.max(0, progress?.dismissed || 0);
     const issue = coordinatorIssue(meeting);
     const recovering = ['scheduled', 'running'].includes(meeting?.coordinator_retry?.state) || meeting?.detection_service_retry?.state === 'scheduled';
     const postMeetingStatus = issue && !recovering ? '会后问题识别待重试' : pendingSegments || meeting?.coordinator_state === 'running' ? paused ? '会后问题识别已暂停' : recovering ? '正在恢复会后问题识别' : meeting?.coordinator_state === 'running' ? '会后问题识别进行中' : '会后问题识别等待执行' : questions.some(q => q.state === 'running') ? '会后查证进行中' : unfinished ? paused ? '未完成查证已暂停' : '会后查证等待执行' : questions.some(q => ['failed', 'outcome_unknown'].includes(q.state)) ? '查证问题可重试' : questions.length ? '查证已完成' : '暂无查证问题';
     text($('automation-status'), !meeting ? '正在读取查证状态' : afterMeeting ? postMeetingStatus : !live ? meetingStates[meeting.state] || '会议不可用' : paused ? '自动查证已暂停' : recovering ? '正在恢复问题识别' : meeting.coordinator_error || ['failed', 'outcome_unknown'].includes(meeting.coordinator_state) ? '问题识别待重试' : '自动查证运行中');
     $('automation-status').dataset.state = !research ? 'ended' : paused ? 'paused' : issue && !recovering ? 'failed' : 'active';
     if (research && !paused && !issue && (deferredDetection || detectionReview)) {
-      text($('automation-status'), `${afterMeeting ? '会后识别' : '新发言识别'}${pendingSegments || meeting.coordinator_state === 'running' ? '进行中' : '正常'} · ${deferredDetection ? `${deferredDetection} 项补充识别中` : ''}${deferredDetection && detectionReview ? ' · ' : ''}${detectionReview ? `${detectionReview} 项待核对` : ''}`);
+      text($('automation-status'), `${afterMeeting ? '会后识别' : '新发言识别'}${pendingSegments || meeting.coordinator_state === 'running' ? '进行中' : '正常'} · ${deferredDetection ? `${deferredDetection} 项补充识别中` : ''}${deferredDetection && detectionReview ? ' · ' : ''}${detectionReview ? `${detectionReview} 项待处理` : ''}`);
     }
+    if (dismissedDetection) text($('automation-status'), `${$('automation-status').textContent} · ${dismissedDetection} 项识别已忽略`);
     $('automation-hint').hidden = !research || !paused && !(afterMeeting && pendingSegments);
     text($('automation-hint'), afterMeeting ? `${pendingSegments ? `还有 ${pendingSegments} 段转写待分析。` : ''}${paused ? '恢复自动查证后继续识别剩余转写和未完成问题；也可单独重试已有问题。' : issue && !recovering ? '问题识别暂未完成，请查看错误提示并重试；已完成资料会保留。' : '将从剩余转写继续分析，已完成的资料会保留。'}` : '已开始的任务会完成；仍可手动添加、立即查证或重试。');
     text($('meeting-info-guidance'), afterMeeting ? '会议已停止收听并整理文件。恢复自动查证后，从未分析的转写继续识别问题，并处理未完成查证；已完成资料会保留。' : '暂停只影响自动任务。已开始的查证会继续，手动添加和重试仍可用；恢复后从未处理的转写继续。');
     text($('automation-progress-label'), '问题识别进度');
     text($('automation-progress'), progress ? `已分析 ${progress.processed} 段 · 待分析 ${progress.pending} 段${afterMeeting ? ` · ${unfinished} 个问题尚待完成` : progress.held_questions ? ` · ${progress.held_questions} 个问题等待恢复` : ''}` : '正在读取');
-    if (progress && (deferredDetection || detectionReview)) text($('automation-progress'), `已扫描 ${progress.processed} 段 · 未扫描 ${progress.pending} 段 · ${deferredDetection} 项补充识别中 · ${detectionReview} 项待核对`);
+    if (progress && (deferredDetection || detectionReview)) text($('automation-progress'), `${$('automation-progress').textContent} · ${deferredDetection} 项补充识别中 · ${detectionReview} 项待处理`);
+    if (progress && dismissedDetection) text($('automation-progress'), `${$('automation-progress').textContent} · ${dismissedDetection} 项已忽略`);
     renderDetectionRecovery(snapshot?.detection_tasks || [], paused);
     for (const id of ['show-meeting-info', 'show-activity']) $(id).disabled = !meeting;
     $('coordinator-warning').hidden = !research || !issue;
@@ -1422,14 +1425,18 @@
   function renderDetectionRecovery(tasks, paused) {
     const mid = state.meetingId;
     $('detection-recovery').hidden = !tasks.length;
-    text($('detection-recovery-summary'), `部分发言仍待识别确认（${tasks.length} 项）${paused ? '，恢复自动查证后继续' : '，后续发言继续处理'}`);
+    text($('detection-recovery-summary'), `部分发言识别未完成（${tasks.length} 项）${paused ? '，可忽略此项或恢复自动查证后重试' : '，可重新识别或忽略，后续发言继续处理'}`);
     const container = $('detection-recovery-items');
-    const signature = JSON.stringify([mid, tasks, paused]);
+    const signature = JSON.stringify([mid, tasks, paused, [...state.pendingButtons]]);
     if (container.dataset.signature === signature) return;
     container.dataset.signature = signature;
     container.replaceChildren();
     const reasons = {quote_id_not_found: '所选原话编号无效', quote_not_in_new_segment: '问题依据未匹配原话',
-      source_not_in_new_segment: '引用发言的编号或版本无效', context_stale: '依据或问题版本已变化',
+      source_not_in_new_segment: '引用发言的编号或版本无效', context_stale: '识别结果与当前问题不一致',
+      question_not_found: '识别结果未能关联到本场已有问题', question_version_stale: '问题已有新版本，原识别结果尚未应用',
+      question_state_stale: '问题操作状态已变化，原识别结果尚未应用',
+      question_unavailable: '相关问题当前状态不允许自动补充', source_revision_stale: '引用发言已更正或撤回',
+      reference_not_found: '识别结果引用的发言或问题不存在',
       missing_proposal: '模型未能完成本条问题的修正', correction_count_mismatch: '修正结果没有保留本条问题',
       scan_incomplete: '此范围仍需补充识别', invalid_json: '模型未返回完整内容', interrupted: '上次识别被中断',
       local_save_failed: '识别结果未能保存到本机，请检查磁盘后重试此项',
@@ -1438,13 +1445,30 @@
     for (const task of tasks) {
       const row = element('div', 'detection-recovery-item');
       const stamp = audioTime(task.audio_start_ms || 0);
-      const label = task.state === 'needs_review' ? '待核对' : task.state === 'running' ? '补充识别中' : paused ? '已暂停' : '等待补充识别';
-      row.append(element('p', '', `${stamp} · ${label} · ${reasons[task.issues?.[0]?.code] || '返回内容未通过校验'}`));
+      const label = task.state === 'needs_review' ? '待处理' : task.state === 'running' ? '补充识别中' : paused ? '已暂停' : '等待补充识别';
+      const scan = task.kind === 'scan';
+      const description = element('div', 'detection-recovery-description');
+      description.append(element('p', '', `${stamp} · ${label} · ${reasons[task.issues?.[0]?.code] || '返回内容未通过校验'}`));
+      if (scan) {
+        description.append(element('p', 'muted', `待处理范围：${task.source_refs.length} 段发言；忽略将停止整个范围的补充识别。`));
+        for (const title of task.proposal_titles || []) description.append(element('p', 'muted', `已知待处理问题：${title}`));
+        const sharedTitles = task.batch_proposal_titles || [];
+        for (const title of sharedTitles) description.append(element('p', 'muted', `同批待处理（可能涉及其他发言）：${title}`));
+        if (sharedTitles.length) description.append(element('p', 'muted', '忽略本范围不一定会关闭这些同批问题。'));
+      } else if (task.proposal_title) description.append(element('p', 'muted', `待处理的问题：${task.proposal_title}`));
+      row.append(description);
       const locate = element('button', 'text-button', '查看相关发言');
       locate.type = 'button';
       locate.id = `locate-${task.id}`;
       locate.addEventListener('click', () => perform(locate, () => locateDetectionTask(task, mid)));
       row.append(locate);
+      if (task.question_id) {
+        const related = element('button', 'text-button', '查看相关问题');
+        related.type = 'button';
+        related.title = task.question_title || task.proposal_title || '';
+        related.addEventListener('click', () => { if (mid === state.meetingId) openQuestionDetail(task.question_id); });
+        row.append(related);
+      }
       if (task.state === 'needs_review') {
         const retry = element('button', 'text-button', '重新识别这段发言');
         retry.id = `retry-${task.id}`;
@@ -1454,6 +1478,19 @@
           if (mid === state.meetingId) await refreshNow();
         }));
         row.append(retry);
+        const dismiss = element('button', 'text-button', scan ? '忽略这段补充识别' : '忽略此项');
+        dismiss.id = `dismiss-${task.id}`;
+        dismiss.type = 'button';
+        dismiss.disabled = state.pendingButtons.has(dismiss.id);
+        dismiss.title = scan ? '停止处理这个范围内的全部补充识别，保留发言和已有问题，并记录为已忽略。' : '停止处理这条识别，保留发言和已有问题，并记录为已忽略。';
+        dismiss.addEventListener('click', () => perform(dismiss, async () => {
+          await api(`/live/v2/meetings/${encodeURIComponent(mid)}/detection-tasks/${encodeURIComponent(task.id)}/dismiss`, {method: 'POST', body: {}});
+          if (mid === state.meetingId) {
+            await refreshNow();
+            if (mid === state.meetingId) notice(scan ? '已忽略这段发言的全部补充识别，原发言和已有问题已保留。' : '已忽略这条识别，原发言和已有问题已保留。');
+          }
+        }));
+        row.append(dismiss);
         if (paused) {
           const hint = element('span', 'detection-retry-hint', '本场自动查证已暂停，恢复后可重新识别。');
           hint.id = `retry-hint-${task.id}`;

@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -317,6 +318,28 @@ class DetectionRecoveryTest(unittest.TestCase):
         self.assertEqual(len(old.snapshot(self.owner, self.mid)['detection_tasks']), 1)
         with self.assertRaises(ValueError):
             prepare_rollback(source, target)
+
+    def test_rollback_export_keeps_dismissals_terminal_for_older_runtime(self):
+        from tools.prepare_detection_rollback import prepare_rollback
+        self.bad_batch()
+        self.run_work(self.wb.detection_recovery_work(self.agent), [])
+        task, = self.snapshot()['detection_tasks']
+        self.wb.dismiss_detection_task(self.owner, self.mid, task['id'])
+        with self.wb.store.transaction() as db:
+            original = self.wb.store._get(db, 'wb_detection_task', task['id'])
+        source = self.wb.store.path
+        before = hashlib.sha256(source.read_bytes()).hexdigest()
+        target = self.root / 'dismissed-rollback.sqlite3'
+        report = prepare_rollback(source, target)
+        self.assertFalse(report['paused_meetings'])
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
+        with sqlite3.connect(target) as copy:
+            exported = json.loads(copy.execute(
+                "SELECT data FROM records WHERE kind='wb_detection_task' AND id=?", (task['id'],)).fetchone()[0])
+        self.assertEqual(exported, {**original, 'state': 'superseded'})
+        self.assertEqual(original['state'], 'dismissed')
+        self.assertEqual(exported['dismissed_by'], self.owner['id'])
+        self.assertGreater(exported['dismissed_at'], 0)
 
     def test_entire_invalid_json_is_scanned_in_bounded_windows(self):
         self.say('需要补扫的范围？')
