@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
+from live.source_reader import Researcher
 from live.workbench_contracts import MeetingPermissions, NewMeeting, QuestionAction, Utterance
 from live.workbench_runtime import TextModel
 from live_api import create_app
@@ -83,3 +84,49 @@ class MentionRepairsTest(unittest.TestCase):
         q, = self.questions()
         self.assertEqual(q['state'], 'needs_query')
         self.assertIsNone(self.wb.claim(self.agent))
+
+    def test_first_internal_answer_uses_existing_final_turn_and_tracks_its_revision(self):
+        self.wb.utterance(self.owner, self.mid, Utterance(text='目前只验证了创建，没有运行真实负载。', segment_id='answer'))
+        self.batch('此前做过真实负载测试吗？', dict(evidence_need='internal'))
+        work = self.wb.claim(self.agent)
+        search = Mock()
+        def answer(_prompt, content, **_kwargs):
+            proof = next(row for row in content['utterances'] if '没有运行真实负载' in row['quote'])
+            return {'status': 'answered', 'short_answer': '会上确认，只验证了创建。',
+                    'evidence_ids': [proof['id']]}
+        self.model.call = Mock(side_effect=answer)
+        result = Researcher(search, self.model).run(work['meeting'], work['question'], lambda _: None)
+        saved = self.wb.finish(self.agent, work, result)
+        self.assertEqual(saved['state'], 'completed')
+        self.assertEqual(saved['result']['meeting_evidence'][0]['quote'], '目前只验证了创建，没有运行真实负载。')
+        search.search.assert_not_called()
+        self.model.call.assert_called_once()
+        self.wb.utterance(self.owner, self.mid, Utterance(text='更正，测试时使用了模拟负载。', segment_id='answer', revision=2))
+        self.assertTrue(self.questions()[0]['basis_stale'])
+
+    def test_later_evidence_updates_original_question_and_enters_summary(self):
+        self.batch('要怎么查出真实使用比例？', dict(evidence_need='internal'))
+        claimed = self.wb.claim(self.agent)
+        question_id = claimed['question']['id']
+        self.model.call = Mock(return_value={'status': 'missing', 'short_answer': '比例还未核实。', 'gap': '缺少高峰时段日志。'})
+        engine = Researcher(None, self.model)
+        result = engine.run(claimed['meeting'], claimed['question'], lambda _: None)
+        q = self.wb.finish(self.agent, claimed, result)
+        self.assertEqual(q['state'], 'insufficient')
+        action = dict(self.mention(q, 'internal'), recheck_meeting=True)
+        evidence = '先取高峰期一小时的访问日志，再统计真实使用比例。'
+        self.batch(evidence, action)
+        self.assertEqual(len(self.questions()), 1)
+        revised = self.wb.claim(self.agent)
+        self.assertEqual(revised['question']['id'], question_id)
+        self.assertEqual(revised['question']['anchor_ref'], claimed['question']['anchor_ref'])
+        def answer(_prompt, content, **_kwargs):
+            proof = next(row for row in content['utterances'] if row['quote'] == evidence)
+            return {'status': 'follow_up', 'short_answer': '取高峰期一小时的日志。', 'evidence_ids': [proof['id']]}
+        self.model.call = Mock(side_effect=answer)
+        result = engine.run(revised['meeting'], revised['question'], lambda _: None)
+        self.wb.finish(self.agent, revised, result)
+        self.wb.control(self.owner, self.mid, 'end')
+        work = self.wb.summary_work(self.agent)
+        self.assertEqual(work['follow_ups'][0]['text'], result['answer'])
+        self.assertEqual(len(work['follow_ups'][0]['source_refs']), 1)

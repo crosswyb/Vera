@@ -179,7 +179,12 @@
               <section id="research-progress" class="research-progress" aria-label="查证进度" hidden>
                 <div class="research-status"><span class="research-indicator" aria-hidden="true"></span><h3 id="research-status-title" role="status" aria-live="polite"></h3><span id="research-elapsed" class="research-elapsed"></span></div>
                 <p id="research-query" class="research-query" hidden></p><p id="research-wait" class="research-wait" role="status" hidden></p>
-                <div id="research-draft" class="research-draft" hidden><p class="research-draft-label">回答草稿 · 待核验</p><p id="research-draft-text"></p></div>
+                <div id="research-draft" class="research-draft" hidden>
+                  <p id="research-draft-label" class="research-draft-label">回答草稿 · 待核验</p>
+                  <p id="research-draft-text"></p>
+                  <p id="research-brief-caveat" hidden></p>
+                  <ul id="research-brief-sources" hidden></ul>
+                </div>
                 <details id="research-process" class="research-process"><summary>查证过程 <span id="research-source-count"></span><span id="result-version" class="version-label"></span></summary><ol id="research-events" class="research-events"></ol><div id="research-source-list" class="research-source-list"></div>
                   <details id="research-thinking" class="research-thinking" hidden><summary id="research-thinking-title">模型处理</summary><p id="research-model-detail"></p></details>
                 </details>

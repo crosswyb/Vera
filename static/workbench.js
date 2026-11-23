@@ -72,7 +72,8 @@
     waiting_dependency: '等待前置资料',
     needs_query: '待补检索词', needs_review: '依据已更正·待复核', backlog: '队列已满·待整理',
   };
-  const evidenceStates = {supported: '有来源支持', mixed: '证据存在分歧', insufficient: '证据不足', model_explanation: '模型解释·未核验'};
+  const evidenceStates = {supported: '有来源支持', mixed: '有条件结论', insufficient: '证据不足', model_explanation: '模型解释·未核验', meeting_context: '来自本场发言'};
+  const meetingResolutionLabels = {answered: '会上已答复', partial: '会上有部分答复', follow_up: '会上安排了跟进', missing: '仍需核对'};
   const stages = {searching: '搜索资料', reading: '读取原文', synthesizing: '整理回答', publishing: '保存文档', queued: '等待执行', detecting: '问题识别', research_unavailable: '研究服务暂不可用', budget_exhausted: '本次请求额度已用完', invalid_evidence_or_contract: '返回资料未通过校验', outcome_unknown: '请求结果未知，请确认后重试'};
   const captureStates = {idle: '未连接', disconnected: '未连接', ready: '音频已就绪', listening: '正在收听', running: '正在采音', capturing: '正在采音', paused: '收听已暂停', stopped: '采音已停止', error: '音频异常', gap: '采音存在缺口', level: '收到音频电平', status: '组件状态更新', unavailable: '音频不可用', bridge: '知了桥接', not_connected: '未连接'};
   const meetingStates = {active: '会议进行中', running: '会议进行中', open: '会议进行中', paused: '会议已暂停', ended: '会议已结束', stopped: '已全部停止', expired: '数据已到期清理', created: '会议已创建', deleting: '正在删除', delete_failed: '删除未完成'};
@@ -1877,9 +1878,27 @@
         model.timeout_retry === 'sent' ? '超时后已自动重试 1 次' : model.timeout_retry === 'queued' ? '超时后等待自动重试' : '',
         model.format_corrected ? '已进入格式校正流程' : ''].filter(Boolean).join('\n'));
     }
-    const draft = running && model?.draft;
+    const checked = running && p?.verified_brief;
+    const draft = checked?.text || (running && model?.draft);
     $('research-draft').hidden = !draft;
+    text($('research-draft-label'), checked ? '会中短答 · 完整分析生成中' : '回答草稿 · 待核验');
     text($('research-draft-text'), draft || '');
+    const briefCaveat = $('research-brief-caveat');
+    briefCaveat.hidden = !checked?.caveat;
+    text(briefCaveat, checked?.caveat || '');
+    const briefSources = $('research-brief-sources');
+    briefSources.hidden = !checked?.sources?.length;
+    const briefSignature = JSON.stringify(checked || null);
+    if (briefSources.dataset.signature !== briefSignature) {
+      briefSources.dataset.signature = briefSignature;
+      briefSources.replaceChildren();
+      for (const source of checked?.sources || []) {
+        const row = element('li');
+        row.append(sourceLink(source, source.title), element('blockquote', '', source.quote));
+        briefSources.append(row);
+      }
+      if (checked) performance.mark('vera-research-brief-visible');
+    }
     renderResearchClock();
   }
   function renderDetail() {
@@ -1903,7 +1922,8 @@
     text($('question-state'), held ? '等待恢复' : automatic && question.state === 'candidate' ? '等待研究' : researchLabel(question));
     $('question-state').dataset.state = held ? 'paused' : question.state || '';
     const evidenceState = question.state === 'running' ? '' : question.result?.evidence_status;
-    text($('evidence-state'), question.basis_stale ? '依据已更正·结果待复核' : evidenceStates[evidenceState] || evidenceState || '尚未形成证据');
+    text($('evidence-state'), question.basis_stale ? '依据已更正·结果待复核' :
+      (evidenceState && meetingResolutionLabels[question.result?.meeting_resolution]) || evidenceStates[evidenceState] || evidenceState || '尚未形成证据');
     $('evidence-state').dataset.evidence = question.basis_stale ? 'insufficient' : evidenceState || '';
     const basis = (question.source_refs || []).map((ref) => {
       const segment = (state.snapshot?.segments || []).find((item) => item.segment_id === ref.segment_id);
@@ -1913,7 +1933,7 @@
       return `${time(segmentTime(segment))}「${segment.text}」`;
     });
     const origin = basis.length ? `发言依据：${basis.join('；')}` : question.origin === 'manual' ? '来源：手动研究问题' : '';
-    const route = {public: '联网查证', mixed: '查公开事实，内部情况另核', explanation: '模型解释', internal: '需内部材料'}[question.evidence_need];
+    const route = {public: '联网查证', mixed: '查公开事实，内部情况另核', explanation: '模型解释', internal: '核对本场发言'}[question.evidence_need];
     const trigger = question.grounding_quote && !question.basis_stale ? [
       route && `处理方式：${route}`, `触发原话：「${question.grounding_quote}」`,
       question.external_fact && `待核实的事实：${question.external_fact}`,
@@ -1967,6 +1987,35 @@
   function answerParagraphs(container, value) {
     for (const paragraph of value.split(/\n\s*\n/).filter(part => part.trim())) container.append(element('p', 'answer-text', paragraph));
   }
+  function analysisText(result) {
+    if (!result.analysis?.length) return result.answer || '';
+    return result.analysis.map(section => section.items.map((item, index) => {
+      const prefix = section.layout === 'steps' ? `${index + 1}. ` : section.layout === 'points' ? '- ' : '';
+      const refs = item.claim_indices?.length ? `（佐证 ${item.claim_indices.join('、')}）` : '';
+      return prefix + item.text + refs;
+    }).join(section.layout === 'paragraphs' ? '\n\n' : '\n')).join('\n\n');
+  }
+
+  function renderAnalysis(container, result, sourceItems) {
+    if (!result.analysis?.length) {
+      answerParagraphs(container, result.answer);
+      return;
+    }
+    for (const section of result.analysis) {
+      const isList = section.layout === 'steps' || section.layout === 'points';
+      const group = isList ? element(section.layout === 'steps' ? 'ol' : 'ul', 'analysis-list') : container;
+      for (const item of section.items) {
+        const node = element(isList ? 'li' : 'p', 'answer-text', item.text);
+        for (const index of new Set(item.claim_indices || [])) {
+          const claim = result.claims?.[index - 1];
+          const source = sourceItems.find(entry => entry.id === claim?.source_id);
+          if (source) node.append(document.createTextNode(' '), sourceLink(source, `佐证 ${index}`));
+        }
+        group.append(node);
+      }
+      if (isList) container.append(group);
+    }
+  }
   async function copyAnswer(value) {
     if (navigator.clipboard?.writeText) {
       try { await navigator.clipboard.writeText(value); return; } catch { /* WebKit may require the selection-based path. */ }
@@ -2018,12 +2067,26 @@
       briefSection.append(element('p', 'short-answer', brief.short_answer));
     }
     container.append(briefSection);
-    if (result.answer) {
+    if (result.analysis?.length || (result.answer && result.answer.trim() !== brief.short_answer.trim())) {
       const analysis = element('section', 'answer-analysis');
       analysis.setAttribute('aria-label', '完整分析');
       analysis.append(element('h3', '', '完整分析'));
-      answerParagraphs(analysis, result.answer);
+      renderAnalysis(analysis, result, sourceItems);
       container.append(analysis);
+    }
+    if (result.meeting_evidence?.length) {
+      const section = element('section', 'answer-analysis');
+      section.append(element('h3', '', '会中原话'));
+      for (const ref of result.meeting_evidence) {
+        section.append(element('blockquote', 'answer-text', ref.quote));
+        if (!question.basis_stale) {
+          const locate = element('button', 'text-button', '查看原发言');
+          locate.type = 'button';
+          locate.addEventListener('click', () => perform(locate, () => locateDetectionTask({source_refs: [ref]}, question.meeting_id)));
+          section.append(locate);
+        }
+      }
+      container.append(section);
     }
     if (result.original_evidence) {
       const proof = element('section', 'original-evidence');
@@ -2056,7 +2119,10 @@
     copy.addEventListener('click', async () => {
       copy.disabled = true;
       const value = [question.title, evidenceStates[result.evidence_status] || '',
-        ...(question.basis_stale ? ['依据已更正，当前回答待复核。'] : []), '', '结论摘要', brief.short_answer, '', '完整分析', result.answer || '', '', `适用限制：${brief.caveat}`, '',
+        ...(question.basis_stale ? ['依据已更正，当前回答待复核。'] : []), '', '结论摘要', brief.short_answer,
+        ...(result.analysis?.length || (result.answer && result.answer.trim() !== brief.short_answer.trim()) ? ['', '完整分析', analysisText(result)] : []),
+        '', `适用限制：${brief.caveat}`, '',
+        ...(result.meeting_evidence || []).map(ref => `会中原话：${ref.quote}（片段 ${ref.segment_id}）`),
         ...(result.original_evidence ? [result.original_evidence.label, result.original_evidence.quote || result.original_evidence.message,
           safeURL(result.original_evidence.url)?.href || '', ''] : []),
         ...(brief.key_points || []).map(point => `- 【${kinds[point.kind] || '参考说明'}】${point.text}`),

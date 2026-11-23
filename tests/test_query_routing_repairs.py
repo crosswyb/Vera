@@ -66,3 +66,11 @@ class QueryRoutingRepairsTest(unittest.TestCase):
                 self.engine.run(self.meeting, q, lambda _: None)
                 self.search.search.assert_called_once_with(code + ' 认证')
                 self.search.search.reset_mock()
+
+    def test_generated_search_terms_with_transaction_amount_or_restricted_context_are_held(self):
+        base = {'title': '公开技术资料', 'evidence_need': 'public', 'public_query_origin': 'model'}
+        for question in ({**base, 'public_query': '设备项目 1200万元交付'},
+                         {**base, 'public_query': '设备项目 公开资料', 'restricted_context': True}):
+            with self.subTest(question=question), self.assertRaisesRegex(ValueError, '公开检索词'):
+                self.engine.run(self.meeting, question, lambda _: None)
+        self.search.search.assert_not_called()

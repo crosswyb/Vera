@@ -61,7 +61,7 @@ def check_correction_intent(previous, action):
     proposal_kinds = ('candidate', 'create_question', 'revise_question')
     if action.kind not in proposal_kinds or not isinstance(previous, dict):
         raise OutputValidationError([{'field': 'actions', 'code': 'missing_proposal'}])
-    fields = ['kind', 'title', 'question_id', 'expected_version', 'scope_changed', 'evidence_need']
+    fields = ['kind', 'title', 'question_id', 'expected_version', 'scope_changed', 'evidence_need', 'recheck_meeting', 'defer_research']
     if action.evidence_need in ('public', 'mixed'):
         fields.extend(('external_fact', 'public_query', 'original_target'))
     for name in fields:

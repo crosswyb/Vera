@@ -161,6 +161,24 @@ class DeliveryQueueTests(unittest.TestCase):
         self.assertEqual(self.latest()['state'], 'sent')
         self.cli.send_message.assert_not_called()
 
+    def test_real_delivery_rechecks_restriction_added_after_queueing(self):
+        self.configure()
+        self.meeting['data_scope'] = 'real'
+        self.question.update(evidence_need='public', state='completed', public_query='公开技术文档',
+                             source_refs=[{'segment_id': 'basis', 'revision': 1}])
+        self.question['result'].update(evidence_status='supported', claims=[{'text': '合成公开资料'}])
+        with self.store.transaction() as db:
+            self.store._put(db, 'wb_segment', 'basis', dict(id='basis', meeting_id='M', type='transcript.final',
+                            revision=1, event_seq=2, text='请核对这项技术的公开文档。'))
+        self.publish()
+        self.assertEqual(self.latest()['state'], 'queued')
+        with self.store.transaction() as db:
+            self.store._put(db, 'wb_segment', 'limit', dict(id='limit', meeting_id='M', type='transcript.final',
+                            revision=1, event_seq=3, text='这个事项不要对外传播。'))
+        self.assertTrue(self.sync.process_one())
+        self.assertEqual(self.latest()['state'], 'cancelled')
+        self.cli.create_document.assert_not_called()
+
     def test_crash_after_sending_without_receipt_is_unknown(self):
         self.configure(); job = self.sync.enqueue_test(self.owner)
         self.sync._claim()

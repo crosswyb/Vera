@@ -162,6 +162,35 @@ def quote_catalog(sources):
     return options
 
 
+def relevance_terms(text):
+    words = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+|[\u4e00-\u9fff]+", text.lower())
+    return {term for word in words for term in (
+        [word[i:i + 2] for i in range(len(word) - 1)] if '\u4e00' <= word[0] <= '\u9fff' else [word])}
+
+
+_RESTRICTED_SPEECH = re.compile(r'(?:不要|别|不能|禁止|不宜|不得).{0,10}(?:外传|外发|对外|往外说|发群|发到群|公开)')
+_PRIVATE_QUERY = re.compile(
+    r'(?:内部|保密|未公开|密钥|令牌|api[_ -]?key|password)|'
+    r'(?:人民币|[￥¥$])\s*\d|\d[\d,.]*\s*(?:万|亿)?\s*(?:元|美元)|'
+    r'\d[\d,.]*\s*(?:万|亿)(?=\s|$|中标|预算|项目|合同)|'
+    r'[\w.+-]+@[\w.-]+\.[a-z]{2,}|(?<!\d)1[3-9]\d{9}(?!\d)', re.I)
+
+
+def restrict_public_query(query):
+    return bool(_PRIVATE_QUERY.search(query))
+
+
+def restricted_speech(text):
+    return bool(_RESTRICTED_SPEECH.search(text))
+
+
+def restricted_meeting_context(segments, refs):
+    """Respect restrictions stated around the transcript basis, including a nearby lead-in."""
+    ids = {ref['segment_id'] for ref in refs}
+    return any(restricted_speech(segments[j]['text']) for i, s in enumerate(segments) if s['id'] in ids
+               for j in range(max(0, i - 4), min(len(segments), i + 2)))
+
+
 def validate_result(result):
     answer = ResearchAnswer.model_validate({k: v for k, v in result.items() if k != "sources"}).model_dump(exclude_none=True)
     sources = result.get("sources", [])
@@ -179,12 +208,19 @@ def validate_result(result):
     for index, point in enumerate((answer.get("brief") or {}).get("key_points", [])):
         if any(ref > len(answer["claims"]) for ref in point["claim_indices"]):
             issues.append({"field": f"brief.key_points.{index}.claim_indices", "code": "claim_reference_not_found"})
+    for section_index, section in enumerate(answer.get("analysis", [])):
+        for item_index, item in enumerate(section['items']):
+            if any(ref > len(answer['claims']) for ref in item['claim_indices']):
+                issues.append({"field": f"analysis.{section_index}.items.{item_index}", "code": "claim_reference_not_found"})
     if issues:
         raise OutputValidationError(issues)
     if answer["evidence_status"] in {"supported", "mixed"} and not answer["claims"]:
         raise OutputValidationError([{"field": "claims", "code": "claims_required"}])
     if not sources and answer["evidence_status"] not in {"insufficient", "model_explanation"}:
-        raise OutputValidationError([{"field": "sources", "code": "sources_required"}])
+        if answer["evidence_status"] != "meeting_context" or not answer.get("meeting_evidence"):
+            raise OutputValidationError([{"field": "sources", "code": "sources_required"}])
+    if answer["evidence_status"] == "meeting_context" and (sources or not answer.get("meeting_evidence")):
+        raise OutputValidationError([{"field": "meeting_evidence", "code": "invalid_inventory"}])
     return {**answer, "sources": sources}
 
 
@@ -266,6 +302,9 @@ def _public_search_query(meeting, question, target):
     query = question.get('public_query', '').strip()
     if question.get('web_search_requested'):
         return query  # Send only the text explicitly approved by the user.
+    if meeting.get('data_scope') == 'real' and question.get('public_query_origin') == 'model':
+        if question.get('restricted_context') or restrict_public_query(query):
+            return ''
     if not query and meeting.get('data_scope') in {None, 'synthetic'}:
         return question['title']
     if target or question.get('public_query_origin') != 'model':
@@ -288,13 +327,16 @@ class Researcher:
     def run(self, meeting, question, stage):
         need = question.get('evidence_need')
         internal = needs_internal_records(question)
+        progress = getattr(stage, "progress", None)
         if internal and not question.get('web_search_requested'):
-            note = '本题需核对企业内部记录，或由负责人员确认。请补充与问题对应的原始材料。'
+            if question.get('discussion_context') and callable(getattr(type(self.model), 'answer_from_meeting', None)):
+                stage("synthesizing")
+                return self.model.answer_from_meeting(meeting, question, progress=progress)
+            note = '本场转写暂无可用于回答的上下文。请核对问题所指的内部记录。'
             return validate_result({'answer': note, 'claims': [], 'sources': [], 'uncertainty': [note],
-                                    'evidence_status': 'insufficient'})
+                                    'evidence_status': 'insufficient', 'meeting_resolution': 'missing'})
         target = target_for(question)
         query = _public_search_query(meeting, question, target)
-        progress = getattr(stage, "progress", None)
         timeout_retried = False
 
         def model_step(call, *args, **kwargs):
@@ -345,16 +387,50 @@ class Researcher:
         synthesis = {**question, 'public_query': query}
         if internal:
             synthesis['evidence_need'] = 'mixed'  # Web evidence concerns only the public part of the question.
-        answer = model_step(self.model.answer, meeting, synthesis, reading, **model_progress)
-        checked = validate_result({**answer, "sources": sources})
+        quick = None
+        if (progress and not internal and meeting.get('data_scope') == 'real' and meeting.get('state') == 'active'
+                and meeting.get('input_kind') != 'audio_file'
+                and not target and callable(getattr(type(self.model), 'quick_answer', None))):
+            synthesis['hide_unverified_draft'] = True
+            try:
+                candidate = validate_result({**model_step(self.model.quick_answer, meeting, synthesis, reading, **model_progress),
+                                             'sources': reading})
+            except (ValueError, RequestOutcomeUnknown):
+                candidate = None  # The full answer has access to all of the source passages.
+            if candidate and candidate['evidence_status'] in {'supported', 'mixed'}:
+                if need == 'mixed':
+                    candidate['evidence_status'] = 'mixed'
+                    boundary = '公开来源仅核验公开部分，企业实际情况仍需核对内部记录。'
+                    candidate['brief']['caveat'] = boundary
+                    candidate['uncertainty'] = [boundary]
+                quick = candidate
+            if quick:
+                progress('verified_brief', quick)
+                synthesis['verified_brief'] = quick['brief']['short_answer']
+        try:
+            answer = model_step(self.model.answer, meeting, synthesis, reading, **model_progress)
+            checked = validate_result({**answer, "sources": sources})
+        except (ValueError, RuntimeError):
+            if not quick:
+                raise
+            note = '完整分析未能生成，已保留会中短答及其出处。'
+            return {**quick, 'uncertainty': [*quick['uncertainty'][:11], note],
+                    'brief': {**quick['brief'], 'caveat': (quick['brief']['caveat'][:140] + ' ' + note).strip()}}
         if (must_search or self.choose_search) and checked['evidence_status'] not in {'supported', 'mixed'}:
-            note = '本题要求核验公开资料，现有正文尚不能支持结论。'
-            return {"answer": note, "claims": [], "sources": sources, "uncertainty": [note],
-                    "evidence_status": "insufficient", "brief": {"short_answer": note, "key_points": [
-                        {"text": "请核对来源的适用范围与日期。", "kind": "explanation", "claim_indices": []}], "caveat": note}}
-        if need == 'mixed' or internal:
+            if target:
+                return checked  # Formal originals get their separate lookup status at publication.
+            if checked['evidence_status'] == 'insufficient':
+                return checked
+            note = '公开正文未能核实所问事实。请核对具体对象和原始出处。'
+            return {**checked, 'answer': note, 'brief': None, 'claims': [], 'uncertainty': [note],
+                    'evidence_status': 'insufficient', 'analysis': None}
+        if internal:
             note = '公开来源仅核验行业部分，本企业情况需另核内部原始记录。'
-            checked['evidence_status'] = 'insufficient' if internal else 'mixed'
+            checked['evidence_status'] = 'insufficient'
+            checked['uncertainty'] = [note, *checked['uncertainty'][:11]]
+        elif need == 'mixed':
+            note = '公开来源仅核验公开部分，内部情况需另核本场或企业原始记录。'
+            checked['evidence_status'] = 'mixed'
             checked['uncertainty'] = [note, *checked['uncertainty'][:11]]
         return checked
 

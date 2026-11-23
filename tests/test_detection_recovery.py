@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from live.detection import parse_detection, quote_options
 from live.store import LiveError
-from live.workbench_contracts import MeetingPermissions, NewMeeting, Utterance
+from live.workbench_contracts import EditQuestion, MeetingPermissions, NewMeeting, Utterance
 from live.workbench_runtime import TextModel, WorkbenchRuntime
 from live_api import create_app
 
@@ -395,6 +395,28 @@ class DetectionRecoveryTest(unittest.TestCase):
         self.assertEqual(client.post(path, json={}, headers=headers).status_code, 200)
         self.assertEqual(client.post(path, json={}, headers=headers).status_code, 409)
         self.assertEqual(self.snapshot()['meeting']['coordinator_state'], 'idle')
+
+    def test_manual_retry_refreshes_nearby_context_but_rejects_obsolete_question_version(self):
+        self.say('当前适用范围？', 'question')
+        work = self.work()
+        self.run_work(work, [self.action(work, '适用范围')])
+        q, = self.snapshot()['questions']
+        self.say('还要包括新范围。', 'change')
+        work = self.work()
+        self.run_work(work, [{**self.action(work, '包含附加范围'),
+            'kind': 'revise_question', 'question_id': q['id'], 'expected_version': 1, 'grounding_quote_id': 'missing'}])
+        first = self.wb.detection_recovery_work(self.agent)
+        self.run_work(first, [])
+        self.say('补充前一条的适用环境。', 'context')
+        tid = first['detection_task']['id']
+        self.wb.retry_detection_task(self.owner, self.mid, tid)
+        retry = self.wb.detection_recovery_work(self.agent)
+        self.assertEqual(retry['segments'][-1]['text'], '补充前一条的适用环境。')
+        self.assertFalse(retry['segments'][-1]['is_new'])
+        self.run_work(retry, [])
+        self.wb.edit(self.owner, q['id'], EditQuestion(expected_version=1, title='人工确认了另一范围'))
+        with self.assertRaisesRegex(LiveError, '关联问题版本或状态已变化'):
+            self.wb.retry_detection_task(self.owner, self.mid, tid)
 
 
 if __name__ == '__main__':

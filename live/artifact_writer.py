@@ -118,8 +118,26 @@ def render_document(meeting, question, result):
     lines = [f"# {question['title']}", synthetic]
     brief = result.get("brief")
     if brief:
-        lines += ["## 结论摘要", "", brief["short_answer"], "", "## 完整分析", "", result["answer"], "",
-                  "## 适用范围", "", brief['caveat'], "", "## 关键依据", ""]
+        lines += ["## 结论摘要", "", brief["short_answer"], ""]
+        if result.get("analysis"):
+            lines += ["## 完整分析", ""]
+            for section in result["analysis"]:
+                for number, item in enumerate(section["items"], 1):
+                    prefix = {"steps": f"{number}. ", "points": "- ", "paragraphs": ""}[section["layout"]]
+                    refs = "、".join(str(index) for index in item["claim_indices"])
+                    lines.append(prefix + " ".join(item["text"].splitlines()) + (f"（佐证 {refs}）" if refs else ""))
+                    if section["layout"] == "paragraphs":
+                        lines.append("")
+                lines.append("")
+        elif result["answer"].strip() != brief["short_answer"].strip():
+            lines += ["## 完整分析", "", result["answer"], ""]
+        lines += ["## 适用范围", "", brief['caveat'], ""]
+        if result.get("meeting_evidence"):
+            lines += ["## 会中原话", ""]
+            for ref in result["meeting_evidence"]:
+                lines += [*(f"> {line}" for line in ref["quote"].splitlines()),
+                          "", f"片段 {ref['segment_id']} · 修订 {ref['revision']}", ""]
+        lines += ["## 关键依据", ""]
         kinds = {"fact": "资料事实", "source_claim": "来源主张", "inference": "模型推断", "explanation": "参考说明"}
         for point in brief["key_points"]:
             refs = "、".join(str(index) for index in point["claim_indices"])
