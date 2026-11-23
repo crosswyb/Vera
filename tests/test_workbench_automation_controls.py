@@ -93,7 +93,7 @@ class AutomationControlsTest(unittest.TestCase):
         snapshot = self.wb.snapshot(self.owner, self.mid)
         self.assertEqual(snapshot["automation_progress"], {"processed": 1, "pending": 0, "held_questions": 2,
                                                         "pending_characters": 0, "strategy": "live",
-                                                        "recovering": 0, "needs_review": 0, "complete": True})
+                                                        "recovering": 0, "needs_review": 0, "dismissed": 0, "complete": True})
         self.assertIsNone(self.wb.claim(self.agent))
         question = snapshot["questions"][1]
         self.wb.action(self.owner, question["id"], QuestionAction(action="retry", expected_version=1))

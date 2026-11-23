@@ -335,6 +335,11 @@ def register_workbench(app, store):
     def workbench_retry_detection_task(mid, tid):
         return jsonify(wb.retry_detection_task(g.member, mid, tid))
 
+    @app.post('/live/v2/meetings/<mid>/detection-tasks/<tid>/dismiss')
+    def workbench_dismiss_detection_task(mid, tid):
+        require(request.get_json(silent=True) == {}, '忽略识别项不接收额外参数', 400)
+        return jsonify(wb.dismiss_detection_task(g.member, mid, tid))
+
     @app.post("/live/v2/meetings/<mid>/demo")
     def workbench_demo(mid):
         require(request.get_json(silent=True) == {}, "演示不接收额外参数", 400)

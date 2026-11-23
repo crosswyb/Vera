@@ -17,6 +17,15 @@ class DetectionBatch:
     failures: list = field(default_factory=list)
     raw_count: int = 0
     saturated: bool = False
+    original_literal_quotes: list = field(default_factory=list)
+
+    def dismissal_proposal(self, action):
+        proposal = action.model_dump()
+        for parsed_action, original_quote in self.original_literal_quotes:
+            if parsed_action is action:
+                proposal['grounding_quote'] = original_quote
+                break
+        return proposal
 
 
 def quote_options(segments, cursor):
@@ -57,6 +66,21 @@ def literal_quote(cited, quote):
     return None
 
 
+def normalize_question_reference(proposal, questions):
+    """Repair only a missing fixed prefix; versions and intent stay unchanged."""
+    if not isinstance(proposal, dict) or proposal.get('kind') not in ('revise_question', 'cancel_candidate'):
+        return proposal
+    question_id = proposal.get('question_id')
+    if not isinstance(question_id, str) or any(q['id'] == question_id for q in questions):
+        return proposal
+    if not re.fullmatch(r'[0-9a-f]{16}', question_id):
+        return proposal
+    matches = [q['id'] for q in questions if q['id'] == 'question-' + question_id]
+    if len(matches) == 1:
+        return {**proposal, 'question_id': matches[0]}
+    return proposal
+
+
 def check_correction_intent(previous, action):
     proposal_kinds = ('candidate', 'create_question', 'revise_question')
     if action.kind not in proposal_kinds or not isinstance(previous, dict):
@@ -65,11 +89,16 @@ def check_correction_intent(previous, action):
     if action.evidence_need in ('public', 'mixed'):
         fields.extend(('external_fact', 'public_query', 'original_target'))
     for name in fields:
-        if previous.get(name) is None:
+        value = previous.get(name)
+        if name == 'expected_version' and name not in previous and previous.get('kind') == 'revise_question':
+            # Omission used the contract default in the original decision; a
+            # retry cannot opt into a newer edit just by supplying its version.
+            value = QuestionDecision.model_fields[name].default
+        if value is None:
             continue
         # An invalid sibling must not prevent us from protecting this field.
         try:
-            original = QuestionDecision.model_validate({'kind': action.kind, name: previous[name]})
+            original = QuestionDecision.model_validate({'kind': action.kind, name: value})
         except ValidationError:
             continue
         prior = getattr(original, name)
@@ -107,6 +136,8 @@ def parse_detection(raw, work, options):
     action_limit = min(work.get('action_limit', 4), 12)
     result.saturated = result.raw_count >= action_limit
     correction = work.get('detection_task', {}).get('kind') == 'correction'
+    questions = work.get('questions', [])
+    previous = normalize_question_reference(work.get('detection_task', {}).get('proposal'), questions)
     if correction and result.raw_count != 1:
         reject([{'field': 'actions', 'code': 'correction_count_mismatch'}], work['detection_task'].get('proposal'))
         return result
@@ -114,11 +145,19 @@ def parse_detection(raw, work, options):
         reject([{'field': 'actions', 'code': 'too_many_actions'}])
     for index, proposal in enumerate(raw['actions'][:action_limit]):
         try:
+            original_literal = None
+            proposal = normalize_question_reference(proposal, questions)
             action = QuestionDecision.model_validate(proposal)
             if correction:
-                check_correction_intent(work['detection_task'].get('proposal'), action)
+                check_correction_intent(previous, action)
             if action.kind == 'no_action':
                 continue
+            if action.kind in {'revise_question', 'cancel_candidate'}:
+                question = next((q for q in questions if q['id'] == action.question_id), None)
+                if question is None:
+                    raise OutputValidationError([{'field': 'question_id', 'code': 'question_not_found'}])
+                if question['version'] != action.expected_version:
+                    raise OutputValidationError([{'field': 'expected_version', 'code': 'question_version_stale'}])
             cited = [segments.get((r.segment_id, r.revision)) for r in action.source_refs]
             if not cited or not all(cited) or not any(s['is_new'] for s in cited):
                 raise OutputValidationError([{'field': 'source_refs', 'code': 'source_not_in_new_segment'}])
@@ -129,7 +168,8 @@ def parse_detection(raw, work, options):
                         raise OutputValidationError([{'field': 'grounding_quote', 'code': 'quote_id_not_found'}])
                     quote = option['quote']
                 else:
-                    quote = literal_quote(cited, action.grounding_quote.strip())
+                    original_literal = action.grounding_quote.strip()
+                    quote = literal_quote(cited, original_literal)
                 if not quote or not any(c.isalnum() for c in quote):
                     raise OutputValidationError([{'field': 'grounding_quote', 'code': 'quote_not_in_new_segment'}])
                 if not action.title.strip() or not action.evidence_need:
@@ -143,6 +183,8 @@ def parse_detection(raw, work, options):
                 else:
                     action = action.model_copy(update={'external_fact': '', 'public_query': ''})
             result.actions.append(action)
+            if original_literal is not None and original_literal != action.grounding_quote:
+                result.original_literal_quotes.append((action, original_literal))
         except (ValidationError, OutputValidationError) as exc:
             issues = [{**issue, 'field': f"actions.{index}.{issue['field']}"} for issue in issues_for(exc)]
             reject(issues, proposal if isinstance(proposal, dict) else None)

@@ -91,7 +91,7 @@ def replay(source, settings, mid, output):
             with store.transaction() as db:
                 tasks = wb._detection_tasks(db, mid)
             pending_refs = {(r['segment_id'], r['revision']) for task in tasks
-                if task['state'] not in {'completed', 'superseded'} for r in task['source_refs']}
+                if task['state'] not in {'completed', 'superseded', 'dismissed'} for r in task['source_refs']}
             target_seen = target_refs.intersection(observed)
             result = {'phase': phase, 'input_final_segments': len(segments),
                 'expected_new_segments': len(target_refs), 'observed_new_segments': len(target_seen),

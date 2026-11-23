@@ -32,7 +32,15 @@ def prepare_rollback(source, destination):
                 tasks = [json.loads(row[0]) for row in copy.execute(
                     "SELECT data FROM records WHERE kind='wb_detection_task' AND json_extract(data,'$.meeting_id')=?",
                     (mid,))]
-                unresolved = [task for task in tasks if task['state'] not in {'completed', 'superseded'}]
+                for task in tasks:
+                    if task['state'] != 'dismissed':
+                        continue
+                    # Older snapshots hide superseded tasks. Keep the dismissal
+                    # audit fields in the copy without exposing an unusable row.
+                    task['state'] = 'superseded'
+                    copy.execute("UPDATE records SET data=? WHERE kind='wb_detection_task' AND id=?",
+                        (json.dumps(task, ensure_ascii=False), task['id']))
+                unresolved = [task for task in tasks if task['state'] not in {'completed', 'superseded', 'dismissed'}]
                 if not unresolved:
                     continue
                 segments = {json.loads(row[0])['id']: json.loads(row[0]) for row in copy.execute(

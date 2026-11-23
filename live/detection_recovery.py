@@ -5,10 +5,15 @@ import copy
 import json
 import time
 
-from live.detection import DetectionBatch, check_correction_intent
+from pydantic import ValidationError
+
+from live.detection import DetectionBatch, check_correction_intent, literal_quote, normalize_question_reference, quote_options
 from live.output_validation import OutputValidationError
 from live.store import LiveError, require, uid
-from live.workbench_contracts import Decisions
+from live.workbench_contracts import Decisions, QuestionDecision, SourceRef
+
+
+DETECTION_TERMINAL_STATES = frozenset({'completed', 'superseded', 'dismissed'})
 
 
 def identity(value):
@@ -18,6 +23,53 @@ def identity(value):
 
 def refs_of(segments):
     return [{'segment_id': s['id'], 'revision': s['revision']} for s in segments]
+
+
+def proposal_refs(proposal):
+    cited = proposal.get('source_refs') if isinstance(proposal, dict) else None
+    if not isinstance(cited, list) or not cited or not all(isinstance(ref, dict) for ref in cited):
+        return None
+    try:
+        validated = [SourceRef.model_validate({name: ref[name] for name in ('segment_id', 'revision') if name in ref})
+            for ref in cited]
+    except ValidationError:
+        return None
+    return {(ref.segment_id, ref.revision) for ref in validated}
+
+
+def grounding_spans(proposal, source_keys, eligible, segments):
+    if not isinstance(proposal, dict) or not source_keys or not source_keys.issubset(segments):
+        return set()
+    ordered_keys = [(ref['segment_id'], ref['revision']) for ref in proposal['source_refs']]
+    cited = [{**segments[key], 'is_new': True} for key in ordered_keys
+        if key in source_keys & eligible and key in segments]
+    quote_id = proposal.get('grounding_quote_id')
+    if isinstance(quote_id, str) and quote_id:
+        option = next((option for option in quote_options(cited, -1) if option['id'] == quote_id), None)
+        if option:
+            return {(option['segment_id'], option['revision'], option['start'], option['end'])}
+    quote = proposal.get('grounding_quote')
+    if not isinstance(quote, str):
+        return set()
+    quote = quote.strip()
+    matched = literal_quote(cited, quote)
+    if not matched:
+        return set()
+    exact = matched == quote
+    fragment = quote if exact else quote.rstrip('。？！?!')
+    spans = set()
+    for segment in cited:
+        start = 0
+        while (position := segment['text'].find(fragment, start)) >= 0:
+            start = position + 1
+            end = position + len(fragment)
+            if not exact:
+                # An ignored raw quote may refer to any punctuation fallback.
+                if end < len(segment['text']) and segment['text'][end] not in '。？！?!':
+                    continue
+                end = min(end + 1, len(segment['text']))
+            spans.add((segment['id'], segment['revision'], position, end))
+    return spans
 
 
 class DetectionRecovery:
@@ -34,9 +86,41 @@ class DetectionRecovery:
     def _detection_tasks(self, db, mid):
         return self._items(db, 'wb_detection_task', mid)
 
+    def _dismissal_context(self, db, mid, segments, dismissed):
+        if not dismissed:
+            return segments
+        current = {(s['id'], s['revision']): s for s in self._items(db, 'wb_segment', mid)
+            if s['type'] == 'transcript.final'}
+        segments = [s for s in segments if (s['id'], s['revision']) in current]
+        visible = {(segment['id'], segment['revision']) for segment in segments}
+        pinned = set()
+        for task in dismissed:
+            pinned.update(proposal_refs(task.get('proposal')) or set())
+            pinned.update(proposal_refs({'source_refs': task['source_refs']}) or set())
+        missing = pinned - visible
+        # Matching may need an ignored proposal's clipped context. Supplement
+        # only its unchanged revisions, without expanding the scan's new input.
+        supplement = [{**current[key], 'is_new': False} for key in missing if key in current]
+        return [*segments, *supplement]
+
+    def _scan_batch_scope(self, db, mid, family):
+        # Families split one batch's new input into task ranges. Only verified
+        # earlier utterances can be context; unknown or later refs stay active.
+        tasks = [task for task in self._detection_tasks(db, mid) if task['family'] == family]
+        batch_refs = {(ref['segment_id'], ref['revision']) for task in tasks
+            for ref in [*task['source_refs'], *task.get('original_source_refs', [])]}
+        current = {(segment['id'], segment['revision']): segment['event_seq']
+            for segment in self._items(db, 'wb_segment', mid) if segment['type'] == 'transcript.final'}
+        batch_refs.intersection_update(current)
+        first_event = min((current[key] for key in batch_refs), default=None)
+        older_context = {key for key, event in current.items() if first_event is not None and event < first_event}
+        dismissed_refs = {(ref['segment_id'], ref['revision']) for task in tasks
+            if task['kind'] == 'scan' and task['state'] == 'dismissed' for ref in task['source_refs']}
+        return batch_refs, older_context, dismissed_refs
+
     def invalidate_detection_tasks(self, db, meeting, segment_id, revision):
         for task in self._detection_tasks(db, meeting['id']):
-            if task['state'] in {'completed', 'superseded'}:
+            if task['state'] in DETECTION_TERMINAL_STATES:
                 continue
             remaining = [ref for ref in task['source_refs']
                 if ref['segment_id'] != segment_id or ref['revision'] == revision]
@@ -105,7 +189,8 @@ class DetectionRecovery:
                     known_failures=known)
 
     @staticmethod
-    def _matches_failed_proposal(action, proposal):
+    def _matches_failed_proposal(action, proposal, questions):
+        proposal = normalize_question_reference(proposal, questions)
         if action.kind == 'cancel_candidate':
             return (proposal.get('kind') == action.kind and action.question_id == proposal.get('question_id')
                     and action.expected_version == proposal.get('expected_version', 1))
@@ -116,6 +201,149 @@ class DetectionRecovery:
             check_correction_intent(proposal, action)
         except OutputValidationError:
             return False
+        return True
+
+    @staticmethod
+    def _dismissed_proposal_relation(proposal, task, questions, segments, scan_scope=None):
+        if not isinstance(proposal, dict):
+            return None
+        proposal = normalize_question_reference(proposal, questions)
+
+        refs = proposal_refs(proposal)
+        if not refs:
+            return None
+        dismissed_refs = {(ref['segment_id'], ref['revision']) for ref in task['source_refs']}
+        if task['kind'] == 'scan' and scan_scope is not None:
+            dismissed_refs = scan_scope[2]
+        if not refs.intersection(dismissed_refs):
+            return None
+        if task['kind'] == 'scan':
+            if scan_scope is None:
+                return 'same' if refs.issubset(dismissed_refs) else None
+            batch_refs, older_context, _ = scan_scope
+            new_refs = refs - older_context
+            return 'same' if new_refs and new_refs.issubset(batch_refs & dismissed_refs) else None
+        original = normalize_question_reference(task.get('proposal'), questions)
+        if not isinstance(original, dict):
+            return None
+        original_refs = proposal_refs(original)
+        if not original_refs:
+            return None
+        targeted = (proposal.get('kind') in ('revise_question', 'cancel_candidate')
+            and original.get('kind') in ('revise_question', 'cancel_candidate'))
+        fields = ['kind', 'evidence_need']
+        if targeted:
+            fields.extend(('question_id', 'expected_version'))
+            if proposal.get('kind') == original.get('kind') == 'revise_question':
+                fields.append('scope_changed')
+        public_intent = any(value.get('evidence_need') in ('public', 'mixed') for value in (proposal, original))
+        if public_intent:
+            fields.extend(('external_fact', 'public_query', 'original_target'))
+        question_ids = {question['id'] for question in questions}
+        for name in fields:
+            previous = original.get(name)
+            if name not in original and name in ('expected_version', 'scope_changed') and targeted:
+                previous = QuestionDecision.model_fields[name].default
+            if previous is None:
+                continue
+            value = proposal.get(name, QuestionDecision.model_fields[name].default)
+            if name == 'question_id' and not (isinstance(previous, str) and previous in question_ids
+                    and isinstance(value, str) and value in question_ids):
+                continue  # Unknown targets cannot establish a distinct question.
+            if name == 'public_query' and not (isinstance(previous, str) and previous.strip()
+                    and isinstance(value, str) and value.strip()):
+                continue  # An optional query may be omitted without changing intent.
+            try:
+                # A malformed sibling field must not hide a valid distinction.
+                candidate = QuestionDecision.model_validate({'kind': 'candidate', 'evidence_need': 'public', name: value})
+                if name == 'kind':
+                    prior = QuestionDecision.model_validate({'kind': previous})
+                    if {prior.kind, candidate.kind}.issubset({'candidate', 'create_question'}):
+                        continue  # Classification does not identify a new question.
+                    if prior.kind != candidate.kind:
+                        return 'different'
+                    continue
+                check_correction_intent({name: previous}, candidate)
+            except ValidationError:
+                continue
+            except OutputValidationError:
+                return 'different'
+        question_id = proposal.get('question_id')
+        if (proposal.get('kind') == original.get('kind') == 'cancel_candidate'
+                and question_id and question_id == original.get('question_id')
+                and any(q['id'] == question_id for q in questions)):
+            return 'same'
+        current = {(s['id'], s['revision']): s for s in segments}
+        new_refs = {key for key, segment in current.items()
+            if segment.get('is_new', scan_scope is None or key in scan_scope[0])}
+        spans = grounding_spans(proposal, refs, new_refs, current)
+        original_spans = grounding_spans(original, original_refs, dismissed_refs, current)
+        title, original_title = proposal.get('title'), original.get('title')
+        same_title = (isinstance(title, str) and isinstance(original_title, str)
+            and bool(title.strip()) and title.strip() == original_title.strip())
+        if spans and original_spans:
+            if len(spans) == len(original_spans) == 1 and spans == original_spans:
+                return 'same' if same_title else 'overlapping'
+            if any(span[:2] == previous[:2] and max(span[2], previous[2]) < min(span[3], previous[3])
+                    for span in spans for previous in original_spans):
+                return 'overlapping'  # Ambiguous or shorter quotes cannot prove a new question.
+            return 'different'
+        # A broken quote cannot establish span identity. Retain only the narrow
+        # fallback used by legacy corrections with the same title and sources.
+        return 'fallback' if refs == original_refs and same_title else None
+
+    @classmethod
+    def _matches_dismissed_task(cls, proposal, task, questions, segments, scan_scope=None):
+        return cls._dismissed_proposal_relation(proposal, task, questions, segments, scan_scope) in {'same', 'fallback'}
+
+    def _supersede_dismissed_correction(self, db, meeting, work, task, dismissed, returned=(), scan_scope=None):
+        if task['kind'] != 'correction' or not dismissed:
+            return False
+        original = normalize_question_reference(task.get('proposal'), work['questions'])
+        proposals = []
+        for proposal in returned:
+            try:
+                candidate = QuestionDecision.model_validate(normalize_question_reference(proposal, work['questions']))
+                check_correction_intent(original, candidate)
+                self._refs(db, meeting, [ref.model_dump() for ref in candidate.source_refs])
+            except (ValidationError, OutputValidationError):
+                continue
+            except LiveError as exc:
+                if exc.status not in {400, 404, 409}:
+                    raise
+                continue
+            proposals.append(candidate.model_dump())
+        current = {(segment['id'], segment['revision']): segment for segment in work['segments']}
+        new_refs = {key for key, segment in current.items()
+            if segment.get('is_new', scan_scope is None or key in scan_scope[0])}
+        previous = None
+        for other in dismissed:
+            original_relation = self._dismissed_proposal_relation(original, other, work['questions'], work['segments'], scan_scope)
+            returned_relations = []
+            for proposal in proposals:
+                relation = self._dismissed_proposal_relation(proposal, other, work['questions'], work['segments'], scan_scope)
+                if original_relation == 'fallback' and relation is None:
+                    refs = proposal_refs(proposal)
+                    dismissed_refs = {(ref['segment_id'], ref['revision']) for ref in other['source_refs']}
+                    if refs and refs.isdisjoint(dismissed_refs) and grounding_spans(proposal, refs, new_refs, current):
+                        relation = 'different'
+                returned_relations.append(relation)
+            # A retry cannot narrow the stored proposal into an ignored range.
+            # A valid correction can refute only the broken-quote fallback.
+            if (original_relation == 'different'
+                    or other['kind'] == 'scan' and original_relation != 'same'):
+                continue
+            if (original_relation == 'same' or 'same' in returned_relations
+                    or original_relation == 'fallback' and 'different' not in returned_relations):
+                previous = other
+                break
+        if not previous:
+            return False
+        task.update(state='superseded', superseded_by=previous['id'], lease=None, updated_at=time.time())
+        self.store._put(db, 'wb_detection_task', task['id'], task)
+        self._event(db, meeting, 'detection.superseded', {'task_id': task['id'],
+            'superseded_by': previous['id']})
+        self._save(db, meeting)
         return True
 
     def _scan_failures(self, db, m, work, task, result, rejected):
@@ -134,8 +362,22 @@ class DetectionRecovery:
             else:
                 outstanding.append(failure)
         # Empty responses and valid but unrelated siblings cannot close a known gap.
-        accepted = [a for a in result.actions if not any(a.model_dump() == f.get('proposal') for f in rejected)]
-        resolved = {key for key, f in known.items() if any(self._matches_failed_proposal(a, f['proposal']) for a in accepted)}
+        accepted = [a for a in result.actions if not any(f.get('proposal') in
+            (a.model_dump(), result.dismissal_proposal(a)) for f in rejected)]
+        current = {(segment['id'], segment['revision']): segment for segment in work['segments']}
+        new_refs = {(segment['id'], segment['revision']) for segment in new}
+
+        def resolves(action, failure):
+            if not self._matches_failed_proposal(action, failure['proposal'], work['questions']):
+                return False
+            if not any(issue['code'] == 'overlapping_proposal' for issue in failure['issues']):
+                return True
+            previous = grounding_spans(failure['proposal'], proposal_refs(failure['proposal']), new_refs, current)
+            proposal = result.dismissal_proposal(action)
+            returned = grounding_spans(proposal, proposal_refs(proposal), new_refs, current)
+            return len(returned) == 1 and returned.issubset(previous)
+
+        resolved = {key for key, failure in known.items() if any(resolves(action, failure) for action in accepted)}
         task['known_failures'] = [f for key, f in known.items() if key not in resolved]
         task['scan_coverage_complete'] = not outstanding and not result.saturated
         # An unlocatable proposal from the main batch belongs to every possible
@@ -143,7 +385,7 @@ class DetectionRecovery:
         shared = {key for key in resolved if known[key].get('batch_scope')}
         if shared:
             for other in self._detection_tasks(db, m['id']):
-                if other['id'] == task['id'] or other['family'] != task['family'] or other['state'] in {'completed', 'superseded'}:
+                if other['id'] == task['id'] or other['family'] != task['family'] or other['state'] in DETECTION_TERMINAL_STATES:
                     continue
                 previous = other.get('known_failures', [])
                 remaining = [f for f in previous if not f.get('batch_scope') or identity(f['proposal']) not in shared]
@@ -225,6 +467,29 @@ class DetectionRecovery:
             m = self._detection_authority(db, principal, work)
             if not task and m['coordinator_cursor'] >= work['cursor']:
                 return
+            # The other lane can report a newer incident while this call is in flight.
+            if m.get('detection_service_retry') == work['meeting'].get('detection_service_retry'):
+                self.clear_detection_service_error(m)
+            if task:
+                # Read dismissals in this transaction: a sibling may be ignored
+                # after this recovery was claimed or while its model call ran.
+                dismissed = [other for other in self._detection_tasks(db, m['id'])
+                    if other['family'] == task['family'] and other['state'] == 'dismissed']
+                scan_scope = self._scan_batch_scope(db, m['id'], task['family']) if dismissed else None
+                dismissal_segments = self._dismissal_context(db, m['id'], work['segments'], dismissed)
+                dismissal_work = {**work, 'segments': dismissal_segments}
+                returned = [result.dismissal_proposal(action) for action in result.actions]
+                if self._supersede_dismissed_correction(db, m, dismissal_work, task, dismissed, returned, scan_scope):
+                    return
+                def ignored(proposal):
+                    return next((other for other in dismissed if self._matches_dismissed_task(
+                        proposal, other, work['questions'], dismissal_segments, scan_scope)), None)
+                if task['kind'] == 'scan':
+                    result = DetectionBatch([action for action in result.actions if not ignored(result.dismissal_proposal(action))],
+                        [failure for failure in result.failures if not ignored(failure.get('proposal'))],
+                        result.raw_count, result.saturated, result.original_literal_quotes)
+                    task['known_failures'] = [failure for failure in task.get('known_failures', [])
+                        if not ignored(failure.get('proposal'))]
             target_work = {**work, 'segments': [dict(s) for s in work['segments']]}
             # Reuse the existing action/version checks with a task-local input cursor.
             target_work['meeting'] = {**work['meeting'], 'coordinator_cursor': -1}
@@ -235,12 +500,31 @@ class DetectionRecovery:
             if task and task['kind'] == 'correction' and not result.actions and not rejected:
                 rejected.append({'issues': [{'field': 'actions', 'code': 'missing_proposal'}], 'proposal': task['proposal']})
             for index, action in enumerate(result.actions):
+                proposal = result.dismissal_proposal(action)
+                dismissal_relations = [(other, self._dismissed_proposal_relation(proposal, other,
+                    work['questions'], dismissal_segments, scan_scope)) for other in dismissed] if task else []
+                if task and task['kind'] == 'correction':
+                    original_relations = [(other, self._dismissed_proposal_relation(task['proposal'], other,
+                        work['questions'], dismissal_segments, scan_scope))
+                        for other, relation in dismissal_relations if relation == 'same']
+                    if any(original_relation == 'different'
+                            or other['kind'] == 'scan' and original_relation != 'same'
+                            for other, original_relation in original_relations):
+                        rejected.append({'issues': [{'field': f'actions.{index}.grounding_quote', 'code': 'correction_changed_intent'}],
+                            'proposal': proposal})
+                        continue
+                if any(relation == 'overlapping' for _, relation in dismissal_relations):
+                    rejected.append({'issues': [{'field': f'actions.{index}', 'code': 'overlapping_proposal'}],
+                        'proposal': proposal})
+                    continue
                 if task and task['kind'] == 'scan':
-                    same_question = [f['proposal'] for f in task.get('known_failures', [])
-                        if (isinstance(f['proposal'].get('title'), str) and action.title.strip()
-                            and f['proposal']['title'].strip() == action.title.strip())
-                        or (action.question_id and f['proposal'].get('question_id') == action.question_id)]
-                    if same_question and not any(self._matches_failed_proposal(action, p) for p in same_question):
+                    proposals = [normalize_question_reference(f['proposal'], work['questions'])
+                        for f in task.get('known_failures', [])]
+                    same_question = [proposal for proposal in proposals
+                        if (isinstance(proposal.get('title'), str) and action.title.strip()
+                            and proposal['title'].strip() == action.title.strip())
+                        or (action.question_id and proposal.get('question_id') == action.question_id)]
+                    if same_question and not any(self._matches_failed_proposal(action, p, work['questions']) for p in same_question):
                         continue  # Keep the original gap; never dispatch a replacement research target.
                 key = 'det-action-' + identity([m['id'], task['id'] if task and task['kind'] == 'correction' else
                     refs_of([s for s in target_work['segments'] if s['event_seq'] >= 0]), action.model_dump()])
@@ -270,7 +554,8 @@ class DetectionRecovery:
                     m.update(before)
                     if exc.status not in {400, 404, 409}:
                         raise
-                    rejected.append({'issues': [{'field': f'actions.{index}', 'code': 'context_stale'}], 'proposal': action.model_dump()})
+                    code = exc.details.get('code', 'reference_not_found' if exc.status == 404 else 'context_stale')
+                    rejected.append({'issues': [{'field': f'actions.{index}', 'code': code}], 'proposal': action.model_dump()})
                 else:
                     refresh |= changed
                     self.store._put(db, 'wb_detection_action', key, {'id': key, 'meeting_id': m['id'],
@@ -279,9 +564,6 @@ class DetectionRecovery:
                         'grounding_quote': action.grounding_quote})
                 finally:
                     db.execute('RELEASE detection_item')
-            # The other lane can report a newer incident while this call is in flight.
-            if m.get('detection_service_retry') == work['meeting'].get('detection_service_retry'):
-                self.clear_detection_service_error(m)
             if task:
                 if task['kind'] == 'scan':
                     rejected = self._scan_failures(db, m, work, task, result, rejected)
@@ -318,6 +600,12 @@ class DetectionRecovery:
                     return
                 raise
             if task['state'] != 'running' or task['lease'] != work['detection_task']['lease']:
+                return
+            dismissed = [other for other in self._detection_tasks(db, m['id'])
+                if other['family'] == task['family'] and other['state'] == 'dismissed']
+            scan_scope = self._scan_batch_scope(db, m['id'], task['family']) if dismissed else None
+            dismissal_work = {**work, 'segments': self._dismissal_context(db, m['id'], work['segments'], dismissed)}
+            if self._supersede_dismissed_correction(db, m, dismissal_work, task, dismissed, scan_scope=scan_scope):
                 return
             interrupted = m['research_paused'] or m['generation'] != work['meeting']['generation']
             transient = transient_detection_failure(details)
@@ -369,13 +657,82 @@ class DetectionRecovery:
                     self.store._put(db, 'wb_detection_task', task['id'], task)
         return unfinished
 
+    def dismiss_detection_task(self, principal, mid, tid):
+        with self.store.transaction() as db:
+            m = self._meeting(db, principal, mid, True)
+            self.store._acl(db, principal, m['project_id'], {'owner', 'member'})
+            require(m['state'] in {'active', 'ended'}, '会议数据已清理，无法处理识别项', 409)
+            task = self.store._get(db, 'wb_detection_task', tid)
+            require(task['meeting_id'] == mid, '识别项不属于本场会议', 409)
+            if task['state'] == 'dismissed':
+                return {'id': tid, 'state': task['state']}
+            require(task['state'] == 'needs_review', '识别项已更新，请刷新后再处理', 409)
+            now = time.time()
+            task.update(state='dismissed', lease=None, dismissed_by=principal['id'], dismissed_at=now, updated_at=now)
+            self.store._put(db, 'wb_detection_task', tid, task)
+            self._event(db, m, 'detection.dismissed', {'task_id': tid, 'actor_id': principal['id']})
+            questions = self._items(db, 'wb_question', mid)
+            segments = [s for s in self._items(db, 'wb_segment', mid) if s['type'] == 'transcript.final']
+            scan_scope = self._scan_batch_scope(db, mid, task['family'])
+            for sibling in self._detection_tasks(db, mid):
+                if sibling['family'] != task['family'] or sibling['state'] in DETECTION_TERMINAL_STATES:
+                    continue
+                if sibling['kind'] == 'correction':
+                    relation = self._dismissed_proposal_relation(sibling.get('proposal'), task, questions, segments, scan_scope)
+                    if relation == 'same' and (task['kind'] == 'scan' or sibling['state'] == 'needs_review'):
+                        sibling.update(state='superseded', superseded_by=tid, lease=None, updated_at=now)
+                        self.store._put(db, 'wb_detection_task', sibling['id'], sibling)
+                        self._event(db, m, 'detection.superseded', {'task_id': sibling['id'], 'superseded_by': tid})
+                    continue
+                if sibling['kind'] != 'scan':
+                    continue
+                known = sibling.get('known_failures', [])
+                remaining = [failure for failure in known if not self._matches_dismissed_task(
+                    failure.get('proposal'), task, questions, segments, scan_scope)]
+                if remaining == known:
+                    continue
+                sibling['known_failures'] = remaining
+                if sibling.get('scan_coverage_complete') and sibling['state'] != 'running':
+                    sibling['issues'] = [issue for failure in remaining for issue in failure['issues']]
+                    if not remaining:
+                        sibling.update(state='completed', lease=None)
+                        self._event(db, m, 'detection.completed', {'task_id': sibling['id']})
+                sibling['updated_at'] = now
+                self.store._put(db, 'wb_detection_task', sibling['id'], sibling)
+            self._save(db, m)
+            return {'id': tid, 'state': task['state']}
+
     def detection_task_snapshot(self, db, m):
-        tasks = [t for t in self._detection_tasks(db, m['id']) if t['state'] not in {'completed', 'superseded'}]
+        def titles(proposals):
+            return list(dict.fromkeys(proposal['title'].strip() for proposal in proposals
+                if isinstance(proposal.get('title'), str) and proposal['title'].strip()))
+
+        tasks = [t for t in self._detection_tasks(db, m['id']) if t['state'] not in DETECTION_TERMINAL_STATES]
         current = {s['id']: s for s in self._items(db, 'wb_segment', m['id'])}
+        questions = self._items(db, 'wb_question', m['id'])
         rows = []
         for task in tasks:
             segments = [current[r['segment_id']] for r in task['source_refs'] if r['segment_id'] in current]
             rows.append({k: task[k] for k in ('id', 'kind', 'state', 'attempts', 'issues', 'source_refs')})
+            proposals = [task['proposal']] if task.get('proposal') else [f['proposal']
+                for f in task.get('known_failures', []) if isinstance(f.get('proposal'), dict)]
+            batch_proposals = []
+            if task['kind'] == 'scan':
+                task_refs = {(ref['segment_id'], ref['revision']) for ref in task['source_refs']}
+                local_proposals = []
+                for proposal in proposals:
+                    target = local_proposals if (proposal_refs(proposal) or set()).intersection(task_refs) else batch_proposals
+                    target.append(proposal)
+                proposals = local_proposals
+            proposal = proposals[0] if proposals else {}
+            proposal = normalize_question_reference(proposal, questions)
+            question = None
+            if proposal.get('kind') in ('revise_question', 'cancel_candidate'):
+                question = next((q for q in questions if q['id'] == proposal.get('question_id')), None)
+            title = proposal.get('title')
+            rows[-1].update(proposal_title=title if isinstance(title, str) else '',
+                proposal_titles=titles(proposals), batch_proposal_titles=titles(batch_proposals),
+                question_id=question['id'] if question else '', question_title=question['title'] if question else '')
             rows[-1].update(audio_start_ms=min((s.get('audio_start_ms', 0) for s in segments), default=0),
                 audio_end_ms=max((s.get('audio_end_ms', 0) for s in segments), default=0))
         return rows

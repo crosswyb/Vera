@@ -54,6 +54,27 @@ class DetectionParserRepairsTest(unittest.TestCase):
         self.assertEqual([a.grounding_quote for a in batch.actions], ['谁？'])
         self.assertEqual(batch.failures[0]['issues'][0]['code'], 'quote_not_in_new_segment')
 
+    def test_literal_fallback_keeps_its_original_quote_separate_from_an_explicit_anchor(self):
+        work = {'cursor': 2, 'meeting': {'coordinator_cursor': 0}, 'segments': [
+            {'id': 'east', 'revision': 1, 'event_seq': 1, 'text': '合成交付日期。'},
+            {'id': 'west', 'revision': 1, 'event_seq': 2, 'text': '合成交付日期！'}]}
+        options = quote_options(work['segments'], 0)
+        refs = [{'segment_id': segment['id'], 'revision': 1} for segment in work['segments']]
+        for reversed_refs in (False, True):
+            with self.subTest(reversed_refs=reversed_refs):
+                proposal = {'kind': 'candidate', 'title': '合成交付日期', 'evidence_need': 'explanation',
+                    'grounding_quote': '合成交付日期？',
+                    'source_refs': list(reversed(refs)) if reversed_refs else refs}
+                anchored = {**proposal, 'grounding_quote_id': options[1]['id']}
+                batch = parse_detection({'actions': [proposal, anchored]}, work, options)
+                self.assertFalse(batch.failures)
+                literal, explicit = batch.actions
+                expected = '合成交付日期！' if reversed_refs else '合成交付日期。'
+                self.assertEqual(literal.grounding_quote, expected)
+                self.assertEqual(batch.dismissal_proposal(literal)['grounding_quote'], proposal['grounding_quote'])
+                self.assertEqual(batch.dismissal_proposal(explicit)['grounding_quote'], '合成交付日期！')
+                self.assertEqual(explicit.grounding_quote_id, options[1]['id'])
+
     def test_live_action_limit_leaves_overflow_for_durable_scan(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
