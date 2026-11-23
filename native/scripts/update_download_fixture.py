@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
 import sys
+from threading import Lock
 import zipfile
 
 
@@ -23,9 +24,14 @@ class DownloadFixture(BaseHTTPRequestHandler):
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
-        if self.path not in {'/archive', '/truncated', '/short', '/oversized'}:
+        if self.path not in {'/archive', '/truncated', '/short', '/oversized', '/flaky'}:
             self.send_error(404)
             return
+        truncate = self.path == '/truncated'
+        if self.path == '/flaky':
+            with self.server.fixture_lock:
+                truncate = not self.server.sent_flaky_failure
+                self.server.sent_flaky_failure = True
         body = self.server.payload
         if self.path == '/short':
             body = body[:1024]
@@ -34,7 +40,7 @@ class DownloadFixture(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         try:
-            if self.path == '/truncated':
+            if truncate:
                 self.wfile.write(body[:1024])
                 self.wfile.flush()
                 self.close_connection = True
@@ -66,6 +72,8 @@ def main():
         archive.writestr('真实交互.app/../../escape.txt', '不可解压')
     server = ThreadingHTTPServer(('127.0.0.1', 0), DownloadFixture)
     server.payload = payload
+    server.fixture_lock = Lock()
+    server.sent_flaky_failure = False
     ready = directory / 'download-server.json'
     temporary = ready.with_suffix('.tmp')
     temporary.write_text(json.dumps({'url': f'http://127.0.0.1:{server.server_port}'}))

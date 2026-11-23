@@ -49,6 +49,12 @@ update.totalBytes = 0;
 render();
 assert.equal($('update-download-progress').value, undefined);
 assert.doesNotMatch($('update-download-detail').textContent, /%/);
+Object.assign(update, {state:'verifying'});
+render();
+assert.equal($('update-download').hidden, true);
+assert.equal($('check-updates').disabled, true);
+assert.equal($('install-update').hidden, true);
+assert.match($('update-status').textContent, /已下载.*正在验证/);
 Object.assign(update, {state:'ready', installBlockedReason:'正在录音，请在收听结束后安装。'});
 render();
 assert.equal($('update-download').hidden, true);
@@ -75,24 +81,33 @@ assert.equal($('check-updates').disabled, true);
 assert.equal($('install-update').disabled, true);
 assert.match($('update-status').textContent, /正在安装.*重新打开/);
 // A failed download retains the notice and notes and offers an in-app retry.
-Object.assign(update, {state:'error', error:'HTTP 403'});
+Object.assign(update, {state:'error', failureStage:'download', error:'HTTP 403'});
 render();
 assert.equal($('update-available').hidden, false);
-assert.match($('update-status').textContent, /更新未完成.*403/);
+assert.match($('update-status').textContent, /下载更新失败.*403/);
 assert.equal($('check-updates').disabled, false);
-assert.equal($('check-updates').textContent, '重试更新');
+assert.equal($('check-updates').textContent, '重试下载');
 assert.equal($('install-update').hidden, true);
 $('check-updates').listeners.click();
 assert.deepEqual(commands, ['installUpdate', 'checkForUpdates']);
+Object.assign(update, {failureStage:'validation', error:'更新包包含无效路径'});
+render();
+assert.match($('update-status').textContent, /更新包验证失败.*无效路径/);
+assert.equal($('check-updates').textContent, '检查更新');
+assert.equal($('open-update-release').hidden, false);
+$('open-update-release').listeners.click();
+assert.equal(commands.at(-1), 'openUpdateRelease');
 Object.assign(update, {state:'current', available:false, latestVersion:'v0.1.1-build58', error:''});
 render();
+assert.equal($('open-update-release').hidden, true);
 assert.match($('update-status').textContent, /当前没有更新/);
 assert.equal($('update-release-notes').hidden, true);
 assert.equal($('update-available').hidden, true);
-Object.assign(update, {state:'error', error:'请求超时'});
+Object.assign(update, {state:'error', failureStage:'check', error:'请求超时'});
 render();
 assert.match($('update-status').textContent, /未能检查更新.*请求超时/);
 assert.equal($('check-updates').disabled, false);
+assert.equal($('open-update-release').hidden, false);
 desktop = false;
 Object.assign(update, {state:'ready', available:true});
 render();
@@ -102,16 +117,17 @@ assert.equal($('update-available').hidden, true);
 assert.equal($('install-update').hidden, true);
 assert.equal($('install-update').disabled, true);
 assert.equal($('update-download').hidden, true);
+assert.equal($('open-update-release').hidden, true);
 """
         subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')], check=True)
 
-    def test_update_settings_offer_installation_without_external_download(self):
+    def test_update_settings_offer_installation_and_a_recovery_download(self):
         template = (ROOT / 'templates/workbench.html').read_text()
         source = (ROOT / 'static/workbench.js').read_text()
         self.assertIn('id="install-update"', template)
         self.assertIn('发现新版会自动下载', template)
-        self.assertNotIn('open-update-release', template)
-        self.assertNotIn("nativePost('openUpdateRelease')", source)
+        self.assertIn('id="open-update-release" type="button" hidden', template)
+        self.assertIn("nativePost('openUpdateRelease')", source)
 
 
 if __name__ == '__main__':

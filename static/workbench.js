@@ -885,11 +885,21 @@
     const desktop = nativeAvailable();
     const update = state.native?.updates;
     const checking = update?.state === 'checking';
+    const preparing = update?.state === 'preparing';
     const downloading = update?.state === 'downloading';
+    const verifying = update?.state === 'verifying';
     const ready = update?.state === 'ready';
     const installing = update?.state === 'installing';
     const available = Boolean(update?.available);
-    const busy = checking || downloading || installing;
+    const busy = checking || preparing || downloading || verifying || installing;
+    const failed = update?.state === 'error';
+    const failureStage = update?.failureStage;
+    const failureLabel = {
+      check: '未能检查更新',
+      download: '下载更新失败',
+      archive: '下载包校验失败',
+      validation: '更新包验证失败'
+    }[failureStage] || '更新未完成';
     const blockedReason = update?.installBlockedReason || '';
     const progress = Number.isFinite(update?.downloadProgress) ? Math.max(0, Math.min(1, update.downloadProgress)) : null;
     text($('update-current-version'), update?.currentVersion
@@ -897,16 +907,20 @@
     let status = '正在读取版本信息…';
     if (!desktop) status = '请在桌面 App 中检查软件更新。';
     else if (checking) status = '正在检查更新…';
+    else if (preparing) status = '正在准备更新包…';
     else if (downloading) status = `正在自动下载新版 ${update.latestVersion}，完成后会提示安装。`;
+    else if (verifying) status = '更新包已下载，正在验证…';
     else if (ready) status = `新版 ${update.latestVersion} 已下载，可以安装。${update.error ? `上次操作未完成：${update.error}` : ''}`;
     else if (installing) status = '正在安装更新，应用将重新打开…';
-    else if (update?.state === 'error') status = `${available ? '更新未完成' : '未能检查更新'}：${update.error || '请稍后重试。'}`;
+    else if (failed) status = `${failureLabel}：${update.error || '请稍后重试。'}`;
     else if (available) status = `发现新版 ${update.latestVersion}，正在准备自动下载…`;
     else if (update?.state === 'current') status = `当前没有更新。最新正式版为 ${update.latestVersion}。`;
     else if (update) status = '等待自动检查，可随时手动检查。';
     text($('update-status'), status);
     $('check-updates').disabled = !desktop || !update || busy;
-    text($('check-updates'), checking ? '正在检查…' : update?.state === 'error' ? '重试更新' : '检查更新');
+    text($('check-updates'), checking ? '正在检查…'
+      : failed && ['download', 'archive'].includes(failureStage) ? '重试下载' : '检查更新');
+    $('open-update-release').hidden = !desktop || (!failed && !update?.error);
     $('install-update').hidden = !desktop || !ready && !installing;
     $('install-update').disabled = !desktop || !ready || Boolean(blockedReason);
     text($('install-update'), installing ? '正在安装…' : '安装并重新打开');
@@ -921,6 +935,7 @@
       total ? `${downloaded.toFixed(1)} / ${total.toFixed(1)} MB` : downloaded ? `${downloaded.toFixed(1)} MB` : '正在连接下载服务…'].filter(Boolean).join(' · '));
     $('update-available').hidden = !desktop || !available;
     const notice = downloading ? `正在下载更新${progress === null ? '' : ` · ${Math.round(progress * 100)}%`}`
+      : verifying ? '正在验证更新包…'
       : ready ? '新版已下载 · 安装更新' : installing ? '正在安装更新…' : `发现新版 ${update?.latestVersion || ''}`;
     text($('update-available'), available ? notice : '');
     text($('update-last-checked'), Number.isFinite(update?.checkedAt)
@@ -3034,6 +3049,7 @@
   $('open-meeting-folder').addEventListener('click', openMeetingFolder);
   $('open-files-folder').addEventListener('click', openMeetingFolder);
   $('check-updates').addEventListener('click', () => nativePost('checkForUpdates'));
+  $('open-update-release').addEventListener('click', () => nativePost('openUpdateRelease'));
   $('install-update').addEventListener('click', () => {
     if (!$('install-update').disabled) nativePost('installUpdate');
   });

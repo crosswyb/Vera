@@ -96,6 +96,12 @@ struct UpdateInstallSmoke {
         try expectFailure { try VeraUpdatePackage.verifyArchive(corruptArchive, expectedSize: expectedSize, sha256: digest) }
         print("PASS: real offline HTTP download, progress and SHA-256 corruption rejection")
 
+        let recovered = directory.appendingPathComponent("recovered.bin")
+        try await VeraArchiveDownload.fetch(base.appendingPathComponent("flaky"), to: recovered,
+                                            expectedSize: expectedSize, progress: { _, _ in })
+        try VeraUpdatePackage.verifyArchive(recovered, expectedSize: expectedSize, sha256: digest)
+        print("PASS: interrupted transfer recovered without a second user action")
+
         for route in ["missing", "truncated", "oversized", "redirect"] {
             let destination = directory.appendingPathComponent(route + ".bin")
             let size = route == "oversized" ? 1024 : expectedSize

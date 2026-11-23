@@ -7,6 +7,21 @@ struct VeraUpdateError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+enum VeraUpdatePreparationFailure: LocalizedError {
+    case archive(Error)
+    case validation(Error)
+
+    var errorDescription: String? {
+        switch self {
+        case let .archive(error), let .validation(error): return error.localizedDescription
+        }
+    }
+}
+
+enum VeraUpdatePreparationStage: String {
+    case downloading, verifying
+}
+
 /// Only release archives from the existing official feed enter this pipeline.
 enum VeraUpdatePackage {
     static var cacheDirectory: URL {
@@ -14,7 +29,9 @@ enum VeraUpdatePackage {
             .appendingPathComponent("com.zsjh.workbench/Updates", isDirectory: true)
     }
 
+    @MainActor
     static func prepare(_ release: VeraRelease, progress: @escaping (Int64, Int64) -> Void,
+                        stageChanged: @MainActor (VeraUpdatePreparationStage) -> Void = { _ in },
                         cache: URL = cacheDirectory, currentApp: URL = Bundle.main.bundleURL) async throws -> URL {
         let directory = cache.appendingPathComponent(release.tag_name + "-" + release.archive.sha256.prefix(12), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
@@ -22,34 +39,41 @@ enum VeraUpdatePackage {
         let archive = directory.appendingPathComponent("update.zip")
         let size = release.archive.size ?? 0
         if !FileManager.default.fileExists(atPath: archive.path) {
+            stageChanged(.downloading)
             let space = try directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
                 .volumeAvailableCapacityForImportantUsage ?? 0
             guard space > size * 4 + 100_000_000 else { throw VeraUpdateError(message: "磁盘空间不足，请清理后重试。") }
             guard let url = release.archive.downloadURL else { throw VeraRelease.Failure.invalidRelease }
             try await VeraArchiveDownload.fetch(url, to: archive, expectedSize: size, progress: progress)
         }
+        stageChanged(.verifying)
         // Hashing, extraction and signature checks must not block audio or the UI.
         return try await Task.detached(priority: .utility) {
             do { try verifyArchive(archive, expectedSize: size, sha256: release.archive.sha256) }
-            catch { try? FileManager.default.removeItem(at: archive); throw error }
-            progress(size, size)
+            catch {
+                try? FileManager.default.removeItem(at: archive)
+                throw VeraUpdatePreparationFailure.archive(error)
+            }
             let payload = directory.appendingPathComponent("payload", isDirectory: true)
-            if FileManager.default.fileExists(atPath: payload.path) { try FileManager.default.removeItem(at: payload) }
-            try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: true)
             do {
+                if FileManager.default.fileExists(atPath: payload.path) { try FileManager.default.removeItem(at: payload) }
+                try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: true)
                 let app = try extractArchive(archive, to: payload)
                 try validate(app, build: release.build, version: String(release.tag_name.dropFirst().components(separatedBy: "-build")[0]),
                              team: signingTeam(currentApp))
                 return app
             } catch {
                 try? FileManager.default.removeItem(at: payload)
-                throw error
+                throw VeraUpdatePreparationFailure.validation(error)
             }
         }.value
     }
 
     static func extractArchive(_ archive: URL, to payload: URL) throws -> URL {
-        let listing = try run("/usr/bin/bsdtar", ["-tf", archive.path])
+        var environment = ProcessInfo.processInfo.environment
+        // Finder launches can omit LANG. libarchive otherwise escapes non-ASCII names in listings.
+        environment["LC_ALL"] = "en_US.UTF-8"
+        let listing = try run("/usr/bin/bsdtar", ["-tf", archive.path], environment: environment)
         for entry in listing.split(separator: "\n") {
             let parts = entry.split(separator: "/")
             guard !entry.hasPrefix("/"), !parts.contains(".."), !entry.contains("\\"),
@@ -60,7 +84,7 @@ enum VeraUpdatePackage {
         }
         // The distribution ZIP also contains a Finder alias and a guide.
         // Extract only the app, preserving Unicode names and rejecting unsafe links.
-        try run("/usr/bin/bsdtar", ["-xf", archive.path, "-C", payload.path, "真实交互.app"])
+        try run("/usr/bin/bsdtar", ["-xf", archive.path, "-C", payload.path, "真实交互.app"], environment: environment)
         return payload.appendingPathComponent("真实交互.app", isDirectory: true)
     }
 
@@ -119,10 +143,11 @@ enum VeraUpdatePackage {
         try run("/usr/sbin/spctl", ["--assess", "--type", "execute", app.path])
     }
 
-    @discardableResult static func run(_ executable: String, _ arguments: [String]) throws -> String {
+    @discardableResult static func run(_ executable: String, _ arguments: [String], environment: [String: String]? = nil) throws -> String {
         let process = Process(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.environment = environment
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         try process.run()
@@ -151,6 +176,14 @@ final class VeraArchiveDownload: NSObject, URLSessionDownloadDelegate, @unchecke
 
     static func fetch(_ url: URL, to destination: URL, expectedSize: Int64,
                       progress: @escaping (Int64, Int64) -> Void) async throws {
+        try await VeraRelease.retryNetworkRequest {
+            try await fetchOnce(url, to: destination, expectedSize: expectedSize, progress: progress)
+        }
+    }
+
+    private static func fetchOnce(_ url: URL, to destination: URL, expectedSize: Int64,
+                                  progress: @escaping (Int64, Int64) -> Void) async throws {
+        progress(0, expectedSize)
         let delegate = VeraArchiveDownload(destination: destination, expectedSize: expectedSize, progress: progress)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30

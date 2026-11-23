@@ -44,10 +44,12 @@ struct ReleaseCheckSmoke {
             requests += 1
             if fail { throw VeraRelease.Failure.http(403) }
             return reply
-        }, prepareUpdate: { _, progress in
+        }, prepareUpdate: { _, progress, stageChanged in
             downloads += 1
+            stageChanged(.downloading)
             progress(512, 1024)
             if downloadFailure { throw VeraRelease.Failure.http(503) }
+            stageChanged(.verifying)
             return URL(fileURLWithPath: "/tmp/synthetic-update.app")
         })
         let start = Date(timeIntervalSince1970: 1000)
@@ -55,22 +57,26 @@ struct ReleaseCheckSmoke {
         checker.didChange = { observedStates.append(checker.payload["state"] as! String) }
         await checker.check(automatically: true, at: start)
         try require(requests == 1 && checker.available && downloads == 1 &&
-                    observedStates == ["checking", "available", "downloading", "error"], "Automatic download did not start or report failure")
+                    observedStates == ["checking", "preparing", "downloading", "error"] &&
+                    checker.payload["failureStage"] as? String == "download", "Automatic download did not start or report failure")
         _ = try JSONSerialization.data(withJSONObject: checker.payload)
         await checker.check(automatically: true, at: start.addingTimeInterval(60))
         try require(requests == 1, "Activation bypassed the automatic interval")
         downloadFailure = false
-        await checker.check(at: start.addingTimeInterval(60))
-        try require(downloads == 2 && checker.prepared != nil && checker.payload["state"] as? String == "ready",
-                    "Manual retry did not prepare the update")
+        fail = true
+        observedStates.removeAll()
+        await checker.retry()
+        try require(requests == 1 && downloads == 2 && checker.prepared != nil &&
+                    observedStates == ["preparing", "downloading", "verifying", "ready"],
+                    "Manual retry did not reuse the known release while the release endpoint was unavailable")
         fail = true
         await checker.check(at: start.addingTimeInterval(61))
-        try require(requests == 3 && checker.failure != nil && checker.available && checker.prepared != nil && checker.latest?.notes == newer.notes,
+        try require(requests == 2 && checker.failure != nil && checker.available && checker.prepared != nil && checker.latest?.notes == newer.notes,
                     "Failed manual check lost a known update or could not bypass the interval")
         fail = false
         reply = try release(57)
         await checker.check(automatically: true, at: start.addingTimeInterval(61 + VeraUpdateChecker.automaticInterval))
-        try require(requests == 4 && !checker.available && checker.failure == nil && checker.prepared == nil, "Scheduled check did not recover")
+        try require(requests == 3 && !checker.available && checker.failure == nil && checker.prepared == nil, "Scheduled check did not recover")
         reply = try release(56)
         await checker.check()
         try require(!checker.available, "An older release was offered as an update")
@@ -84,7 +90,7 @@ struct ReleaseCheckSmoke {
                 completion = continuation
                 signal.yield(())
             }
-        }, prepareUpdate: { _, _ in URL(fileURLWithPath: "/tmp/synthetic-update.app") })
+        }, prepareUpdate: { _, _, _ in URL(fileURLWithPath: "/tmp/synthetic-update.app") })
         let pending = Task { await shared.check(automatically: true) }
         var iterator = started.makeAsyncIterator()
         _ = await iterator.next()
@@ -98,6 +104,43 @@ struct ReleaseCheckSmoke {
         await invalid.check()
         try require(invalid.failure != nil && !invalid.available, "Missing bundle build was accepted")
         _ = try JSONSerialization.data(withJSONObject: invalid.payload)
+        var validations = 0
+        var candidate = newer
+        let rejected = VeraUpdateChecker(version: "0.1.0", build: 57, fetchLatest: { candidate },
+                                         prepareUpdate: { _, _, stageChanged in
+            validations += 1
+            stageChanged(.verifying)
+            if validations == 1 {
+                throw VeraUpdatePreparationFailure.validation(VeraUpdateError(message: "更新包包含无效路径"))
+            }
+            return URL(fileURLWithPath: "/tmp/synthetic-update.app")
+        })
+        await rejected.check()
+        await rejected.retry()
+        try require(validations == 1 && rejected.prepared == nil &&
+                    rejected.payload["failureStage"] as? String == "validation",
+                    "Checking again repeated validation of the same rejected package")
+        candidate = try release(59)
+        await rejected.check()
+        try require(validations == 2 && rejected.prepared != nil, "A new release did not clear the previous rejection")
+        var temporaryFailures = 0
+        let recovered = VeraUpdateChecker(version: "0.1.0", build: 57, fetchLatest: {
+            temporaryFailures += 1
+            if temporaryFailures == 1 { throw URLError(.timedOut) }
+            return newer
+        }, prepareUpdate: { _, _, _ in URL(fileURLWithPath: "/tmp/synthetic-update.app") })
+        await recovered.check(automatically: true)
+        try require(temporaryFailures == 2 && recovered.prepared != nil && recovered.failure == nil,
+                    "One version check timeout should recover without a user action")
+        var persistentFailures = 0
+        let unavailable = VeraUpdateChecker(version: "0.1.0", build: 57, fetchLatest: {
+            persistentFailures += 1
+            throw URLError(.timedOut)
+        })
+        await unavailable.check(automatically: true)
+        try require(persistentFailures == 2 && unavailable.payload["failureStage"] as? String == "check",
+                    "A persistent timeout should stop after one recovery attempt")
+        print("PASS: a temporary check timeout recovers automatically, and a persistent timeout stops after two requests")
         print("PASS: release validation, automatic interval, manual retry, failed refresh, older release, and shared requests")
         if CommandLine.arguments.contains("--live") {
             let live = try await VeraRelease.latest()
