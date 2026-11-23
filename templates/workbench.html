@@ -119,12 +119,59 @@
           <div id="welcome-strip" class="library-demo"><button id="try-demo" class="text-button"><svg aria-hidden="true"><use href="#i-play"/></svg>体验示例会议</button></div>
           <section id="library-current" class="library-current" aria-label="进行中的会议" hidden><svg aria-hidden="true"><use href="#i-wave"/></svg><div><span class="library-eyebrow">进行中</span><h2 id="library-current-title"></h2><p id="library-current-meta" class="muted"></p></div><button id="library-resume" type="button" class="primary">回到会议 <svg aria-hidden="true"><use href="#i-arrow"/></svg></button></section>
           <div class="library-tools"><div class="library-filters" aria-label="按会议筛选"><button data-filter="all" aria-pressed="true">全部</button><button data-filter="active" aria-pressed="false">进行中</button><button data-filter="ended" aria-pressed="false">已结束</button><button data-filter="import" aria-pressed="false">音频导入</button></div><button id="library-sort" class="quiet-button" aria-label="切换时间排序">最近更新 ↓</button></div>
-          <div id="material-filters" class="library-filters material-filters" role="group" aria-label="按资料状态筛选" hidden><button data-material-filter="all" aria-pressed="true">全部资料</button><button data-material-filter="saved" aria-pressed="false">已保存</button><button data-material-filter="stale" aria-pressed="false">待复核</button><button data-material-filter="trouble" aria-pressed="false">保存异常</button></div>
-          <div id="library-columns" class="library-columns">
-          <div class="library-table"><div class="library-column-head" aria-hidden="true"><span id="name-column">会议名称</span><span class="state-column">状态</span><span class="count-column">查证资料</span><span class="date-column">最近更新</span><span id="meeting-actions-column" hidden>操作</span></div><div id="library-list" role="list" aria-label="会议或资料列表"></div></div>
-          <aside id="material-preview" class="library-preview" aria-labelledby="material-preview-title" hidden><div class="library-preview-head"><div><p class="library-eyebrow">资料预览</p><h2 id="material-preview-title"></h2></div><button id="material-open" type="button">在会议中打开 <svg aria-hidden="true"><use href="#i-arrow"/></svg></button></div><p id="material-preview-state" class="muted" role="status"></p><pre id="material-preview-body" tabindex="0" aria-label="Markdown 正文"></pre><button id="material-reload" type="button" class="text-button">重新读取</button></aside></div>
+          <div class="library-table"><div class="library-column-head" aria-hidden="true"><span id="name-column">会议名称</span><span class="state-column">状态</span><span class="count-column" title="含查证文档、录音、转写及纪要；查证问题数量见会议名称下方">全部文件</span><span class="date-column">最近更新</span><span id="meeting-actions-column" hidden>操作</span></div><div id="library-list" role="list" aria-label="会议或资料列表"></div></div>
           <div id="library-empty" class="library-empty" hidden><span class="empty-icon"><svg><use href="#i-meetings"/></svg></span><h2 id="library-empty-title">还没有会议</h2><p id="library-empty-message">点击“开始会议”，收听电脑声音并实时转写。</p><button id="empty-setup" type="button" data-pref-go="start">首次设置</button><button id="empty-create" class="primary">开始第一场会议</button></div>
           <p id="library-loading" class="muted" role="status" hidden>正在更新会议列表…</p>
+        </section>
+
+        <section id="materials-view" class="materials-view" aria-labelledby="materials-title" hidden>
+          <header class="materials-header">
+            <div><h1 id="materials-title">全部资料</h1><p id="materials-total" class="muted"></p></div>
+            <div class="materials-filters">
+              <select id="materials-meeting-filter" aria-label="会议状态或来源">
+                <option value="all">全部会议状态</option><option value="active">进行中</option><option value="ended">已结束</option><option value="import">音频导入</option>
+              </select>
+              <select id="materials-status" aria-label="资料状态">
+                <option value="all">全部资料状态</option><option value="saved">已保存</option><option value="stale">待复核</option><option value="trouble">保存异常</option>
+              </select>
+            </div>
+          </header>
+          <div class="materials-grid">
+            <nav class="materials-pane materials-catalog" aria-labelledby="materials-catalog-title">
+              <div class="materials-pane-head"><h2 id="materials-catalog-title">会议目录</h2><span id="materials-meeting-count" class="muted"></span></div>
+              <div id="materials-catalog" class="materials-scroll"></div>
+            </nav>
+            <section class="materials-pane materials-index" aria-labelledby="materials-scope-title">
+              <div class="materials-pane-head">
+                <div class="materials-scope">
+                  <h2 id="materials-scope-title"></h2>
+                  <select id="materials-scope" aria-label="切换会议或查看全部资料"></select>
+                  <p id="materials-count" class="muted" role="status"></p>
+                </div>
+                <select id="materials-sort" aria-label="生成时间排序"><option value="new">最新生成</option><option value="old">最早生成</option></select>
+              </div>
+              <div id="materials-list" class="materials-scroll" tabindex="0" aria-label="资料列表"></div>
+            </section>
+            <section id="material-preview" class="materials-pane materials-reader" aria-label="资料预览">
+              <div class="materials-pane-head">
+                <h2>资料预览</h2>
+                <button id="material-back" type="button"><svg aria-hidden="true"><use href="#i-back"/></svg>返回列表</button>
+                <div class="materials-preview-actions">
+                  <button id="material-source" type="button" hidden>查看 Markdown</button>
+                  <button id="material-open" type="button" hidden>在会议中打开 <svg aria-hidden="true"><use href="#i-arrow"/></svg></button>
+                </div>
+              </div>
+              <div id="material-scroll" class="materials-scroll" tabindex="0" aria-label="预览正文">
+                <article class="material-paper">
+                  <h3 id="material-preview-title" tabindex="-1"></h3>
+                  <p id="material-context" class="muted"></p>
+                  <p id="material-preview-state" class="muted" role="status"></p>
+                  <div id="material-preview-body"></div>
+                  <button id="material-reload" type="button" class="text-button" hidden>重新读取</button>
+                </article>
+              </div>
+            </section>
+          </div>
         </section>
 
         <section id="meeting-view" class="meeting-view" aria-labelledby="session-title" hidden>
