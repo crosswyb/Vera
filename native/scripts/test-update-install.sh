@@ -25,4 +25,5 @@ swiftc -parse-as-library -swift-version 5 \
   "$task_native_dir/Sources/DesktopHost/VeraUpdateInstaller.swift" \
   "$task_native_dir/scripts/UpdateInstallSmoke.swift" \
   -o "$task_fixture_dir/UpdateInstallSmoke"
-"$task_fixture_dir/UpdateInstallSmoke" "$task_fixture_dir"
+# Match Finder launches that have no locale variables.
+/usr/bin/env -u LANG -u LC_ALL -u LC_CTYPE "$task_fixture_dir/UpdateInstallSmoke" "$task_fixture_dir"

@@ -70,6 +70,10 @@ struct VeraRelease: Decodable {
 /// The menu and workbench share one result and one in-flight request.
 @MainActor
 final class VeraUpdateChecker {
+    private enum FailureStage: String {
+        case check, download, archive, validation, install
+    }
+
     static let automaticInterval: TimeInterval = 6 * 60 * 60
     let currentVersion: String
     let currentBuild: Int?
@@ -77,21 +81,24 @@ final class VeraUpdateChecker {
     private(set) var latest: VeraRelease?
     private(set) var checkedAt: Date?
     private(set) var failure: String?
-    private(set) var downloading = false
+    private(set) var preparing = false
+    private(set) var prepareStage: VeraUpdatePreparationStage?
     private(set) var prepared: URL?
     private(set) var installing = false
     private(set) var downloadedBytes: Int64 = 0
     private(set) var totalBytes: Int64 = 0
     var installBlockedReason = ""
     private var lastAttemptAt: Date?
+    private var failureStage: FailureStage?
+    private var rejectedArchiveMessage: String?
     private let fetchLatest: () async throws -> VeraRelease
-    private let prepareUpdate: (VeraRelease, @escaping (Int64, Int64) -> Void) async throws -> URL
+    private let prepareUpdate: (VeraRelease, @escaping (Int64, Int64) -> Void, @MainActor (VeraUpdatePreparationStage) -> Void) async throws -> URL
     var didChange: (() -> Void)?
     var didPrepare: (() -> Void)?
 
     init(version: String, build: Int?, fetchLatest: @escaping () async throws -> VeraRelease = { try await VeraRelease.latest() },
-         prepareUpdate: @escaping (VeraRelease, @escaping (Int64, Int64) -> Void) async throws -> URL = { release, progress in
-             try await VeraUpdatePackage.prepare(release, progress: progress)
+         prepareUpdate: @escaping (VeraRelease, @escaping (Int64, Int64) -> Void, @MainActor (VeraUpdatePreparationStage) -> Void) async throws -> URL = { release, progress, stageChanged in
+             try await VeraUpdatePackage.prepare(release, progress: progress, stageChanged: stageChanged)
          }) {
         currentVersion = version
         currentBuild = build
@@ -107,7 +114,7 @@ final class VeraUpdateChecker {
     var payload: [String: Any] {
         let state: String
         if installing { state = "installing" }
-        else if downloading { state = "downloading" }
+        else if preparing { state = prepareStage?.rawValue ?? "preparing" }
         else if checking { state = "checking" }
         else if prepared != nil { state = "ready" }
         else if failure != nil { state = "error" }
@@ -117,7 +124,7 @@ final class VeraUpdateChecker {
         return ["state": state, "available": available, "currentVersion": currentVersion,
                 "currentBuild": currentBuild as Any? ?? NSNull(),
                 "latestVersion": latest?.tag_name as Any? ?? NSNull(),
-                "notes": latest?.notes ?? "", "error": failure ?? "",
+                "notes": latest?.notes ?? "", "error": failure ?? "", "failureStage": failureStage?.rawValue ?? "",
                 "downloadedBytes": downloadedBytes, "totalBytes": totalBytes,
                 "downloadProgress": totalBytes > 0 ? min(1, Double(downloadedBytes) / Double(totalBytes)) : 0,
                 "installBlockedReason": installBlockedReason,
@@ -125,42 +132,82 @@ final class VeraUpdateChecker {
     }
 
     func check(automatically: Bool = false, at now: Date = Date()) async {
-        guard !checking, !downloading, !installing else { return }
+        guard !checking, !preparing, !installing else { return }
         if automatically, let lastAttemptAt, now.timeIntervalSince(lastAttemptAt) < Self.automaticInterval { return }
         lastAttemptAt = now
         checking = true
         failure = nil
+        failureStage = nil
         didChange?()
         do {
             guard let currentBuild, currentBuild > 0 else { throw VeraRelease.Failure.invalidRelease }
             let release = try await fetchLatest()
-            if latest?.tag_name != release.tag_name || latest?.archive.digest != release.archive.digest { prepared = nil }
+            if latest?.tag_name != release.tag_name || latest?.archive.digest != release.archive.digest {
+                prepared = nil
+                rejectedArchiveMessage = nil
+            }
             latest = release
             checkedAt = now
         } catch {
             failure = error.localizedDescription
+            failureStage = .check
         }
         checking = false
+        if available, prepared == nil, failure == nil, let release = latest {
+            if let rejectedArchiveMessage {
+                failure = rejectedArchiveMessage
+                failureStage = .validation
+            } else {
+                await prepare(release)
+                return
+            }
+        }
         didChange?()
-        guard available, prepared == nil, failure == nil, let release = latest else { return }
-        downloading = true
+    }
+
+    func retry() async {
+        guard !checking, !preparing, !installing else { return }
+        if available, prepared == nil, let release = latest, [.download, .archive].contains(failureStage) {
+            await prepare(release)
+        } else {
+            await check()
+        }
+    }
+
+    private func prepare(_ release: VeraRelease) async {
+        preparing = true
+        failure = nil
+        failureStage = nil
         downloadedBytes = 0
         totalBytes = release.archive.size ?? 0
         didChange?()
         do {
-            prepared = try await prepareUpdate(release) { [weak self] received, total in
+            prepared = try await prepareUpdate(release, { [weak self] received, total in
                 Task { @MainActor in
-                    guard let self, self.downloading else { return }
-                    self.downloadedBytes = received
+                    guard let self, self.prepareStage == .downloading else { return }
+                    self.downloadedBytes = max(self.downloadedBytes, received)
                     self.totalBytes = total
                     self.didChange?()
                 }
-            }
+            }, { stage in
+                prepareStage = stage
+                if stage == .verifying { downloadedBytes = totalBytes }
+                didChange?()
+            })
             downloadedBytes = totalBytes
+        } catch VeraUpdatePreparationFailure.archive(let error) {
+            failureStage = .archive
+            failure = error.localizedDescription
+        } catch VeraUpdatePreparationFailure.validation(let error) {
+            failureStage = .validation
+            failure = error.localizedDescription
+            rejectedArchiveMessage = error.localizedDescription
         } catch {
-            failure = "更新下载或校验失败：\(error.localizedDescription)"
+            failureStage = .download
+            failure = error.localizedDescription
         }
-        downloading = false
+        prepareStage = nil
+        preparing = false
         didChange?()
         if prepared != nil { didPrepare?() }
     }
@@ -168,12 +215,14 @@ final class VeraUpdateChecker {
     func installationStarted() {
         installing = true
         failure = nil
+        failureStage = nil
         didChange?()
     }
 
     func installationFailed(_ error: Error) {
         installing = false
         failure = error.localizedDescription
+        failureStage = .install
         didChange?()
     }
 }

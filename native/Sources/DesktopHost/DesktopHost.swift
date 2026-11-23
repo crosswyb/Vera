@@ -284,10 +284,10 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private func checkForUpdates(showResult: Bool) {
-        guard !updates.checking, !updates.downloading, !updates.installing, !closing else { return }
+        guard !updates.checking, !updates.preparing, !updates.installing, !closing else { return }
         Task {
             guard !updates.checking else { return }
-            await updates.check()
+            await updates.retry()
             guard showResult, !closing else { return }
             if updates.available, updates.failure == nil { return }
             let alert = NSAlert()
@@ -611,9 +611,13 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 
     private func publishNativeState() {
         updates.installBlockedReason = updateInstallBlockedReason
-        updateItem.isEnabled = !updates.checking && !updates.downloading && !updates.installing
-        if updates.downloading {
+        updateItem.isEnabled = !updates.checking && !updates.preparing && !updates.installing
+        if updates.prepareStage == .verifying {
+            updateItem.title = "正在验证更新包…"
+        } else if updates.prepareStage == .downloading {
             updateItem.title = "正在下载更新…"
+        } else if updates.preparing {
+            updateItem.title = "正在准备更新…"
         } else if updates.prepared != nil {
             updateItem.title = "安装已下载的更新…"
         } else if updates.checking {
@@ -715,6 +719,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         switch action {
         case "requestState": publishNativeState()
         case "checkForUpdates": checkForUpdates(showResult: false)
+        case "openUpdateRelease":
+            if updates.available, let release = updates.latest { openExternal(release.page) }
         case "installUpdate": Task { await promptToInstallUpdate() }
         case "refreshSpeechSettings": Task { try? await refreshSpeechConfiguration() }
         case "speechTest":
