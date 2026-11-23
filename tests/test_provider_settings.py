@@ -13,7 +13,8 @@ from unittest.mock import patch
 import requests
 
 from live.model_budget import ModelBudget
-from live.provider_settings import ModelService, ProviderSettings, SettingsUpdate
+from live.output_validation import OutputValidationError
+from live.provider_settings import ModelService, ProviderSettings, SettingsUpdate, from_environment
 from live.source_reader import Researcher, SearchOutcomeUnknown, TavilySearch
 from live.store import LiveError
 from live.workbench_contracts import NewMeeting, NewQuestion, Utterance
@@ -138,6 +139,48 @@ class ProviderSettingsTest(unittest.TestCase):
                 draft = self.settings.current.model_dump()
                 draft["model"]["timeout_seconds"] = value
                 self.assertEqual(self.save(draft).status_code, 400)
+
+    def test_automatic_generation_settings_round_trip_and_preserve_numeric_profiles(self):
+        self.assertIsNone(self.settings.current.model.max_tokens)
+        self.assertEqual(self.settings.current.model.token_parameter, "auto")
+        legacy = self.draft()
+        legacy["model"].update(name="legacy-model", max_tokens=4200, token_parameter="max_tokens")
+        self.assertEqual(self.save(legacy).status_code, 200)
+        draft = self.draft()
+        draft["model"].update(name="automatic-model", max_tokens=None, token_parameter="auto")
+        self.assertEqual(self.save(draft).status_code, 200)
+        reopened = ProviderSettings(self.path)
+        self.assertIsNone(reopened.current.model.max_tokens)
+        self.assertEqual(reopened.current.model.token_parameter, "auto")
+        saved = next(p for p in reopened.model_profiles if p.name == "legacy-model")
+        self.assertEqual(saved.max_tokens, 4200)
+        self.assertEqual(saved.token_parameter, "max_tokens")
+        draft = self.draft()
+        draft["model"] = saved.model_dump()
+        self.assertEqual(self.save(draft).status_code, 200)
+        self.assertEqual(ProviderSettings(self.path).current.model.max_tokens, 4200)
+
+    def test_automatic_environment_and_legacy_numeric_limits(self):
+        for value in (None, "", "auto", " AUTO "):
+            env = {} if value is None else {"ZSJH_LIVE_MODEL_MAX_TOKENS": value}
+            with self.subTest(value=value):
+                config = from_environment(env).model
+                self.assertIsNone(config.max_tokens)
+                self.assertEqual(config.token_parameter, "auto")
+        for provider, parameter in (("deepseek", "max_tokens"), ("openai_compatible", "max_completion_tokens")):
+            config = from_environment({"ZSJH_LIVE_MODEL_PROVIDER": provider, "ZSJH_LIVE_MODEL_MAX_TOKENS": "4200"}).model
+            self.assertEqual(config.max_tokens, 4200)
+            self.assertEqual(config.token_parameter, parameter)
+            self.assertEqual(config.payload("synthetic", {})[parameter], 4200)
+
+    def test_invalid_custom_generation_limits_do_not_change_saved_settings(self):
+        for value in (0, 255, 65537, "32768", True):
+            with self.subTest(value=value):
+                draft = self.draft()
+                draft["model"]["max_tokens"] = value
+                self.assertEqual(self.save(draft).status_code, 400)
+        self.assertEqual(self.settings.current.revision, 0)
+        self.assertIsNone(self.settings.current.model.max_tokens)
 
     def test_saved_settings_are_read_before_invalid_legacy_environment(self):
         self.assertEqual(self.save().status_code, 200)
@@ -308,7 +351,8 @@ class ProviderSettingsTest(unittest.TestCase):
 
     def test_generic_payload_omits_vendor_parameters_and_honors_output_setting(self):
         config = ModelService(provider="openai_compatible", base_url="http://127.0.0.1:1234/v1/chat/completions",
-                              name="local-model", api_key="", json_mode=False, token_parameter="max_completion_tokens")
+                              name="local-model", api_key="", json_mode=False, max_tokens=8192,
+                              token_parameter="max_completion_tokens")
         self.assertTrue(config.configured)
         with patch("requests.Session.post", return_value=completion({"ok": True})) as post:
             self.assertEqual(TextModel(self.budget(), config).call(SUMMARY_SYSTEM, {"synthetic": True}), {"ok": True})
@@ -319,6 +363,52 @@ class ProviderSettingsTest(unittest.TestCase):
         self.assertEqual(kwargs["json"]["max_completion_tokens"], 8192)
         for field in ("max_tokens", "thinking", "reasoning_effort", "response_format"):
             self.assertNotIn(field, kwargs["json"])
+
+    def test_automatic_budgets_reach_requests_for_answers_summaries_and_fast_tasks(self):
+        cases = [
+            (ModelService(), "max_tokens", 8192),
+            (ModelService(thinking="enabled"), "max_tokens", 65536),
+            (ModelService(thinking="enabled", base_url="https://gateway.example/v1"), "max_tokens", 32768),
+            (ModelService(provider="openai_compatible", base_url="https://api.openai.com/v1", name="gpt-5"), "max_completion_tokens", 32768),
+            (ModelService(provider="openai_compatible", base_url="https://api.openai.com/v1", name="gpt-5", reasoning_effort="none"), "max_completion_tokens", 8192),
+            (ModelService(provider="openai_compatible", base_url="https://api.openai.com/v1", name="gpt-4o"), "max_completion_tokens", 8192),
+            (ModelService(provider="openai_compatible", base_url="https://gateway.example/v1", name="openai/o3"), "max_completion_tokens", 32768),
+            (ModelService(provider="openai_compatible", base_url="https://gateway.example/v1", name="custom"), "max_tokens", 8192),
+            (ModelService(provider="openai_compatible", base_url="https://gateway.example/v1", name="custom", reasoning_effort="high"), "max_tokens", 32768),
+        ]
+        for config, parameter, normal_budget in cases:
+            model = TextModel(self.budget(), config)
+            self.addCleanup(model.close)
+            for system, options, expected in ((ANSWER_SYSTEM, {}, normal_budget), (SUMMARY_SYSTEM, {}, normal_budget),
+                                              ("detection", {"detection": True}, 8192), ("routing", {"routing": True}, 8192)):
+                with self.subTest(config=config, task=system[:12]), patch("requests.Session.post", return_value=completion({"ok": True})) as post:
+                    self.assertEqual(model.call(system, {}, **options), {"ok": True})
+                    payload = post.call_args.kwargs["json"]
+                    self.assertEqual(payload[parameter], expected)
+                    self.assertNotIn("auto", payload)
+                    self.assertNotIn("max_tokens" if parameter == "max_completion_tokens" else "max_completion_tokens", payload)
+            self.assertIsNone(config.max_tokens)
+
+    def test_automatic_generation_honors_explicit_parameter_and_inherited_detection(self):
+        config = ModelService(provider="openai_compatible", base_url="https://gateway.example/v1", name="gpt-5",
+                              token_parameter="max_tokens", detection_mode="inherit")
+        for options in ({}, {"detection": True}, {"routing": True}):
+            payload = config.payload("synthetic", {}, **options)
+            self.assertEqual(payload["max_tokens"], 32768)
+            self.assertNotIn("max_completion_tokens", payload)
+
+    def test_automatic_limit_truncation_reports_the_resolved_budget(self):
+        config = ModelService(provider="openai_compatible", base_url="https://gateway.example/v1", name="gpt-5")
+        response = Response({"choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+                             "usage": {"completion_tokens": 32768}})
+        model = TextModel(self.budget(), config)
+        self.addCleanup(model.close)
+        with patch("requests.Session.post", return_value=response) as post, self.assertRaises(OutputValidationError) as caught:
+            model.call(ANSWER_SYSTEM, {})
+        self.assertEqual(caught.exception.response["max_tokens"], 32768)
+        self.assertEqual(caught.exception.issues[0]["code"], "output_token_limit")
+        self.assertTrue(caught.exception.terminal)
+        self.assertEqual(post.call_count, 1)
 
     def test_read_only_doctor_checks_selected_model_without_a_paid_completion(self):
         config = ModelService(provider="openai_compatible", base_url="https://gateway.example/v1", name="custom-model", api_key="custom-fixture")

@@ -121,21 +121,21 @@ class DetectionReviewResolutionTest(unittest.TestCase):
                     'title': '合成材料新范围', 'scope_changed': True}
                 original.pop('expected_version')
                 task = self.legacy_review(work, original)
-                current = question
                 if edited:
                     current = self.wb.edit(self.owner, question['id'],
                         EditQuestion(expected_version=question['version'], title='人工更正后的合成范围'))
-                self.wb.retry_detection_task(self.owner, self.mid, task['id'])
-                retry = self.wb.detection_recovery_work(self.agent)
-                self.run_work(retry, [{**original, 'question_id': question['id'], 'expected_version': current['version']}])
-                snap = self.snapshot()
-                if edited:
+                    with self.assertRaisesRegex(LiveError, '关联问题版本或状态已变化') as rejected:
+                        self.wb.retry_detection_task(self.owner, self.mid, task['id'])
+                    self.assertEqual(rejected.exception.status, 409)
+                    snap = self.snapshot()
                     self.assertEqual(snap['questions'], [current])
                     remaining, = snap['detection_tasks']
-                    self.assertEqual(remaining['state'], 'needs_review')
-                    self.assertEqual(remaining['issues'][0]['code'], 'correction_changed_intent')
-                    self.assertTrue(remaining['issues'][0]['field'].endswith('expected_version'))
+                    self.assertEqual((remaining['id'], remaining['state']), (task['id'], 'needs_review'))
                 else:
+                    self.wb.retry_detection_task(self.owner, self.mid, task['id'])
+                    retry = self.wb.detection_recovery_work(self.agent)
+                    self.run_work(retry, [{**original, 'question_id': question['id'], 'expected_version': question['version']}])
+                    snap = self.snapshot()
                     revised, = snap['questions']
                     self.assertEqual((revised['id'], revised['title'], revised['version']),
                         (question['id'], original['title'], question['version'] + 1))

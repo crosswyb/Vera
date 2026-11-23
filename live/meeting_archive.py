@@ -1,8 +1,10 @@
 """Local meeting deliverables, independent of question detection and search."""
 
 import json
+import re
 import time
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from live.artifact_writer import digest
@@ -12,6 +14,34 @@ from live.workbench_contracts import MeetingSummary
 
 
 SOURCE_LABELS = {"system": "电脑声音", "microphone": "麦克风", "file": "导入音频"}
+
+
+def distinct_utterances(segments):
+    """Filter likely speaker bleed in model input while keeping all archived originals."""
+    kept = {}
+    tracks = {}
+    for segment in sorted(segments, key=lambda s: s.get('event_seq', 0)):
+        source = segment.get('source')
+        epoch = segment.get('capture_epoch')
+        start, end = segment.get('audio_start_ms'), segment.get('audio_end_ms')
+        duplicate = False
+        if source in {'microphone', 'system'} and epoch and start is not None and end is not None and end > start:
+            raw = segment['text'].lower()
+            text = re.sub(r'[^\w]+', '', raw)
+            qualifiers = re.findall(r'[a-z0-9]+|没有|未|不|无|可|只|仅|除外', raw)
+            other_source = 'system' if source == 'microphone' else 'microphone'
+            for other_start, other_end, other_text, other_qualifiers in reversed(tracks.get((epoch, other_source), [])):
+                overlap = min(end, other_end) - max(start, other_start)
+                if overlap < .65 * min(end - start, other_end - other_start) or min(len(text), len(other_text)) < 12:
+                    continue
+                if qualifiers == other_qualifiers and SequenceMatcher(None, text, other_text, autojunk=False).ratio() >= .88:
+                    duplicate = True
+                    break
+            if not duplicate:
+                tracks.setdefault((epoch, source), []).append((start, end, text, qualifiers))
+        if not duplicate:
+            kept[segment['id']] = segment
+    return [s for s in segments if s['id'] in kept]
 
 
 def final_segments(workbench, db, meeting):
@@ -43,7 +73,7 @@ def render_transcript(meeting, segments):
         lines += ["本场没有已确认的转录文字。请检查录音与识别状态；此文件不代表识别成功。", ""]
     for index, s in enumerate(segments, 1):
         source = "文字补充" if s["capture_epoch"] == "manual" else SOURCE_LABELS[s["source"]]
-        service = {"apple_local": "Apple 中文识别", "dashscope": "阿里云百炼", "deepseek": "DeepSeek"}
+        service = {"apple_local": "Apple 中文识别", "dashscope": "阿里云百炼", "deepseek": "DeepSeek 官方 ASR"}
         label = service.get(s.get("provider"), "Apple 中文识别") if s["capture_epoch"] != "manual" else "手动"
         lines += [f"## S{index:04d} · {clock(s.get('audio_start_ms'))} · {source}", "",
                   f"录音段：{s['capture_epoch']} · 识别服务：{label} · 识别时间：{s.get('occurred_at', '')}", "", s["text"], ""]
@@ -209,9 +239,20 @@ class MeetingArchive(RecordingArchive):
                 if not m.get("permissions", {}).get("model") or not self.capabilities.get("model_enabled"):
                     summary["state"] = "local_only"; self._save(db, m); continue
                 segments = final_segments(self, db, m)
+                current = {(s['id'], s['revision']) for s in segments}
+                follow_ups = []
+                for question in self._items(db, 'wb_question', m['id']):
+                    result = question.get('result') or {}
+                    if question.get('basis_stale') or result.get('meeting_resolution') != 'follow_up':
+                        continue
+                    refs = result.get('meeting_evidence', [])
+                    if refs and all((ref['segment_id'], ref['revision']) in current for ref in refs):
+                        follow_ups.append({'text': result['answer'], 'source_refs': [
+                            {key: ref[key] for key in ('segment_id', 'revision')} for ref in refs]})
                 summary.update(state="running", lease_id=uid("summary"))
                 self._save(db, m)
-                return {"meeting": m, "segments": segments, "fingerprint": summary["fingerprint"], "lease_id": summary["lease_id"]}
+                return {"meeting": m, "segments": segments, "follow_ups": follow_ups,
+                        "fingerprint": summary["fingerprint"], "lease_id": summary["lease_id"]}
         return None
 
     def check_summary_work(self, principal, work):

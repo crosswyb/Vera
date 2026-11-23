@@ -4,7 +4,7 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pydantic import ValidationError
 
@@ -32,6 +32,30 @@ LONG_CONCLUSION = "长结论需要保留必要条件及其适用范围。" * 12
 
 
 class AnswerBriefTest(unittest.TestCase):
+    def test_live_short_answer_is_delivered_before_full_answer_and_invalid_quote_is_omitted(self):
+        class ReplyModel:
+            supports_research_progress = True
+            def quick_answer(self, *_args, **_kwargs):
+                return short
+            def answer(self, *_args, **_kwargs):
+                self.progress_at_full_answer = [call.args[0] for call in stage.progress.call_args_list]
+                return ANSWER
+
+        for valid in (True, False):
+            with self.subTest(valid=valid):
+                search, stage = Mock(), Mock()
+                search.search.return_value = [{'url': SOURCES[0]['url'], 'content': QUOTE * 5}]
+                short = copy.deepcopy(ANSWER)
+                if not valid:
+                    short['claims'][0]['quote'] = '这段话从未出现在来源中。'
+                model = ReplyModel()
+                result = Researcher(search, model).run(
+                    {'data_scope': 'real', 'state': 'active'},
+                    {'title': '步骤怎么组织？', 'public_query': '实施步骤', 'evidence_need': 'public'}, stage)
+                self.assertEqual('verified_brief' in model.progress_at_full_answer, valid)
+                self.assertEqual(result['answer'], ANSWER['answer'])
+                search.search.assert_called_once()
+
     def test_answer_deadline_reuses_read_sources_and_retries_only_once(self):
         from unittest.mock import Mock
         from live.workbench_runtime import OutcomeUnknown

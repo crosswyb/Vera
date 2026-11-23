@@ -241,7 +241,12 @@ def register_workbench(app, store):
 
     @app.get("/live/v2/meetings/<mid>/search")
     def workbench_search_meeting(mid):
-        return jsonify(wb.search_meeting(g.member, mid, request.args.get('q', '')))
+        segment_offset = request.args.get('segment_offset', default=0, type=int)
+        question_offset = request.args.get('question_offset', default=0, type=int)
+        require(segment_offset is not None and question_offset is not None,
+                '搜索分页位置无效', 400)
+        return jsonify(wb.search_meeting(g.member, mid, request.args.get('q', ''),
+                                          segment_offset, question_offset))
 
     @app.post("/live/v2/meetings/<mid>/utterances")
     def workbench_utterance(mid):

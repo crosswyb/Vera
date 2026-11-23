@@ -103,7 +103,7 @@
         <div id="meeting-search-popover" class="meeting-search-popover" popover="manual" role="region" aria-label="本场会议搜索结果">
           <p id="meeting-search-status" class="meeting-search-status" role="status" aria-live="polite"></p>
           <div id="meeting-search-results" class="meeting-search-results"></div>
-          <button id="search-library" class="text-button" type="button">搜索全部会议</button>
+          <button id="search-library" class="text-button" type="button">查看本场全部结果</button>
         </div>
         <div class="layout-switch" role="group" aria-label="界面布局">
           <button type="button" data-layout="a" aria-pressed="true" aria-label="静阅布局" title="静阅：舒展双栏，专注阅读与查证"><svg aria-hidden="true"><use href="#i-sidebar"/></svg><span class="layout-name">静阅</span></button>
@@ -165,6 +165,22 @@
               </div>
               <p id="archive-guidance" class="section-caption muted"></p><div id="meeting-files-list" class="meeting-files-list"></div><p id="archive-error" class="error-text" role="alert"></p><div id="meeting-file-preview" hidden><div class="section-heading"><h3 id="meeting-file-title"></h3><button id="close-file-preview" class="text-button">收起预览</button></div><article id="meeting-file-content" class="meeting-file-article"></article></div>
             </section>
+            <section id="meeting-search-panel" class="meeting-search-panel" aria-labelledby="meeting-search-heading" hidden>
+              <div class="section-heading meeting-search-heading">
+                <div><h2 id="meeting-search-heading" tabindex="-1">本场搜索</h2><p id="meeting-search-query" class="muted"></p></div>
+                <button id="close-meeting-search" type="button" class="text-button">返回转写</button>
+              </div>
+              <div class="meeting-search-toolbar">
+                <div id="meeting-search-filters" class="meeting-search-filters" role="group" aria-label="结果类型">
+                  <button type="button" data-search-filter="all" aria-pressed="true">全部 <span>0</span></button>
+                  <button type="button" data-search-filter="segments" aria-pressed="false">转写 <span>0</span></button>
+                  <button type="button" data-search-filter="questions" aria-pressed="false">查证问题 <span>0</span></button>
+                </div>
+                <span id="meeting-search-full-status" class="muted" role="status" aria-live="polite"></span>
+              </div>
+              <div id="meeting-search-full-list" class="meeting-search-full-list scroll-region" tabindex="0" aria-label="本场匹配结果"></div>
+              <div class="meeting-search-footer"><span id="meeting-search-count" class="muted" role="status"></span><button id="meeting-search-load-more" type="button" class="text-button">加载更多</button></div>
+            </section>
             <section id="transcript-panel" class="transcript-panel" aria-labelledby="transcript-heading">
               <div class="section-heading"><h2 id="transcript-heading">会议转写</h2><label class="follow-toggle"><input type="checkbox" id="follow-transcript" checked>跟随最新</label><span id="transcript-live-label" class="muted">等待收听</span></div>
               <div id="transcript-paging" class="transcript-paging" hidden><button type="button" id="older-transcript" class="text-button">查看更早发言</button><button type="button" id="latest-transcript" class="text-button" hidden>回到最新发言</button></div>
@@ -179,7 +195,12 @@
               <section id="research-progress" class="research-progress" aria-label="查证进度" hidden>
                 <div class="research-status"><span class="research-indicator" aria-hidden="true"></span><h3 id="research-status-title" role="status" aria-live="polite"></h3><span id="research-elapsed" class="research-elapsed"></span></div>
                 <p id="research-query" class="research-query" hidden></p><p id="research-wait" class="research-wait" role="status" hidden></p>
-                <div id="research-draft" class="research-draft" hidden><p class="research-draft-label">回答草稿 · 待核验</p><p id="research-draft-text"></p></div>
+                <div id="research-draft" class="research-draft" hidden>
+                  <p id="research-draft-label" class="research-draft-label">回答草稿 · 待核验</p>
+                  <p id="research-draft-text"></p>
+                  <p id="research-brief-caveat" hidden></p>
+                  <ul id="research-brief-sources" hidden></ul>
+                </div>
                 <details id="research-process" class="research-process"><summary>查证过程 <span id="research-source-count"></span><span id="result-version" class="version-label"></span></summary><ol id="research-events" class="research-events"></ol><div id="research-source-list" class="research-source-list"></div>
                   <details id="research-thinking" class="research-thinking" hidden><summary id="research-thinking-title">模型处理</summary><p id="research-model-detail"></p></details>
                 </details>
@@ -264,7 +285,35 @@
                 </div>
                 <div class="provider-key-label"><label for="service-model-key">API Key <span id="service-model-key-state"></span></label><button id="clear-model-key" type="button" class="text-button">清除已存密钥</button></div><input id="service-model-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="填写密钥" spellcheck="false" autocapitalize="off">
                 <label for="service-model-detection">问题识别</label><select id="service-model-detection"><option value="fast">快速识别（推荐）</option><option value="inherit">沿用回答配置</option></select><p class="setting-note">快速识别在 OpenAI 兼容接口使用 medium 推理强度，在 DeepSeek 官方接口关闭思考。查证回答与纪要使用下方配置。</p>
-                <details class="provider-advanced"><summary>高级设置</summary><div class="provider-grid"><div><label for="service-model-effort">推理强度</label><select id="service-model-effort"><option value="default">服务商默认</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></div><div><label for="service-model-tokens">单次输出上限</label><input id="service-model-tokens" type="number" min="256" max="65536" step="1" required value="2048"></div><div><label for="service-model-token-parameter">输出上限参数</label><select id="service-model-token-parameter"><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></div><div><label for="service-model-timeout">模型等待时限（秒）</label><input id="service-model-timeout" type="number" min="15" max="600" step="1" required value="180"></div></div><label class="provider-toggle" for="service-model-json"><input id="service-model-json" type="checkbox">使用 JSON 输出格式</label><label id="model-thinking-row" class="provider-toggle" for="service-model-thinking"><input id="service-model-thinking" type="checkbox">启用 DeepSeek 思考模式</label><p class="setting-note">按服务商支持的参数填写。会议纪要会使用至少 8192 的输出上限。</p></details>
+                <details class="provider-advanced">
+                  <summary>高级设置</summary>
+                  <div class="provider-grid">
+                    <div>
+                      <label for="service-model-effort">推理强度</label>
+                      <select id="service-model-effort"><option value="default">服务商默认</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+                    </div>
+                    <div>
+                      <label for="service-model-token-mode">生成额度</label>
+                      <select id="service-model-token-mode" aria-describedby="service-model-token-help"><option value="auto">自动（推荐）</option><option value="custom">自定义</option></select>
+                    </div>
+                    <div id="service-model-token-limit-field" hidden>
+                      <label for="service-model-tokens">单次生成上限（token）</label>
+                      <input id="service-model-tokens" type="number" min="256" max="65536" step="1" disabled value="32768" aria-describedby="service-model-token-custom-help">
+                      <p id="service-model-token-custom-help" class="setting-note">纪要和快速识别至少使用 8192，快速识别最多使用 16384。</p>
+                    </div>
+                    <div>
+                      <label for="service-model-token-parameter">输出上限参数</label>
+                      <select id="service-model-token-parameter"><option value="auto">自动（推荐）</option><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select>
+                    </div>
+                    <div>
+                      <label for="service-model-timeout">模型等待时限（秒）</label>
+                      <input id="service-model-timeout" type="number" min="15" max="600" step="1" required value="180">
+                    </div>
+                  </div>
+                  <label class="provider-toggle" for="service-model-json"><input id="service-model-json" type="checkbox">使用 JSON 输出格式</label>
+                  <label id="model-thinking-row" class="provider-toggle" for="service-model-thinking"><input id="service-model-thinking" type="checkbox">启用 DeepSeek 思考模式</label>
+                  <p id="service-model-token-help" class="setting-note">自动按模型与任务设置额度，通常无需调整。部分模型的额度同时包含思考和回答。</p>
+                </details>
                 <div class="provider-test-row"><button id="test-model-service" type="button">测试模型连接</button><p id="model-test-result" class="provider-result" role="status" aria-live="polite"></p></div>
               </fieldset>
             </section>

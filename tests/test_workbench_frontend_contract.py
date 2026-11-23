@@ -172,6 +172,24 @@ assert.doesNotMatch($('speech-gap-count').textContent, /核对|校对|错词/);
 """
         subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench-speech.js')], check=True)
 
+    def test_audio_file_status_does_not_merge_stale_live_native_services(self):
+        script = r"""
+const assert = require('node:assert/strict');
+globalThis.window = {};
+function node() { return {children:[], dataset:{}, append(...items){this.children.push(...items);}, replaceChildren(...items){this.children=items;}, addEventListener(){}}; }
+globalThis.document = {createElement: node};
+require(process.argv[1]);
+const nodes = new Map(), $ = id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
+const state = {home:{member:{role:'owner'}}, native:{transcription:{microphone:{provider:'dashscope', state:'running'}}}};
+const speech = window.createSpeechSettings({api:async()=>{}, state, $, nativeAvailable:()=>true,
+  postNative:()=>{}, text:(node, value)=>{node.textContent=value;}, audioTime:value=>String(value), renderRuntime:()=>{}});
+speech.renderMeeting({id:'file-meeting', input_kind:'audio_file', audio_import:{provider:'deepseek', state:'completed'},
+  transcription:{file:{provider:'deepseek', state:'stopped'}}, state:'ended', recordings:[]}, true);
+assert.match($('speech-meeting-state').textContent, /选定的音频文件.*DeepSeek 官方 ASR/);
+assert.doesNotMatch($('speech-meeting-state').textContent, /阿里云百炼/);
+"""
+        subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench-speech.js')], check=True)
+
     def test_speech_gap_shows_cause_chain_and_opens_the_matching_recording(self):
         script = r"""
 const assert = require('node:assert/strict');

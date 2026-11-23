@@ -840,7 +840,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 ZSJH_LIVE_MODEL_PROVIDER=deepseek
                 ZSJH_LIVE_MODEL_NAME=deepseek-flash
                 ZSJH_LIVE_MODEL_THINKING=disabled
-                ZSJH_LIVE_MODEL_MAX_TOKENS=8192
+                ZSJH_LIVE_MODEL_MAX_TOKENS=auto
                 ZSJH_LIVE_MODEL_API_KEY=
                 ZSJH_LIVE_MODEL_REQUEST_LIMIT=0
                 ZSJH_WB_MODEL_REQUEST_LIMIT=unlimited
@@ -1403,6 +1403,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 if let lastSequence = job["last_event_seq"] as? Int { initialSequence = max(0, lastSequence) }
                 let destination = try meetingFileURL(relative, meeting: registeredMeeting)
                 activeInput = "audio_file"; captureProblem = nil
+                sourceLevels = [:]; sourceFrames = [:]; transcription = [:]
                 captureFinish = nil; captureFinishMeetingId = meeting
                 activeEpoch = epoch; activeMeeting = meeting; lastMeeting = meeting; captureState = "importing"
                 beginningCapture = false

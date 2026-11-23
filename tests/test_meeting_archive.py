@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from live.meeting_archive import final_segments
+from live.meeting_archive import distinct_utterances, final_segments
 from live.store import LiveError
 from live.workbench_contracts import AudioEvent, AudioImport, AudioImportFinish, MeetingPermissions, NewMeeting, RecordingStart, Utterance
 from live.workbench_retention import purge
@@ -16,6 +16,18 @@ from live_api import create_app
 
 
 class MeetingArchiveTest(unittest.TestCase):
+    def test_overlapping_track_copy_is_filtered_without_dropping_a_correction(self):
+        base = dict(capture_epoch='fixture', audio_start_ms=2000, audio_end_ms=5000)
+        system = dict(base, id='system', event_seq=1, source='system',
+                      text='当前测试环境可以使用合成的访问日志来核对请求。')
+        duplicate = dict(base, id='echo', event_seq=2, source='microphone',
+                         text='当前测试环境可以使用合成的访问日志来核对请求')
+        correction = dict(duplicate, id='correction', event_seq=3,
+                          text='当前测试环境不可以使用合成的访问日志来核对请求。')
+        later = dict(duplicate, id='later', event_seq=4, audio_start_ms=5400, audio_end_ms=8000)
+        self.assertEqual([s['id'] for s in distinct_utterances([system, duplicate, correction, later])],
+                         ['system', 'correction', 'later'])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
