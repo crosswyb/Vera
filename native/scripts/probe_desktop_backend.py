@@ -69,6 +69,8 @@ def probe(backend):
             status, data = request("/live/v2/settings")
             settings = json.loads(data)
             assert status == 200 and settings["editable"] and "api_key" not in settings["model"]
+            assert settings["model"]["max_tokens"] is None and settings["model"]["token_parameter"] == "auto"
+            result["automatic_generation_defaults"] = True
             result["settings_get"] = status
             speech = settings["speech"]
             assert speech["live_provider"] == speech["file_provider"] == "apple_local"
@@ -90,7 +92,7 @@ def probe(backend):
                      "model": {k: v for k, v in settings["model"].items() if k != "api_key_configured"},
                      "search": {k: v for k, v in settings["search"].items() if k not in {"api_key_configured", "effective_key_configured"}}}
             draft["model"].update(provider="openai_compatible", name="frozen-provider-fixture", base_url="https://model.fixture.invalid/v1",
-                                  enabled=False, api_key="frozen-fixture-only")
+                                  enabled=False, api_key="frozen-fixture-only", max_tokens=4200, token_parameter="max_tokens")
             draft["search"].update(provider="tavily", base_url="https://api.tavily.com", enabled=False,
                                    use_model_key=False, api_key="search-fixture-only")
             status, data = request("/live/v2/settings", draft, method="PUT")
@@ -106,14 +108,21 @@ def probe(backend):
             saved = json.loads(data)
             compatible = next(p for p in saved["model_profiles"] if p["name"] == "frozen-provider-fixture")
             assert compatible["api_key_configured"] and "api_key" not in compatible
+            assert compatible["max_tokens"] == 4200 and compatible["token_parameter"] == "max_tokens"
             draft["revision"] = saved["revision"]
-            draft["model"].update(provider="deepseek", name="deepseek-v4-pro", base_url="https://api.deepseek.com", api_key=None)
+            draft["model"].update(provider="deepseek", name="deepseek-v4-pro", base_url="https://api.deepseek.com",
+                                  api_key=None, max_tokens=None, token_parameter="auto")
             _, raw = request("/live/v2/settings", draft, method="PUT")
-            draft["revision"] = json.loads(raw)["revision"]
+            automatic = json.loads(raw)
+            assert automatic["model"]["max_tokens"] is None and automatic["model"]["token_parameter"] == "auto"
+            draft["revision"] = automatic["revision"]
             draft["model"] = {k: v for k, v in compatible.items() if k != "api_key_configured"}
             _, raw = request("/live/v2/settings", draft, method="PUT")
-            assert json.loads(raw)["model"]["api_key_configured"] and b"fixture-only" not in raw
+            restored = json.loads(raw)["model"]
+            assert restored["api_key_configured"] and b"fixture-only" not in raw
+            assert restored["max_tokens"] == 4200 and restored["token_parameter"] == "max_tokens"
             result["saved_model_round_trip"] = True
+            result["generation_budget_profile_round_trip"] = True
             status, data = request("/live/v2/storage")
             storage = json.loads(data)
             assert status == 200 and storage["output_root"] == str((root / "meetings").resolve())

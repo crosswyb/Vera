@@ -264,7 +264,35 @@
                 </div>
                 <div class="provider-key-label"><label for="service-model-key">API Key <span id="service-model-key-state"></span></label><button id="clear-model-key" type="button" class="text-button">清除已存密钥</button></div><input id="service-model-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="填写密钥" spellcheck="false" autocapitalize="off">
                 <label for="service-model-detection">问题识别</label><select id="service-model-detection"><option value="fast">快速识别（推荐）</option><option value="inherit">沿用回答配置</option></select><p class="setting-note">快速识别在 OpenAI 兼容接口使用 medium 推理强度，在 DeepSeek 官方接口关闭思考。查证回答与纪要使用下方配置。</p>
-                <details class="provider-advanced"><summary>高级设置</summary><div class="provider-grid"><div><label for="service-model-effort">推理强度</label><select id="service-model-effort"><option value="default">服务商默认</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></div><div><label for="service-model-tokens">单次输出上限</label><input id="service-model-tokens" type="number" min="256" max="65536" step="1" required value="2048"></div><div><label for="service-model-token-parameter">输出上限参数</label><select id="service-model-token-parameter"><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></div><div><label for="service-model-timeout">模型等待时限（秒）</label><input id="service-model-timeout" type="number" min="15" max="600" step="1" required value="180"></div></div><label class="provider-toggle" for="service-model-json"><input id="service-model-json" type="checkbox">使用 JSON 输出格式</label><label id="model-thinking-row" class="provider-toggle" for="service-model-thinking"><input id="service-model-thinking" type="checkbox">启用 DeepSeek 思考模式</label><p class="setting-note">按服务商支持的参数填写。会议纪要会使用至少 8192 的输出上限。</p></details>
+                <details class="provider-advanced">
+                  <summary>高级设置</summary>
+                  <div class="provider-grid">
+                    <div>
+                      <label for="service-model-effort">推理强度</label>
+                      <select id="service-model-effort"><option value="default">服务商默认</option><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+                    </div>
+                    <div>
+                      <label for="service-model-token-mode">生成额度</label>
+                      <select id="service-model-token-mode" aria-describedby="service-model-token-help"><option value="auto">自动（推荐）</option><option value="custom">自定义</option></select>
+                    </div>
+                    <div id="service-model-token-limit-field" hidden>
+                      <label for="service-model-tokens">单次生成上限（token）</label>
+                      <input id="service-model-tokens" type="number" min="256" max="65536" step="1" disabled value="32768" aria-describedby="service-model-token-custom-help">
+                      <p id="service-model-token-custom-help" class="setting-note">纪要和快速识别至少使用 8192，快速识别最多使用 16384。</p>
+                    </div>
+                    <div>
+                      <label for="service-model-token-parameter">输出上限参数</label>
+                      <select id="service-model-token-parameter"><option value="auto">自动（推荐）</option><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select>
+                    </div>
+                    <div>
+                      <label for="service-model-timeout">模型等待时限（秒）</label>
+                      <input id="service-model-timeout" type="number" min="15" max="600" step="1" required value="180">
+                    </div>
+                  </div>
+                  <label class="provider-toggle" for="service-model-json"><input id="service-model-json" type="checkbox">使用 JSON 输出格式</label>
+                  <label id="model-thinking-row" class="provider-toggle" for="service-model-thinking"><input id="service-model-thinking" type="checkbox">启用 DeepSeek 思考模式</label>
+                  <p id="service-model-token-help" class="setting-note">自动按模型与任务设置额度，通常无需调整。部分模型的额度同时包含思考和回答。</p>
+                </details>
                 <div class="provider-test-row"><button id="test-model-service" type="button">测试模型连接</button><p id="model-test-result" class="provider-result" role="status" aria-live="polite"></p></div>
               </fieldset>
             </section>

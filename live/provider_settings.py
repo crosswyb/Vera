@@ -7,6 +7,7 @@ snapshots: one paid task keeps one snapshot even when settings change mid-call.
 import ipaddress
 import json
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -62,9 +63,10 @@ class ModelService(BaseModel):
     json_mode: bool = True
     reasoning_effort: Literal["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"] = "default"
     thinking: Literal["disabled", "enabled"] = "disabled"
-    max_tokens: int = Field(default=8192, ge=256, le=65536)
+    # Null selects an application budget; saved numeric overrides stay explicit.
+    max_tokens: int | None = Field(default=None, ge=256, le=65536)
     timeout_seconds: int = Field(default=180, ge=15, le=600)
-    token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    token_parameter: Literal["auto", "max_tokens", "max_completion_tokens"] = "auto"
     detection_mode: Literal["fast", "inherit"] = "fast"
 
     _base_url = field_validator("base_url")(normalize_base_url)
@@ -91,20 +93,51 @@ class ModelService(BaseModel):
         url = "https://api.deepseek.com" if self.official_deepseek() else self.base_url
         return self.provider, url, self.name
 
+    @property
+    def reasoning_model(self):
+        # Gateways may prefix the upstream model with a provider name.
+        name = self.name.rsplit("/", 1)[-1].lower()
+        return bool(re.match(r"(?:o[134](?:-|$)|gpt-[56](?:[.-]|$))", name))
+
+    @property
+    def output_token_parameter(self):
+        if self.token_parameter != "auto":
+            return self.token_parameter
+        if self.provider == "deepseek":
+            return "max_tokens"
+        if self.reasoning_model or origin(self.base_url) == ("https", "api.openai.com", 443):
+            return "max_completion_tokens"
+        return "max_tokens"
+
     def payload(self, system, content, *, summary=False, detection=False, routing=False):
         fast = (detection or routing) and self.detection_mode == "fast"
-        tokens = min(max(self.max_tokens, 8192), 16384) if fast else max(self.max_tokens, 8192) if summary else self.max_tokens
-        payload = {"model": self.name, "messages": [{"role": "system", "content": system},
-                   {"role": "user", "content": json.dumps(content, ensure_ascii=False)}],
-                   self.token_parameter: tokens}
-        if self.json_mode:
-            payload["response_format"] = {"type": "json_object"}
         thinking = "disabled" if fast else self.thinking
         effort = self.reasoning_effort
         if fast and detection and effort in {"high", "xhigh", "max"}:
             effort = "medium"
         elif fast and routing and effort in {"medium", "high", "xhigh", "max"}:
             effort = "low"
+        tokens = self.max_tokens
+        if tokens is None:
+            tokens = 8192
+            if not fast:
+                if self.provider == "deepseek" and thinking == "enabled":
+                    tokens = 65536 if self.official_deepseek() else 32768
+                elif self.provider != "deepseek" and effort != "none":
+                    name = self.name.rsplit("/", 1)[-1].lower()
+                    legacy_openai = name.startswith(("gpt-4", "gpt-3.5"))
+                    if (self.reasoning_model or effort != "default"
+                            or (self.output_token_parameter == "max_completion_tokens" and not legacy_openai)):
+                        tokens = 32768
+        elif fast:
+            tokens = min(max(tokens, 8192), 16384)
+        elif summary:
+            tokens = max(tokens, 8192)
+        payload = {"model": self.name, "messages": [{"role": "system", "content": system},
+                   {"role": "user", "content": json.dumps(content, ensure_ascii=False)}],
+                   self.output_token_parameter: tokens}
+        if self.json_mode:
+            payload["response_format"] = {"type": "json_object"}
         if self.provider == "deepseek":
             payload["thinking"] = {"type": thinking}
         if effort != "default" and (self.provider != "deepseek" or thinking == "enabled"):
@@ -197,14 +230,19 @@ def from_environment(env=None):
     env = dict(os.environ) if env is None else env
     yes = lambda key: env.get(key, "true").lower() in {"1", "true", "yes"}
     provider = "deepseek" if env.get("ZSJH_LIVE_MODEL_PROVIDER", "deepseek") == "deepseek" else "openai_compatible"
+    token_setting = env.get("ZSJH_LIVE_MODEL_MAX_TOKENS", "auto").strip().lower()
+    max_tokens = None if token_setting in {"", "auto"} else int(token_setting)
+    token_parameter = "auto"
+    if max_tokens is not None:
+        token_parameter = "max_tokens" if provider == "deepseek" else "max_completion_tokens"
     model = ModelService(provider=provider, base_url=env.get("ZSJH_LIVE_MODEL_ENDPOINT") or "https://api.deepseek.com",
         name=env.get("ZSJH_LIVE_MODEL_NAME", "deepseek-flash"), api_key=env.get("ZSJH_LIVE_MODEL_API_KEY", ""),
         enabled=yes("ZSJH_WB_MODEL_APPROVED"), json_mode=provider == "deepseek",
         thinking=env.get("ZSJH_LIVE_MODEL_THINKING", "disabled"),
         reasoning_effort=env.get("ZSJH_LIVE_MODEL_REASONING_EFFORT", "default"),
-        max_tokens=int(env.get("ZSJH_LIVE_MODEL_MAX_TOKENS", "8192")),
+        max_tokens=max_tokens,
         timeout_seconds=int(env.get("ZSJH_LIVE_MODEL_TIMEOUT_SECONDS", "180")),
-        token_parameter="max_tokens" if provider == "deepseek" else "max_completion_tokens")
+        token_parameter=token_parameter)
     search = SearchService(provider=env.get("ZSJH_WB_SEARCH_PROVIDER", "deepseek"),
         base_url=env.get("ZSJH_WB_SEARCH_ENDPOINT") or "https://api.deepseek.com",
         api_key=env.get("ZSJH_WB_SEARCH_API_KEY", ""), enabled=yes("ZSJH_WB_SEARCH_APPROVED"),
