@@ -461,7 +461,8 @@ window.createSpeechSettings = function ({api, state, $, text, nativeAvailable, p
     const currentRevocation = sameRevocation ? revocation : null;
     const stoppingUpload = currentRevocation && (currentRevocation.requesting || performance.now() < currentRevocation.deadline);
     const job = meeting?.audio_import;
-    const bySource = bound ? {...meeting.transcription, ...state.native?.transcription} : meeting?.transcription || {};
+    const fileMeeting = meeting?.input_kind === 'audio_file' || Boolean(job);
+    const bySource = bound && !fileMeeting ? {...meeting.transcription, ...state.native?.transcription} : meeting?.transcription || {};
     const statusLabels = {connecting:'正在连接', starting:'正在连接', running:'转写中', ready:'已连接', recognizing:'转写中',
       reconnecting:'正在重新连接', local:'正在本机转写', degraded:'已切回本机', paused:'转写已暂停', error:'转写异常',
       revoked:'音频上传已停止', unavailable:'转写暂不可用', stopped:'转写已停止'};

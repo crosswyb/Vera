@@ -261,30 +261,42 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
             return {'segments': page, 'has_more': more, 'next_before': page[0]['event_seq'] if more else None,
                     'revision_epoch': m.get('transcript_revision_epoch', 0)}
 
-    def search_meeting(self, principal, mid, query):
+    def search_meeting(self, principal, mid, query, segment_offset=0, question_offset=0):
         query = query.strip()
         require(0 < len(query) <= 200, "请输入不超过 200 字的搜索词", 400)
+        require(isinstance(segment_offset, int) and 0 <= segment_offset <= 100000, "发言搜索分页位置无效", 400)
+        require(isinstance(question_offset, int) and 0 <= question_offset <= 100000, "问题搜索分页位置无效", 400)
         with self.store.transaction() as db:
             self._meeting(db, principal, mid)
             # Literal substring matching keeps punctuation and SQL wildcards
             # meaningful, and only scans this meeting's saved final utterances.
-            rows = db.execute("""SELECT data FROM records WHERE kind='wb_segment'
+            segment_filter = """FROM records WHERE kind='wb_segment'
                 AND id>=? AND id<? AND json_extract(data,'$.type')='transcript.final'
-                AND instr(lower(json_extract(data,'$.text')),lower(?))>0
-                ORDER BY json_extract(data,'$.event_seq') DESC LIMIT 21""",
-                (mid + ':', mid + ';', query)).fetchall()
+                AND instr(lower(json_extract(data,'$.text')),lower(?))>0"""
+            rows = db.execute("""SELECT data """ + segment_filter +
+                               " ORDER BY json_extract(data,'$.event_seq') DESC LIMIT 21 OFFSET ?",
+                               (mid + ':', mid + ';', query, segment_offset)).fetchall()
+            segment_total = db.execute("SELECT COUNT(*) """ + segment_filter,
+                                       (mid + ':', mid + ';', query)).fetchone()[0]
             segments = [json.loads(row[0]) for row in rows[:20]]
-            questions = db.execute("""SELECT data FROM records WHERE kind='wb_question'
+            question_filter = """FROM records WHERE kind='wb_question'
                 AND json_extract(data,'$.meeting_id')=?
                 AND json_extract(data,'$.state')!='superseded'
-                AND instr(lower(json_extract(data,'$.title')),lower(?))>0
-                ORDER BY json_extract(data,'$.created_at') DESC LIMIT 21""", (mid, query)).fetchall()
+                AND instr(lower(json_extract(data,'$.title')),lower(?))>0"""
+            questions = db.execute("""SELECT data """ + question_filter +
+                                   " ORDER BY json_extract(data,'$.created_at') DESC LIMIT 21 OFFSET ?",
+                                   (mid, query, question_offset)).fetchall()
+            question_total = db.execute("SELECT COUNT(*) """ + question_filter,
+                                        (mid, query)).fetchone()[0]
             return {"segments": [{key: segment.get(key) for key in
                         ("segment_id", "revision", "event_seq", "text", "source", "occurred_at", "received_at", "audio_start_ms")}
                         for segment in segments],
                     "questions": [{key: question.get(key) for key in ("id", "title", "state", "version")}
                         for question in (json.loads(row[0]) for row in questions[:20])],
-                    "more_segments": len(rows) > 20, "more_questions": len(questions) > 20}
+                    "more_segments": segment_offset + len(rows) > 20 and segment_offset + 20 < segment_total,
+                    "more_questions": question_offset + len(questions) > 20 and question_offset + 20 < question_total,
+                    "segment_total": segment_total, "question_total": question_total,
+                    "segment_offset": segment_offset, "question_offset": question_offset}
 
     def snapshot(self, principal, mid):
         with self.store.transaction() as db:

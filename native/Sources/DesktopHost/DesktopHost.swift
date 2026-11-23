@@ -1403,6 +1403,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 if let lastSequence = job["last_event_seq"] as? Int { initialSequence = max(0, lastSequence) }
                 let destination = try meetingFileURL(relative, meeting: registeredMeeting)
                 activeInput = "audio_file"; captureProblem = nil
+                sourceLevels = [:]; sourceFrames = [:]; transcription = [:]
                 captureFinish = nil; captureFinishMeetingId = meeting
                 activeEpoch = epoch; activeMeeting = meeting; lastMeeting = meeting; captureState = "importing"
                 beginningCapture = false

@@ -486,4 +486,4 @@ class SpeechSessionTest(unittest.TestCase):
         self.assertTrue(original.is_file())
         transcript = self.wb.transcript(self.owner, self.mid)['content']
         self.assertIn('已完成的第一段', transcript)
-        self.assertIn('DeepSeek', transcript)
+        self.assertIn('DeepSeek 官方 ASR', transcript)
