@@ -221,3 +221,152 @@ button.icon-button { display:grid; }
   .settings-view .provider-page-heading h1 { font-size:22px; }
   .prefs-tabs [role=tab] { min-height:40px; padding-inline:9px; }
 }
+
+/* Summary and question reading surfaces use the available width instead of nesting a
+   narrow article inside a scrolling panel. The existing panels stay mounted so the
+   transcript, queue and result state continue to survive layout changes. */
+@media(min-width:1101px) {
+  #work-grid[data-left-pane="summary"] {
+    grid-template-columns: minmax(0, 1fr) clamp(360px, 31vw, 440px);
+  }
+  #work-grid[data-left-pane="summary"] > #meeting-files-panel {
+    grid-column: 1;
+    grid-row: 1;
+    overflow: auto;
+    padding-inline: clamp(24px, 3vw, 48px);
+    padding-bottom: 48px;
+  }
+  #work-grid[data-left-pane="summary"] > #questions-panel {
+    grid-column: 2;
+    grid-row: 1;
+    overflow: hidden;
+    padding-inline: 24px;
+  }
+  #work-grid[data-left-pane="summary"] .section-heading {
+    padding-block: 16px 8px;
+  }
+  #work-grid[data-left-pane="summary"] #meeting-files-heading {
+    font-size: 18px;
+  }
+  #work-grid[data-left-pane="summary"] #archive-guidance {
+    max-width: 760px;
+    margin: 0 0 14px;
+    line-height: 1.65;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-files-list {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 8px;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-row {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    min-height: 132px;
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-row:not([data-file-kind="summary"]) {
+    display: flex;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-row h3 {
+    margin-bottom: 5px;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-row p {
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: auto;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-actions button {
+    min-height: 30px;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-recordings {
+    display: grid;
+    gap: 4px;
+    margin-top: 8px;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-recordings button,
+  #work-grid[data-left-pane="summary"] .meeting-recordings li {
+    min-height: 28px;
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+  #work-grid[data-left-pane="summary"] #meeting-file-preview {
+    margin-top: 22px;
+    border-top: 1px solid var(--line);
+  }
+  #work-grid[data-left-pane="summary"] #meeting-file-preview .section-heading {
+    padding-block: 17px 4px;
+  }
+  #work-grid[data-left-pane="summary"] #meeting-file-content {
+    max-height: none;
+    overflow: visible;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-article {
+    max-width: none;
+    padding: 12px 0 44px;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-article h2 {
+    margin-bottom: 18px;
+    font-size: 28px;
+    line-height: 1.35;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-article h3 {
+    margin-top: 24px;
+    font-size: 17px;
+  }
+
+  #work-grid[data-layout-mode="reading"] {
+    grid-template-columns: minmax(340px, 39%) minmax(0, 1fr);
+  }
+  #work-grid[data-layout-mode="reading"] > #questions-panel {
+    overflow: auto;
+    padding-inline: 24px;
+  }
+  #work-grid[data-layout-mode="reading"] > #results-panel {
+    padding-inline: clamp(24px, 3vw, 54px);
+  }
+  #work-grid[data-layout-mode="reading"] .reading-page {
+    max-width: 1040px;
+    margin-inline: 0;
+  }
+  #work-grid[data-layout-mode="reading"] .question-detail-heading h2 {
+    font-size: 26px;
+    line-height: 1.45;
+  }
+}
+
+@media(max-width:1100px) and (min-width:801px) {
+  #work-grid[data-left-pane="summary"] .meeting-files-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  #work-grid[data-left-pane="summary"] #meeting-file-content {
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+@media(max-width:800px) {
+  #work-grid[data-left-pane="summary"] #meeting-file-content {
+    max-height: none;
+    overflow: visible;
+  }
+  #work-grid[data-left-pane="summary"] .meeting-file-article {
+    max-width: none;
+  }
+}
