@@ -114,8 +114,9 @@ final class SystemAudioTap: CapturedAudioSource {
         return uid as String
     }
 
-    private func fail(_ code: Int, _ message: String) -> NSError {
+    private func fail(_ code: Int, _ message: String) -> any Error {
         stop()
+        if code == Int(kAudioDevicePermissionsError) { return AudioCoreError.systemAudioDenied }
         return NSError(domain: "ZSJHAudio", code: code, userInfo: [NSLocalizedDescriptionKey: message])
     }
 

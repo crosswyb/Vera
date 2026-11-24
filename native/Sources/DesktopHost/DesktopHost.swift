@@ -67,7 +67,13 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private let startupDetail = NSTextField(wrappingLabelWithString: "正在准备本机服务…")
     private let startupSpinner = NSProgressIndicator()
     private let startupExit = NSButton(title: "退出应用", target: nil, action: nil)
+    private let startupRetry = NSButton(title: "重试连接", target: nil, action: nil)
+    private let startupCopyDiagnostics = NSButton(title: "复制诊断信息", target: nil, action: nil)
     private var startupFailed = false
+    private var recoveryInProgress = false
+    private var recoveryMessage: String?
+    private var recoveryFragment: String?
+    private var diagnosticsCopied = false
     private let updates = VeraUpdateChecker(
         version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知版本",
         build: (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String).flatMap(Int.init))
@@ -80,6 +86,12 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private var status = "正在启动…" { didSet { publishNativeState() } }
     private let startItem = NSMenuItem(title: "开始收听", action: nil, keyEquivalent: "")
     private let stopItem = NSMenuItem(title: "停止收听", action: nil, keyEquivalent: "")
+    private let recordingStatusItem = NSMenuItem(title: "未在收听", action: nil, keyEquivalent: "")
+    private let statusRecordingItem = NSMenuItem(title: "未在收听", action: nil, keyEquivalent: "")
+    private var statusItem: NSStatusItem?
+    private let statusShowItem = NSMenuItem(title: "打开 Vera", action: nil, keyEquivalent: "")
+    private let statusStopItem = NSMenuItem(title: "停止并保存", action: nil, keyEquivalent: "")
+    private var pendingRecordingRoute: String?
     private let modelItem = NSMenuItem(title: "检查中文模型", action: nil, keyEquivalent: "")
     private let installItem = NSMenuItem(title: "安装中文模型…", action: nil, keyEquivalent: "")
     private var backend: Process?
@@ -100,24 +112,44 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     private var speechLeaseTask: Task<Void, Never>?
     private var fileLease: SpeechLease?
     private var captureInputsStopped = false
-    private var activeEpoch: String? { didSet { captureInputsStopped = false } }
+    private var activeEpoch: String? {
+        didSet { captureInputsStopped = false; captureStoppedAt = nil }
+    }
     private var activeOutbox: URL?
     private var outboxTask: Task<Void, Never>?
+    private var replayTask: Task<Void, Never>?
     private var captureFinish: String?
     private var captureFinishMeetingId: String?
     private var transcription: [String: [String: String]] = [:]
     private var backendFailureKind = ""
-    private var activeMeeting: String? { didSet { publishNativeState() } }
+    private var activeMeeting: String? {
+        didSet {
+            if backgroundMeeting == nil {
+                captureStartedAt = nil
+                recordingStatusTimer?.invalidate()
+                recordingStatusTimer = nil
+            } else if captureStartedAt == nil {
+                captureStartedAt = Date()
+                startRecordingStatusTimer()
+            }
+            publishNativeState()
+        }
+    }
+    private var captureStartedAt: Date?
+    private var captureStoppedAt: Date?
+    private var recordingStatusTimer: Timer?
     private var lastMeeting: String?
     private var captureState = "idle" { didSet { publishNativeState() } }
     private var modelState = "unknown" { didSet { publishNativeState() } }
     private var fileModelState = "unknown" { didSet { publishNativeState() } }
     private var themePreference = UserDefaults.standard.string(forKey: "themePreference") ?? "system"
     private var layoutPreference = UserDefaults.standard.string(forKey: "layoutPreference") == "b" ? "b" : "a"
+    private var densityPreference = UserDefaults.standard.string(forKey: "densityPreference") == "compact" ? "compact" : "comfortable"
     private var beginningCapture = false { didSet { publishNativeState() } }
     private var captureGeneration = 0
     private var pageLoaded = false
     private var captureProblem: String?
+    private var captureProblemCode: String?
     private var selectedInput = LiveAudioInput(rawValue: UserDefaults.standard.string(forKey: "liveAudioInput") ?? "system") ?? .system
     private var sourceLevels: [String: Float] = [:]
     private var sourceFrames: [String: UInt64] = [:]
@@ -215,6 +247,9 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         for item in [startItem, stopItem] { item.isEnabled = false; item.target = self }
         startItem.action = #selector(startCapture)
         stopItem.action = #selector(stopCapture)
+        recordingStatusItem.isEnabled = false
+        statusShowItem.target = self; statusShowItem.action = #selector(showRecordingStatus)
+        statusStopItem.target = self; statusStopItem.action = #selector(stopCapture)
         modelItem.target = self; modelItem.action = #selector(checkModel); modelItem.isEnabled = false
         installItem.target = self; installItem.action = #selector(installModel); installItem.isEnabled = false
         let appMenu = NSMenu()
@@ -236,15 +271,87 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         editItem.submenu = edit; appMenu.addItem(editItem)
         let audioItem = NSMenuItem(title: "音频", action: nil, keyEquivalent: "")
         let audioMenu = NSMenu(title: "音频"); audioMenu.autoenablesItems = false
+        audioMenu.addItem(recordingStatusItem); audioMenu.addItem(.separator())
         audioMenu.addItem(startItem); audioMenu.addItem(stopItem); audioMenu.addItem(.separator())
         audioMenu.addItem(modelItem); audioMenu.addItem(installItem)
         audioItem.submenu = audioMenu; appMenu.addItem(audioItem); NSApp.mainMenu = appMenu
+        let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = status
+        status.button?.title = "Vera"
+        let statusMenu = NSMenu(title: "Vera")
+        statusMenu.autoenablesItems = false
+        statusRecordingItem.isEnabled = false
+        statusMenu.addItem(statusRecordingItem)
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(statusShowItem)
+        statusMenu.addItem(statusStopItem)
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(withTitle: "退出 Vera", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
+        status.menu = statusMenu
+        updateRecordingStatus()
         window.center(); window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "真实交互 · Vera"])
+    }
+
+    @objc private func showRecordingStatus() {
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        pendingRecordingRoute = backgroundMeeting
+        dispatchRecordingRoute()
+    }
+
+    private func dispatchRecordingRoute() {
+        guard pageLoaded, isWorkbench(webView.url), let route = pendingRecordingRoute else { return }
+        pendingRecordingRoute = nil
+        guard route == backgroundMeeting, let data = try? JSONEncoder().encode(route),
+              let encoded = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.dispatchEvent(new CustomEvent('zsjh-show-recording',{detail:\(encoded)}));", completionHandler: nil)
+    }
+
+    private var backgroundMeeting: String? { activeInput == "live" ? activeMeeting : nil }
+
+    private func startRecordingStatusTimer() {
+        recordingStatusTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.publishNativeState() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        recordingStatusTimer = timer
+    }
+
+    private func updateRecordingStatus() {
+        guard backgroundMeeting != nil else {
+            recordingStatusItem.title = "未在收听"
+            statusRecordingItem.title = "未在收听"
+            statusItem?.button?.title = "Vera"
+            statusShowItem.title = "打开 Vera"
+            statusStopItem.isEnabled = false
+            return
+        }
+        let elapsed = recordingElapsed()
+        let label: String
+        switch captureState {
+        case "starting": label = "正在连接音频"
+        case "stopping": label = "正在保存录音"
+        case "error": label = "录音状态异常"
+        default: label = "正在录音"
+        }
+        recordingStatusItem.title = "\(label) · \(elapsed)"
+        statusRecordingItem.title = recordingStatusItem.title
+        statusItem?.button?.title = captureState == "listening" ? "● \(elapsed)" : "Vera · \(label)"
+        statusShowItem.title = "回到录音会议"
+        statusStopItem.isEnabled = canStop && helper?.isRunning == true
+        statusStopItem.title = captureState == "error" ? "重试保存" : "停止并保存"
+    }
+
+    private func recordingElapsed() -> String {
+        guard let started = captureStartedAt else { return "00:00" }
+        let elapsed = (captureStoppedAt ?? .now).timeIntervalSince(started)
+        return formatDuration(max(0, Int(elapsed * 1000)))
     }
 
     @objc private func checkForUpdate(_ sender: NSMenuItem) {
@@ -414,7 +521,18 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         startupExit.target = NSApp
         startupExit.action = #selector(NSApplication.terminate(_:))
         startupExit.isHidden = true
-        let stack = NSStackView(views: [startupSpinner, startupTitle, startupDetail, startupExit])
+        startupRetry.bezelStyle = .rounded
+        startupRetry.target = self
+        startupRetry.action = #selector(retryStartup)
+        startupRetry.isHidden = true
+        startupCopyDiagnostics.bezelStyle = .rounded
+        startupCopyDiagnostics.target = self
+        startupCopyDiagnostics.action = #selector(copyDiagnostics)
+        startupCopyDiagnostics.isHidden = true
+        let actions = NSStackView(views: [startupRetry, startupCopyDiagnostics, startupExit])
+        actions.orientation = .horizontal
+        actions.spacing = 8
+        let stack = NSStackView(views: [startupSpinner, startupTitle, startupDetail, actions])
         stack.orientation = .vertical; stack.alignment = .centerX; stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
         startupView.addSubview(stack)
@@ -442,17 +560,149 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         startupTitle.stringValue = "正在打开工作区"
         startupDetail.stringValue = message
         startupExit.isHidden = true
+        startupRetry.isHidden = true
+        startupCopyDiagnostics.isHidden = true
         startupSpinner.startAnimation(nil)
     }
 
     private func showStartupFailure(_ message: String) {
         guard !closing else { return }
         startupFailed = true
+        recoveryMessage = message
+        diagnosticsCopied = false
         attachStartupView()
         startupSpinner.stopAnimation(nil)
         startupTitle.stringValue = "无法打开工作区"
-        startupDetail.stringValue = message + "\n请退出后重新打开应用。"
+        let guidance = backgroundMeeting != nil && captureState == "listening"
+            ? "录音仍在后台进行，可从菜单栏停止并保存。你也可以重试连接页面。"
+            : "可以重试连接，或复制诊断信息后继续排查。"
+        startupDetail.stringValue = message + "\n" + guidance
         startupExit.isHidden = false
+        startupRetry.isHidden = false
+        startupCopyDiagnostics.title = "复制诊断信息"
+        startupCopyDiagnostics.isHidden = false
+        publishNativeState()
+    }
+
+    @objc private func retryStartup() {
+        guard !closing, !recoveryInProgress else { return }
+        if hostReady {
+            reloadWorkbench()
+            return
+        }
+        reconnectHost()
+    }
+
+    private var canReloadWorkbench: Bool { hostReady && !quitting && !recoveryInProgress && !updates.installing }
+
+    private func reloadWorkbench() {
+        guard canReloadWorkbench else { return }
+        startupFailed = false
+        showStartupProgress("正在重新加载页面…")
+        if !isWorkbench(webView.url) || webView.reload() == nil { loadWorkbench() }
+    }
+
+    @objc private func copyDiagnostics() {
+        let lines = [
+            "Vera 本机诊断",
+            "版本：\(updates.currentVersion) · 构建 \(updates.currentBuild.map(String.init) ?? "未知")",
+            "工作台页面：\(pageLoaded ? "已加载" : "未加载")",
+            "本机服务：\(backend?.isRunning == true ? "运行中" : "已停止")",
+            "音频组件：\(helper?.isRunning == true ? "运行中" : "已停止")",
+            "音频桥接：\(bridgeFailed ? "不可用" : "未报告故障")",
+            "录音状态：\(captureState)",
+            "服务错误类型：\(backendFailureKind.isEmpty ? "无" : backendFailureKind)",
+        ]
+        NSPasteboard.general.clearContents()
+        if NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string) {
+            if startupFailed { startupCopyDiagnostics.title = "已复制诊断信息" }
+            diagnosticsCopied = true
+            publishNativeState()
+        }
+    }
+
+    private var canReconnectBackend: Bool {
+        guard !closing, !quitting, !recoveryInProgress, !beginningCapture, !updates.installing else { return false }
+        if activeMeeting == nil, activeOutbox == nil { return true }
+        guard activeOutbox != nil, activeInput == "live" else { return false }
+        if helper?.isRunning != true { return true }
+        // A stopped helper can finish sealing while the backend restarts.
+        return captureInputsStopped && !bridgeFailed && backend?.isRunning != true
+    }
+
+    private func reconnectHost() {
+        guard canReconnectBackend else { return }
+        if let url = webView.url, isWorkbench(url) {
+            recoveryFragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment
+        }
+        let preserveHelper = activeOutbox != nil && captureInputsStopped && !bridgeFailed && helper?.isRunning == true
+        let previousBackend = backend
+        let previousHelper = preserveHelper ? nil : helper
+        recoveryInProgress = true
+        startupFailed = false
+        recoveryMessage = "正在重新连接本机服务…"
+        diagnosticsCopied = false
+        publishNativeState()
+        pageLoaded = false
+        backend = nil
+        if previousBackend?.isRunning == true { previousBackend?.terminate() }
+        if !preserveHelper {
+            helper = nil
+            try? helperInput?.close(); helperInput = nil
+        }
+        showStartupProgress("正在重新连接本机服务…")
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.recoveryInProgress = false; self.publishNativeState() }
+            self.replayTask?.cancel()
+            do {
+                for _ in 0..<20 {
+                    if previousBackend?.isRunning != true, previousHelper?.isRunning != true { break }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                guard !self.closing else { return }
+                guard previousBackend?.isRunning != true, previousHelper?.isRunning != true else {
+                    self.backend = previousBackend
+                    if !preserveHelper { self.helper = previousHelper }
+                    throw DesktopError(message: "本机组件仍在退出，请重试连接。")
+                }
+                self.bridgeFailed = false
+                self.backendFailureKind = ""
+                self.port = 0
+                self.speechTestID = nil
+                try await self.bootBackend()
+                if self.helper?.isRunning != true {
+                    self.bridgeFailed = false
+                    self.releaseInterruptedCapture()
+                    try self.launchHelper()
+                }
+                try? await self.refreshSpeechConfiguration()
+                guard self.hostReady else { throw DesktopError(message: "本机组件尚未就绪，请重试连接。") }
+                self.replaySavedCaptures()
+                self.startupFailed = false
+                self.loadWorkbench(fragment: self.recoveryFragment)
+                if self.activeOutbox == nil {
+                    self.status = "本机服务已重新连接"
+                    self.checkModel()
+                }
+            } catch {
+                self.status = error.localizedDescription
+                self.showStartupFailure(error.localizedDescription)
+            }
+        }
+    }
+
+    private func releaseInterruptedCapture() {
+        guard let activeOutbox, (try? CaptureEventOutbox.Seal.read(from: activeOutbox)) == nil else { return }
+        // Replay will deliver the pending events, then keep the unsealed log.
+        // An input process that died cannot attest to successful finalization.
+        outboxTask?.cancel(); stopWatchdog?.cancel(); healthTask?.cancel()
+        captureFinish = "failed"; captureFinishMeetingId = activeMeeting
+        captureProblem = "上次录音已中断，部分内容尚未确认保存。请检查会议文件。"
+        captureProblemCode = "capture_interrupted"
+        pendingInterims.removeAll()
+        self.activeOutbox = nil; activeEpoch = nil; activeMeeting = nil
+        captureState = "error"
     }
 
     private func arguments() -> [String] {
@@ -479,12 +729,14 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         process.standardOutput = output
         process.standardError = diagnostic
         backend = process
-        process.terminationHandler = { [weak self] _ in Task { @MainActor in self?.backendExited() } }
+        process.terminationHandler = { [weak self] process in
+            Task { @MainActor in self?.backendExited(process) }
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             readyWaiter = continuation
             do {
                 try process.run()
-                LineReader(diagnostic.fileHandleForReading).start(line: { [weak self] data in
+                LineReader(diagnostic.fileHandleForReading).start(line: { [weak self, weak process] data in
                     // Keep only exception classes; tracebacks may contain private data.
                     let line = String(data: data, encoding: .utf8) ?? ""
                     let kinds = ["PermissionError", "sqlite3.OperationalError", "sqlite3.DatabaseError", "FileNotFoundError", "ImportError", "ModuleNotFoundError", "RuntimeError", "ValueError", "TypeError", "KeyError", "OSError"]
@@ -492,17 +744,25 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                         ?? (line.contains("Failed to load Python shared library") ? "Python runtime load failed" : nil)
                     if let kind {
                         deliverToMain {
-                            self?.backendFailureKind = kind
-                            if self?.backend?.isRunning == false { self?.backendExited() }
+                            guard let self, let process, self.backend === process else { return }
+                            self.backendFailureKind = kind
                         }
                     }
                 }, ended: {})
-                LineReader(output.fileHandleForReading).start(line: { [weak self] data in
-                    deliverToMain { self?.backendLine(data) }
-                }, ended: { [weak self] in Task { @MainActor in self?.backendExited() } })
-                Task { [weak self] in
+                LineReader(output.fileHandleForReading).start(line: { [weak self, weak process] data in
+                    deliverToMain {
+                        guard let self, let process, self.backend === process else { return }
+                        self.backendLine(data)
+                    }
+                }, ended: { [weak self, weak process] in
+                    Task { @MainActor in
+                        guard let self, let process, self.backend === process, self.readyWaiter != nil else { return }
+                        self.completeReady(DesktopError(message: "本机服务未完成启动。"))
+                    }
+                })
+                Task { [weak self, weak process] in
                     try? await Task.sleep(for: .seconds(45))
-                    guard let self, self.readyWaiter != nil else { return }
+                    guard let self, let process, self.backend === process, self.readyWaiter != nil else { return }
                     self.completeReady(DesktopError(message: "本机服务启动超时，尚未收听。"))
                     if process.isRunning { process.terminate() }
                 }
@@ -546,12 +806,12 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         if let error { continuation?.resume(throwing: error) } else { continuation?.resume() }
     }
 
-    private func backendExited() {
-        guard !closing else { return }
+    private func backendExited(_ process: Process) {
+        guard !closing, backend === process else { return }
         completeReady(DesktopError(message: "本机服务已退出。"))
-        let exitCode = backend?.isRunning == false ? "退出码 \(backend!.terminationStatus)" : ""
-        let detail = [backendFailureKind, exitCode].filter { !$0.isEmpty }.joined(separator: " · ")
+        let detail = [backendFailureKind, "退出码 \(process.terminationStatus)"].filter { !$0.isEmpty }.joined(separator: " · ")
         if activeMeeting != nil, activeInput == "live" {
+            recoveryMessage = "本机服务中断。请先停止录音，再重连服务以恢复保存。"
             status = "本机服务中断。录音继续，转写等待保存。"
             revokeSpeech()
         } else {
@@ -560,13 +820,18 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         startItem.isEnabled = false
     }
 
-    private func loadWorkbench() {
+    private func loadWorkbench(fragment: String? = nil) {
         let encoded = String(data: try! JSONSerialization.data(withJSONObject: [ownerToken]), encoding: .utf8)!
         let theme = String(data: try! JSONSerialization.data(withJSONObject: [themePreference]), encoding: .utf8)!
         let layout = String(data: try! JSONSerialization.data(withJSONObject: [layoutPreference]), encoding: .utf8)!
-        let script = "if(location.origin==='http://127.0.0.1:\(port)' && location.pathname==='/workbench'){sessionStorage.setItem('wb_access',\(encoded)[0]);window.__ZSJH_THEME_PREFERENCE__=\(theme)[0];window.__ZSJH_LAYOUT_PREFERENCE__=\(layout)[0];}"
-        webView.configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        webView.load(URLRequest(url: URL(string: "http://127.0.0.1:\(port)/workbench")!))
+        let density = String(data: try! JSONSerialization.data(withJSONObject: [densityPreference]), encoding: .utf8)!
+        let script = "if(location.origin==='http://127.0.0.1:\(port)' && location.pathname==='/workbench'){sessionStorage.setItem('wb_access',\(encoded)[0]);window.__ZSJH_THEME_PREFERENCE__=\(theme)[0];window.__ZSJH_LAYOUT_PREFERENCE__=\(layout)[0];window.__ZSJH_DENSITY_PREFERENCE__=\(density)[0];}"
+        let scripts = webView.configuration.userContentController
+        scripts.removeAllUserScripts()
+        scripts.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        var destination = URLComponents(string: "http://127.0.0.1:\(port)/workbench")!
+        destination.percentEncodedFragment = fragment
+        webView.load(URLRequest(url: destination.url!))
     }
 
     private func isLocal(_ url: URL) -> Bool {
@@ -630,11 +895,18 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         installItem.isEnabled = hostReady && activeMeeting == nil && !beginningCapture
             && ![modelState, fileModelState].contains("downloading")
             && [modelState, fileModelState].contains(where: { ["downloadable", "unknown"].contains($0) })
+        updateRecordingStatus()
         guard let webView, pageLoaded, isWorkbench(webView.url), !closing else { return }
+        let recoveryFailed = startupFailed || bridgeFailed || !hostReady
+        let recoveryState = recoveryInProgress && !startupFailed ? "retrying" : recoveryFailed ? "failed" : "ready"
         let payload: [String: Any] = [
             "ready": hostReady, "captureState": captureState, "status": status,
+            "recoveryState": recoveryState, "recoveryMessage": recoveryMessage as Any? ?? NSNull(),
+            "diagnosticsCopied": diagnosticsCopied,
+            "canReloadWorkbench": canReloadWorkbench, "canReconnectBackend": canReconnectBackend,
             "themePreference": themePreference,
             "layoutPreference": layoutPreference,
+            "densityPreference": densityPreference,
             "updates": updates.payload,
             "meetingId": activeMeeting.map { $0 as Any } ?? NSNull(), "modelState": modelState,
             "speechLiveProvider": speechLiveProvider, "speechFileProvider": speechFileProvider,
@@ -643,11 +915,14 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             "speechTestError": speechTestError as Any? ?? NSNull(),
             "transcription": transcription,
             "canStart": canStart, "canStop": canStop,
+            "backgroundRecording": backgroundMeeting.map { ["meetingId": $0, "captureState": captureState, "status": status,
+                "elapsed": recordingElapsed()] as [String: Any] } as Any? ?? NSNull(),
             "canSelectSource": hostReady && activeMeeting == nil && !beginningCapture,
             "canImport": canImport, "fileModelState": fileModelState,
             "inputKind": activeInput, "audioFileError": selectedAudioError,
             "audioSource": selectedInput.rawValue, "sourceLevels": sourceLevels, "sourceFrames": sourceFrames,
-            "captureProblem": captureProblem as Any? ?? NSNull(), "lastMeetingId": lastMeeting as Any? ?? NSNull(),
+            "captureProblem": captureProblem as Any? ?? NSNull(), "captureProblemCode": captureProblemCode as Any? ?? NSNull(),
+            "lastMeetingId": lastMeeting as Any? ?? NSNull(),
             "audioFile": selectedAudio.map { ["id": $0.id, "name": $0.info.name,
                 "durationMS": $0.info.durationMS, "bytes": $0.info.bytes] as [String: Any] } as Any? ?? NSNull(),
         ]
@@ -659,18 +934,22 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         pageLoaded = false; publishNativeState()
         showStartupProgress("正在加载应用…")
-        if activeMeeting != nil { stopWithStatus("页面正在重新连接，收听已暂停…") }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        pageLoaded = isWorkbench(webView.url); publishNativeState()
+        pageLoaded = isWorkbench(webView.url)
         guard !startupFailed else { return }
         guard pageLoaded, hostReady else {
             showStartupFailure("应用尚未成功连接本机服务。")
             return
         }
+        recoveryMessage = nil
+        recoveryFragment = nil
+        diagnosticsCopied = false
         startupSpinner.stopAnimation(nil)
         startupView.removeFromSuperview()
+        publishNativeState()
+        dispatchRecordingRoute()
         startUpdateChecks()
     }
 
@@ -697,7 +976,6 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         let failure = error as NSError
         guard !(failure.domain == NSURLErrorDomain && failure.code == NSURLErrorCancelled) else { return }
         pageLoaded = false; publishNativeState()
-        if activeMeeting != nil { stopWithStatus("应用连接中断，正在停止收听…") }
         if !startupFailed {
             showStartupFailure(failure.domain == NSURLErrorDomain && failure.code == NSURLErrorTimedOut
                                ? "应用页面连接超时。" : "无法加载本机应用页面。")
@@ -706,18 +984,20 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         pageLoaded = false; publishNativeState()
-        if activeMeeting != nil { stopWithStatus("应用页面已退出，正在停止收听…") }
         showStartupFailure("应用页面进程已退出。")
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "workbench", message.webView === webView, isWorkbench(webView.url),
               isWorkbenchFrame(message.frameInfo), let body = message.body as? [String: Any],
-              body.count <= 5, Set(body.keys).isSubset(of: ["action", "meetingId", "fileId", "audioSource", "themePreference", "layoutPreference", "testId"]),
+              body.count <= 5, Set(body.keys).isSubset(of: ["action", "meetingId", "fileId", "audioSource", "themePreference", "layoutPreference", "densityPreference", "testId"]),
               let action = body["action"] as? String else { return }
         guard !updates.installing || action == "requestState" else { return }
         switch action {
         case "requestState": publishNativeState()
+        case "reloadWorkbench": reloadWorkbench()
+        case "reconnectBackend": reconnectHost()
+        case "copyDiagnostics": copyDiagnostics()
         case "checkForUpdates": checkForUpdates(showResult: false)
         case "openUpdateRelease":
             if updates.failure != nil {
@@ -748,12 +1028,21 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             layoutPreference = preference
             UserDefaults.standard.set(preference, forKey: "layoutPreference")
             publishNativeState()
+        case "setDensityPreference":
+            guard let preference = body["densityPreference"] as? String, ["comfortable", "compact"].contains(preference) else { return }
+            densityPreference = preference
+            UserDefaults.standard.set(preference, forKey: "densityPreference")
+            publishNativeState()
         case "setAudioSource":
             guard let raw = body["audioSource"] as? String, let input = LiveAudioInput(rawValue: raw) else { return }
             guard activeMeeting == nil, !beginningCapture else { publishNativeState(); return }
             selectInput(input)
         case "openMicrophoneSettings":
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
+            }
+        case "openSystemAudioSettings":
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture") {
                 NSWorkspace.shared.open(url)
             }
         case "chooseAudioFile": chooseAudioFile()
@@ -1075,16 +1364,20 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         process.executableURL = resource.appendingPathComponent("ZSJHAudioHelper.app/Contents/MacOS/AudioHelper")
         process.environment = childEnvironment
         process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
-        process.terminationHandler = { [weak self] _ in Task { @MainActor in
-            guard let self, !self.closing else { return }
+        process.terminationHandler = { [weak self] process in Task { @MainActor in
+            guard let self, !self.closing, self.helper === process else { return }
             self.failBridge("音频组件已退出，收听已停止。")
             self.startItem.isEnabled = false; self.modelItem.isEnabled = false; self.installItem.isEnabled = false
         } }
         try process.run()
         helper = process; helperInput = input.fileHandleForWriting
-        LineReader(output.fileHandleForReading).start(line: { [weak self] value in deliverToMain { self?.audioLine(value) } },
-            ended: { [weak self] in Task { @MainActor in
-                guard let self, !self.closing, self.helper?.isRunning == true else { return }
+        LineReader(output.fileHandleForReading).start(line: { [weak self, weak process] value in
+            deliverToMain {
+                guard let self, let process, self.helper === process else { return }
+                self.audioLine(value)
+            }
+        }, ended: { [weak self, weak process] in Task { @MainActor in
+                guard let self, let process, !self.closing, self.helper === process, process.isRunning else { return }
                 self.status = "音频显示连接中断，录音与关键事件仍在本机保存。"
             } })
     }
@@ -1411,7 +1704,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 if let resumeCount = job["resume_count"] as? Int { revision = max(1, resumeCount + 1) }
                 if let lastSequence = job["last_event_seq"] as? Int { initialSequence = max(0, lastSequence) }
                 let destination = try meetingFileURL(relative, meeting: registeredMeeting)
-                activeInput = "audio_file"; captureProblem = nil
+                activeInput = "audio_file"; captureProblem = nil; captureProblemCode = nil
                 sourceLevels = [:]; sourceFrames = [:]; transcription = [:]
                 captureFinish = nil; captureFinishMeetingId = meeting
                 activeEpoch = epoch; activeMeeting = meeting; lastMeeting = meeting; captureState = "importing"
@@ -1533,7 +1826,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
                 captureGeneration += 1
                 selectInput(requestedInput)
                 sourceLevels = [:]; sourceFrames = [:]; transcription = [:]
-                captureState = "starting"; captureProblem = nil
+                captureProblem = nil; captureProblemCode = nil; captureState = "starting"
                 captureFinish = nil; captureFinishMeetingId = meeting
                 activeInput = "live"; activeEpoch = epoch; activeOutbox = outbox
                 activeMeeting = meeting; lastMeeting = meeting
@@ -1727,6 +2020,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
             status = "正在保存转写…"
         case "audio.status" where event["state"] as? String == "stopped":
             captureInputsStopped = true
+            if captureStoppedAt == nil { captureStoppedAt = .now }
             healthTask?.cancel(); captureState = "stopping"
         case "asr.status", "asr.gap", "asr.error":
             if let source = event["source"] as? String {
@@ -1743,9 +2037,11 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
         case "audio.gap", "audio.error":
             let code = event["code"] as? String ?? type
             let messages = ["microphone_denied": "麦克风权限未开启。请打开系统设置，允许真实交互使用麦克风后重试。",
+                            "system_audio_denied": "系统音频权限未开启。请在系统设置允许真实交互录制系统音频后重试。",
                             "device_changed": "音频设备已切换，收听已停止。请确认系统输入设备后重新开始。",
                             "outbox_seal_failed": "录音已停止，但收尾记录写入失败。请检查磁盘空间和会议目录权限；本机文件已保留。",
                             "capture_failed": "音源启动失败。请检查麦克风是否可用、系统输入设备及录音权限后重试。"]
+            captureProblemCode = code
             captureProblem = messages[code] ?? "收听未完成（\(code)），请检查音源和系统权限后重试。"
             if code == "outbox_seal_failed" {
                 // The inputs have already stopped. Sending Stop here would
@@ -1836,9 +2132,12 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
     }
 
     private func replaySavedCaptures() {
-        Task {
+        replayTask?.cancel()
+        replayTask = Task {
             guard let directories = try? FileManager.default.contentsOfDirectory(at: outboxRoot, includingPropertiesForKeys: nil) else { return }
             for directory in directories {
+                guard !Task.isCancelled else { return }
+                if directory == activeOutbox { continue }
                 guard let manifest = try? CaptureEventOutbox.Manifest.read(from: directory), validMeetingID(manifest.meetingID),
                       UUID(uuidString: manifest.epoch) != nil, directory.lastPathComponent == manifest.epoch else { continue }
                 // A sealed journal can be replayed after an app or backend
@@ -1850,6 +2149,8 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 
     private func failBridge(_ message: String) {
         guard !closing else { return }
+        recoveryMessage = message
+        diagnosticsCopied = false
         bridgeFailed = true; healthTask?.cancel(); stopWatchdog?.cancel()
         if helper?.isRunning == true {
             // EOF synchronously releases the capture inputs in AudioHelper.
@@ -1900,6 +2201,7 @@ private final class DesktopController: NSObject, NSApplicationDelegate, WKNaviga
 
     func applicationWillTerminate(_ notification: Notification) {
         closing = true; healthTask?.cancel(); stopWatchdog?.cancel()
+        recordingStatusTimer?.invalidate(); replayTask?.cancel()
         updateTask?.cancel(); updateReadinessTask?.cancel()
         outboxTask?.cancel(); speechLeaseTask?.cancel(); fileLease?.revoke()
         fileTask?.cancel()
