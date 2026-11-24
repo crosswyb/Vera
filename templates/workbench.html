@@ -87,6 +87,13 @@
           <h2>当前会议</h2>
           <button id="return-meeting" class="current-meeting-link"><svg aria-hidden="true"><use href="#i-live"/></svg><span id="current-meeting-name"></span><svg aria-hidden="true"><use href="#i-chevron"/></svg></button>
         </div>
+        <div id="background-recording-nav" class="sidebar-section" hidden>
+          <h2>后台录音</h2>
+          <button id="background-recording-status" class="current-meeting-link" type="button" aria-describedby="background-recording-detail">
+            <svg aria-hidden="true"><use href="#i-live"/></svg><span id="background-recording-label">正在后台录音</span><svg aria-hidden="true"><use href="#i-chevron"/></svg>
+          </button>
+          <p id="background-recording-detail" class="sidebar-status-detail"></p>
+        </div>
         <div class="sidebar-section recent-section"><h2>最近打开</h2><div id="recent-meetings"></div></div>
       </div>
       <nav class="sidebar-bottom" aria-label="辅助导航">
@@ -113,9 +120,26 @@
         <button id="update-available" type="button" class="text-button update-prompt" data-pref-go="general" hidden></button>
         <button data-route="guide" class="icon-button" aria-label="使用帮助"><svg><use href="#i-help"/></svg></button>
       </header>
+      <section id="native-recovery" class="native-recovery" aria-labelledby="native-recovery-title" hidden>
+        <div class="native-recovery-copy">
+          <h2 id="native-recovery-title">工作台连接出现问题</h2>
+          <p id="native-recovery-message" role="status"></p>
+          <p id="native-recovery-draft-warning">重新加载或重连会清空页面上尚未提交的输入。</p>
+        </div>
+        <div class="native-recovery-actions">
+          <button id="native-recovery-reload" type="button" class="primary" aria-describedby="native-recovery-draft-warning">重新加载页面</button>
+          <button id="native-recovery-reconnect" type="button" aria-describedby="native-recovery-draft-warning">重连本地服务</button>
+          <button id="native-recovery-copy" type="button" class="text-button">复制诊断信息</button>
+          <p id="native-recovery-feedback" class="visually-hidden" role="status"></p>
+        </div>
+      </section>
       <main id="main" tabindex="-1">
         <section id="library-view" class="library-view" aria-labelledby="library-title">
           <header class="page-heading"><div><h1 id="library-title">全部会议</h1><p id="library-description">从一次会议开始，把讨论中的问题变成有依据的资料。</p></div><div class="library-actions"><button id="library-import-audio"><svg aria-hidden="true"><use href="#i-import"/></svg><span>导入音频</span></button><button id="library-new-meeting" class="primary"><svg aria-hidden="true"><use href="#i-plus"/></svg><span>开始会议</span></button></div></header>
+          <div id="library-refresh-failure" class="inline-notice" hidden>
+            <p role="status">会议列表未能更新。下方显示上次加载的内容。</p>
+            <button id="library-refresh-retry" class="text-button" type="button">重试更新</button>
+          </div>
           <div id="welcome-strip" class="library-demo"><button id="try-demo" class="text-button"><svg aria-hidden="true"><use href="#i-play"/></svg>体验示例会议</button></div>
           <section id="library-current" class="library-current" aria-label="进行中的会议" hidden><svg aria-hidden="true"><use href="#i-wave"/></svg><div><span class="library-eyebrow">进行中</span><h2 id="library-current-title"></h2><p id="library-current-meta" class="muted"></p></div><button id="library-resume" type="button" class="primary">回到会议 <svg aria-hidden="true"><use href="#i-arrow"/></svg></button></section>
           <div class="library-tools"><div class="library-filters" aria-label="按会议筛选"><button data-filter="all" aria-pressed="true">全部</button><button data-filter="active" aria-pressed="false">进行中</button><button data-filter="ended" aria-pressed="false">已结束</button><button data-filter="import" aria-pressed="false">音频导入</button></div><button id="library-sort" class="quiet-button" aria-label="切换时间排序">最近更新 ↓</button></div>
@@ -178,7 +202,7 @@
           <select id="meeting-select" hidden aria-label="绑定会议"><option value="">选择会议</option></select>
           <div class="meeting-command-bar">
           <header class="meeting-heading"><div><span id="meeting-state" class="meeting-state">尚未开始</span><h1 id="session-title">会议</h1><div class="meeting-meta"><span id="meeting-date"></span><span id="scope-notice" class="fixture-label" hidden>示例会议</span></div></div><div class="meeting-primary-actions"><button id="start-listening" class="primary"><svg><use href="#i-wave"/></svg><span>开始收听</span></button><button id="stop-listening" hidden><svg><use href="#i-stop"/></svg>暂停收听</button><details class="meeting-more"><summary title="更多会议操作" aria-label="更多会议操作"><svg aria-hidden="true"><use href="#i-more"/></svg></summary><div><button id="show-meeting-info" aria-haspopup="dialog" aria-controls="meeting-info-dialog">会议信息</button><button id="show-activity" aria-haspopup="dialog" aria-controls="activity-dialog">运行记录</button><button id="open-meeting-folder"><svg aria-hidden="true"><use href="#i-folder"/></svg>会议文件夹</button></div></details><button id="end-meeting" disabled>结束会议</button></div></header>
-          <div id="meeting-next-step" class="meeting-next-step"><div class="capture-reading"><span class="status-dot" aria-hidden="true"></span><strong id="capture-status">尚未开始收听</strong><meter id="capture-level" min="0" max="1" value="0" aria-label="实际音频电平" hidden></meter></div><label id="capture-source-field" class="capture-source-field"><span>音源</span><select id="capture-source" aria-describedby="capture-guidance"><option value="system">电脑声音</option><option value="microphone">麦克风</option><option value="both">电脑声音＋麦克风</option></select></label><div id="capture-inputs" class="capture-inputs" hidden><span id="system-input"><span><svg aria-hidden="true"><use href="#i-sys"/></svg>电脑声音</span><meter id="system-level" min="0" max="1" value="0" aria-label="电脑声音电平"></meter><span id="system-input-state"></span></span><span id="microphone-input"><span><svg aria-hidden="true"><use href="#i-mic"/></svg>麦克风</span><meter id="microphone-level" min="0" max="1" value="0" aria-label="麦克风电平"></meter><span id="microphone-input-state"></span></span></div><p id="capture-guidance">选择音源，再开始收听。</p><button id="open-microphone-settings" class="text-button" hidden>打开麦克风权限设置</button></div>
+          <div id="meeting-next-step" class="meeting-next-step"><div class="capture-reading"><span class="status-dot" aria-hidden="true"></span><strong id="capture-status">尚未开始收听</strong><meter id="capture-level" min="0" max="1" value="0" aria-label="实际音频电平" hidden></meter></div><label id="capture-source-field" class="capture-source-field"><span>音源</span><select id="capture-source" aria-describedby="capture-guidance"><option value="system">电脑声音</option><option value="microphone">麦克风</option><option value="both">电脑声音＋麦克风</option></select></label><div id="capture-inputs" class="capture-inputs" hidden><span id="system-input"><span><svg aria-hidden="true"><use href="#i-sys"/></svg>电脑声音</span><meter id="system-level" min="0" max="1" value="0" aria-label="电脑声音电平"></meter><span id="system-input-state"></span></span><span id="microphone-input"><span><svg aria-hidden="true"><use href="#i-mic"/></svg>麦克风</span><meter id="microphone-level" min="0" max="1" value="0" aria-label="麦克风电平"></meter><span id="microphone-input-state"></span></span></div><p id="capture-guidance">选择音源，再开始收听。</p><button id="open-microphone-settings" type="button" class="text-button" hidden>打开麦克风权限设置</button><button id="open-system-audio-settings" type="button" class="text-button" hidden>打开系统音频权限设置</button></div>
           </div>
           <div id="import-progress" class="import-progress" hidden><div><span id="import-file-name"></span><span id="import-progress-label" role="status"></span></div><progress id="import-progress-bar" max="100" value="0" aria-label="音频转写进度"></progress><div class="import-tools"><button id="continue-import" hidden>继续导入</button><button id="restart-import" hidden>重新选择音频</button><button id="download-transcript">导出完整转写 .md</button></div></div>
           <div id="speech-meeting-status" class="inline-notice" hidden><span id="speech-meeting-state" role="status"></span><button id="revoke-speech" type="button" class="text-button" hidden>撤回音频上传授权</button></div>
@@ -411,7 +435,7 @@
             <p class="setting-note">启动后自动检查，运行期间每 6 小时检查一次。发现新版会自动下载，完成后再由你确认安装并重新打开应用。会议和查证期间可稍后安装。</p>
             <details id="update-release-notes" hidden><summary>新版发布说明</summary><pre id="update-notes"></pre></details>
           </section>
-          <section class="settings-section appearance-settings" aria-labelledby="appearance-title"><h2 id="appearance-title">外观</h2><div class="setting-row"><label for="theme-preference">主题</label><select id="theme-preference" aria-describedby="theme-help"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div><p id="theme-help" class="setting-note">立即生效，自动保存。</p><div class="setting-row"><label for="layout-preference">界面布局</label><select id="layout-preference" aria-describedby="layout-help"><option value="a">静阅</option><option value="b">全景</option></select></div><p id="layout-help" class="setting-note">静阅以舒展双栏呈现内容；全景在宽窗口同屏展示转写、问题与回答。也可从右上角随时切换，选择自动保存。</p></section>
+          <section class="settings-section appearance-settings" aria-labelledby="appearance-title"><h2 id="appearance-title">外观</h2><div class="setting-row"><label for="theme-preference">主题</label><select id="theme-preference" aria-describedby="theme-help"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></div><p id="theme-help" class="setting-note">立即生效，自动保存。</p><div class="setting-row"><label for="layout-preference">界面布局</label><select id="layout-preference" aria-describedby="layout-help"><option value="a">静阅</option><option value="b">全景</option></select></div><p id="layout-help" class="setting-note">静阅以舒展双栏呈现内容；全景在宽窗口同屏展示转写、问题与回答。也可从右上角随时切换，选择自动保存。</p><div class="setting-row"><label for="density-preference">内容密度</label><select id="density-preference" aria-describedby="density-help"><option value="comfortable">舒适</option><option value="compact">紧凑</option></select></div><p id="density-help" class="setting-note">舒适模式提高正文和元数据的可读性；紧凑模式适合同时查看更多内容。</p><span id="density-status" class="visually-hidden" role="status" aria-live="polite"></span></section>
           <section class="settings-section" aria-labelledby="storage-settings-title"><h2 id="storage-settings-title">保存与回看</h2><div class="setting-row storage-location"><div><h3>会议文件保存位置</h3><p id="settings-output-root" class="storage-path">正在读取保存位置…</p></div><div class="storage-actions"><button id="settings-open-folder" type="button" disabled>打开文件夹</button><button id="settings-choose-folder" type="button" aria-describedby="settings-output-help" disabled>选择文件夹</button></div></div><p id="settings-output-help" class="setting-note">修改后仅新建会议使用此位置，已有会议资料不移动。</p><p id="storage-settings-result" class="provider-result" role="status" aria-live="polite"></p><p id="settings-retention" class="setting-note"></p></section>
             <section class="settings-section provider-section" aria-labelledby="archive-settings-title">
               <header class="provider-heading"><div><h2 id="archive-settings-title">录音归档</h2></div></header>

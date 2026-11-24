@@ -212,6 +212,8 @@ private final class Host {
                             captureEpoch: command.captureEpoch), speech: command.speech, lease: lease)
                     } catch AudioCoreError.microphoneDenied {
                         core.reportError(code: "microphone_denied", detail: "麦克风权限未开启，请在系统设置中允许真实交互使用麦克风，再重新开始收听。")
+                    } catch AudioCoreError.systemAudioDenied {
+                        core.reportError(code: "system_audio_denied", detail: "系统音频权限未开启，请在系统设置中允许真实交互录制系统音频，再重新开始收听。")
                     } catch { core.reportError(code: "start_rejected", detail: error.localizedDescription) }
                 }
             case "speech_lease":

@@ -24,6 +24,21 @@
     try { layoutPreference = localStorage.getItem('wb_layout'); } catch { /* Visual preferences also work without browser storage. */ }
   }
   if (!layoutValues.has(layoutPreference)) layoutPreference = 'a';
+  const densityValues = new Set(['comfortable', 'compact']);
+  let densityPreference = window.__ZSJH_DENSITY_PREFERENCE__;
+  if (!densityValues.has(densityPreference)) {
+    try { densityPreference = localStorage.getItem('wb_density'); } catch { /* Optional visual preference. */ }
+  }
+  function applyDensity(value = densityPreference, persist = false) {
+    densityPreference = densityValues.has(value) ? value : 'comfortable';
+    document.documentElement.dataset.density = densityPreference;
+    $('density-preference').value = densityPreference;
+    if (persist) {
+      try { localStorage.setItem('wb_density', densityPreference); } catch { /* In-memory preference remains active. */ }
+      if (nativeAvailable()) postNative({action:'setDensityPreference', densityPreference});
+      text($('density-status'), densityPreference === 'compact' ? '已切换为紧凑密度' : '已切换为舒适密度');
+    }
+  }
   function syncMeetingPanels() {
     const grid = $('work-grid');
     const reading = grid.dataset.mobilePanel === 'results';
@@ -67,7 +82,11 @@
     searchReturn: false,
   };
   const meetingSearch = {timer: null, controller: null, sequence: 0, previousFocus: null, full: null, preview: null};
+  let workbenchReady = false;
+  let pendingRecordingMeetingId = '';
   applyLayout();
+  applyDensity();
+  window.addEventListener('storage', event => { if (event.key === 'wb_density' && !nativeAvailable()) applyDensity(event.newValue); });
   const feishu = window.createFeishuSettings({api, state, $, element, text, safeURL});
   const speech = window.createSpeechSettings({api, state, $, text, nativeAvailable, postNative, time, audioTime, renderRuntime:renderSpeechRuntime});
   const questionStates = {
@@ -276,7 +295,7 @@
       if (location.hash !== hash) history.pushState(null, '', hash);
     }
     renderLibrary();
-    renderRecent();
+    renderNativeRecovery();
     renderSettings();
     if (state.route === 'settings') { loadServiceSettings(); loadStorageSettings(); selectPreference(preference); }
     $('main').scrollTop = 0;
@@ -299,7 +318,9 @@
   function renderRecent() {
     const meetings = state.home?.meetings || [];
     const current = meetings.find(m => m.id === state.native?.meetingId) || (state.snapshot?.meeting?.state === 'active' ? state.snapshot.meeting : null);
-    const rows = state.recentIds.filter(id => id !== current?.id).map(id => meetings.find(m => m.id === id)).filter(Boolean).slice(0, 4);
+    const recording = state.native?.backgroundRecording;
+    const showRecording = Boolean(recording?.meetingId && (state.route !== 'meeting' || state.meetingId !== recording.meetingId));
+    const rows = state.recentIds.filter(id => id !== current?.id && id !== recording?.meetingId).map(id => meetings.find(m => m.id === id)).filter(Boolean).slice(0, 4);
     const list = $('recent-meetings');
     const signature = JSON.stringify(rows.map(m => [m.id, m.title]));
     if (list.dataset.signature !== signature) {
@@ -314,11 +335,23 @@
       }));
     }
     document.querySelector('.recent-section').hidden = !rows.length;
-    $('current-meeting-nav').hidden = !current;
+    $('current-meeting-nav').hidden = !current || (showRecording && current.id === recording.meetingId);
     $('return-meeting').dataset.meetingId = current?.id || '';
     text($('current-meeting-name'), current?.title || '');
     $('return-meeting').title = current ? `返回会议：${current.title}` : '';
     $('return-meeting').setAttribute('aria-label', $('return-meeting').title);
+    $('background-recording-nav').hidden = !showRecording;
+    const recordingButton = $('background-recording-status');
+    recordingButton.dataset.meetingId = recording?.meetingId || '';
+    if (showRecording) {
+      const meeting = meetings.find(m => m.id === recording.meetingId);
+      const title = meeting?.title || '当前会议';
+      const details = [recording.status || captureStates[recording.captureState], recording.elapsed].filter(Boolean);
+      text($('background-recording-label'), title);
+      text($('background-recording-detail'), details.join(' · '));
+      recordingButton.title = `查看后台录音：${title}`;
+      recordingButton.setAttribute('aria-label', recordingButton.title);
+    }
     for (const button of document.querySelectorAll('.app-sidebar [data-meeting-id]')) {
       if (state.route === 'meeting' && button.dataset.meetingId === state.meetingId) button.setAttribute('aria-current','page');
       else button.removeAttribute('aria-current');
@@ -938,6 +971,23 @@
     text($('library-empty-message'), query ? '试试更短的关键词，或清除搜索。' : state.filter === 'all' ? '第一次使用？先设置语音转写，再决定是否开启 AI 查证和飞书同步。' : '切换“全部”查看已有会议。');
     renderRecent();
   }
+
+  function renderNativeRecovery() {
+    const native = state.native;
+    const recovery = native?.recoveryState;
+    const recovering = recovery === 'recovering' || recovery === 'retrying';
+    const failed = recovery === 'failed';
+    const panel = $('native-recovery');
+    panel.hidden = !failed && !recovering;
+    if (panel.hidden) return;
+    text($('native-recovery-title'), recovering ? '正在恢复工作台连接' : '工作台连接出现问题');
+    text($('native-recovery-message'), native.recoveryMessage || (recovering ? '正在重新连接本机服务…' : '本机服务暂时不可用，可以尝试重新加载或重连。'));
+    const copied = native.diagnosticsCopied === true;
+    text($('native-recovery-copy'), copied ? '诊断信息已复制' : '复制诊断信息');
+    text($('native-recovery-feedback'), copied ? '诊断信息已复制' : '');
+    $('native-recovery-reload').disabled = recovering || native.canReloadWorkbench === false;
+    $('native-recovery-reconnect').disabled = recovering || native.canReconnectBackend === false;
+  }
   function closeMeetingActions() {
     $('meeting-actions-menu').hidePopover();
     document.querySelectorAll('.meeting-row-actions[aria-expanded="true"]').forEach(button => button.setAttribute('aria-expanded', 'false'));
@@ -997,14 +1047,23 @@
     if (!state.token || state.homeRequest) return;
     const token = state.token;
     const pending = api('/live/v2/home'); state.homeRequest = pending;
+    $('library-refresh-retry').disabled = true;
     try {
       const home = await pending;
       if (state.token !== token) return;
       state.home = home;
       renderMeetingOptions(); renderCapabilities(); renderLibrary();
-    } catch (error) { if (state.token === token) { setSync('列表更新失败，正在重试', true); } }
-    finally { if (state.homeRequest === pending) state.homeRequest = null; }
+      $('library-refresh-failure').hidden = true;
+    } catch {
+      if (state.token === token) $('library-refresh-failure').hidden = false;
+    } finally {
+      if (state.homeRequest === pending) {
+        state.homeRequest = null;
+        $('library-refresh-retry').disabled = false;
+      }
+    }
   }
+  $('library-refresh-retry').addEventListener('click', refreshHome);
   function setSync(message, error = false) {
     text($('sync-status'), message);
     $('sync-status').dataset.state = error ? 'error' : 'connected';
@@ -1089,8 +1148,11 @@
     state.artifactRequests.clear();
     rememberToken('');
     resetSignatures();
+    workbenchReady = false;
+    pendingRecordingMeetingId = '';
     $('workspace').hidden = true;
     $('login').hidden = false;
+    $('library-refresh-failure').hidden = true;
     setSync('尚未连接');
     document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
     if (showMessage) notice('已退出真实交互');
@@ -1110,6 +1172,13 @@
     setSync('已连接');
     renderSnapshot();
     await readRoute();
+    if (state.token !== token) return;
+    workbenchReady = true;
+    if (pendingRecordingMeetingId) {
+      const meetingId = pendingRecordingMeetingId;
+      pendingRecordingMeetingId = '';
+      await selectMeeting(meetingId);
+    }
     if (nativeAvailable()) nativePost('requestState');
   }
   function renderMeetingOptions() {
@@ -1511,7 +1580,8 @@
       $(`${source}-level`).value = listening ? Math.min(1, Math.max(0, level) * 6) : 0;
       text($(`${source}-input-state`), !received ? '等待输入' : level > 0.002 ? '有声音' : '安静');
     }
-    $('open-microphone-settings').hidden = !inputError || !inputError.includes('麦克风权限');
+    $('open-microphone-settings').hidden = !inputError || (native.captureProblemCode !== 'microphone_denied' && !inputError.includes('麦克风权限'));
+    $('open-system-audio-settings').hidden = !inputError || native.captureProblemCode !== 'system_audio_denied';
     document.querySelector('.capture-reading').dataset.active = String(listening || (!desktop && ['listening', 'running', 'capturing'].includes(serverCapture.status)));
     $('start-listening').hidden = synthetic || file || ended || busy;
     $('stop-listening').hidden = synthetic || ended || !busy;
@@ -3032,6 +3102,7 @@
     nativePost('setAudioSource', null, null, event.target.value);
   });
   $('open-microphone-settings').addEventListener('click', () => nativePost('openMicrophoneSettings'));
+  $('open-system-audio-settings').addEventListener('click', () => nativePost('openSystemAudioSettings'));
   const compactRail = window.matchMedia('(max-width:980px)');
   const mobileNavigation = window.matchMedia('(max-width:800px)');
   let preferredRail;
@@ -3055,6 +3126,7 @@
     button.addEventListener('click', () => applyLayout(button.dataset.layout, true));
   }
   $('layout-preference').addEventListener('change', event => applyLayout(event.target.value, true));
+  $('density-preference').addEventListener('change', event => applyDensity(event.target.value, true));
   for (const query of ['(min-width:1101px)', '(min-width:1201px)']) {
     window.matchMedia(query).addEventListener('change', syncMeetingPanels);
   }
@@ -3087,6 +3159,13 @@
     (note?.querySelector('summary') || $('transcript-list')).focus({preventScroll: true});
   });
   $('return-meeting').addEventListener('click', (event) => { if (event.currentTarget.dataset.meetingId) selectMeeting(event.currentTarget.dataset.meetingId); });
+  $('background-recording-status').addEventListener('click', event => {
+    const meetingId = event.currentTarget.dataset.meetingId;
+    if (meetingId) selectMeeting(meetingId);
+  });
+  $('native-recovery-reload').addEventListener('click', () => nativePost('reloadWorkbench'));
+  $('native-recovery-reconnect').addEventListener('click', () => nativePost('reconnectBackend'));
+  $('native-recovery-copy').addEventListener('click', () => nativePost('copyDiagnostics'));
   for (const id of ['library-list', 'recent-meetings']) $(id).addEventListener('click', (event) => {
     const actions = event.target.closest('[data-manage-meeting]');
     if (actions) { showMeetingActions(actions); return; }
@@ -3385,7 +3464,13 @@
     $('main').inert = state.native?.updates?.state === 'installing';
     if (themeValues.has(state.native?.themePreference)) applyTheme(state.native.themePreference);
     if (layoutValues.has(state.native?.layoutPreference) && state.native.layoutPreference !== layoutPreference) applyLayout(state.native.layoutPreference);
-    renderSpeechRuntime(); renderSettings();
+    if (densityValues.has(state.native?.densityPreference) && state.native.densityPreference !== densityPreference) applyDensity(state.native.densityPreference);
+    renderSpeechRuntime(); renderSettings(); renderRecent(); renderNativeRecovery();
+  });
+  window.addEventListener('zsjh-show-recording', ({detail: meetingId}) => {
+    if (!nativeAvailable() || typeof meetingId !== 'string' || !meetingId) return;
+    if (workbenchReady) selectMeeting(meetingId);
+    else pendingRecordingMeetingId = meetingId;
   });
   window.addEventListener('popstate', () => { if (state.token) readRoute(); });
   window.addEventListener('hashchange', () => { if (state.token) readRoute(); });

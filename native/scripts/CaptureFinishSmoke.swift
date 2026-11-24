@@ -11,8 +11,10 @@ extension DesktopController {
         lifecycle.window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 80, height: 80),
                                     styleMask: [.titled, .closable], backing: .buffered, defer: false)
         lifecycle.window.isReleasedWhenClosed = false
+        lifecycle.activeInput = "audio_file"
         lifecycle.activeMeeting = "synthetic-background-import"
         lifecycle.captureState = "importing"
+        try require(lifecycle.backgroundMeeting == nil, "file import appeared as live recording")
         var backgroundTicks = 0
         lifecycle.fileTask = Task { @MainActor in
             while !Task.isCancelled {
@@ -89,6 +91,14 @@ extension DesktopController {
                 try? FileManager.default.removeItem(at: directory)
             }
         }
+        try require(!completed.0.canReconnectBackend, "reconnect was allowed while the helper was still recording")
+        let oldBackend = Process()
+        oldBackend.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try oldBackend.run()
+        oldBackend.waitUntilExit()
+        let unbound = DesktopController()
+        unbound.backendExited(oldBackend)
+        try require(!unbound.bridgeFailed, "a retired backend callback failed the current bridge")
         let speech = completed.0
         func speechEvent(_ type: String, _ fields: [String: String]) throws {
             var event = fields
@@ -106,6 +116,8 @@ extension DesktopController {
                     "recovery retained a stale failure")
         completed.0.stopWithStatus("fixture stop")
         try stopped(completed.0, epoch: "epoch-1")
+        try require(completed.0.canReconnectBackend && !completed.0.statusStopItem.isEnabled,
+                    "stopped inputs blocked backend recovery or still offered Stop")
         unfinished.0.stopWithStatus("fixture stop")
         // A stopped event from an older epoch cannot authorize keeping a
         // newer capture alive after its stop deadline.
@@ -144,7 +156,14 @@ extension DesktopController {
                     "seal failure during explicit retry did not remain retryable")
         try await Task.sleep(for: .milliseconds(50))
         try require(try stopCommands(in: completed.2) == 2, "retry failure restarted stopping without a user command")
-        print("Capture finish watchdog passed: stopped helper remains retryable, unconfirmed capture receives EOF, epoch binding resets; only explicit retries send a new stop.")
+        if unfinished.1.isRunning { unfinished.1.terminate(); unfinished.1.waitUntilExit() }
+        let interrupted = unfinished.0
+        try require(interrupted.canReconnectBackend, "an exited helper with an unsealed journal blocked recovery")
+        interrupted.releaseInterruptedCapture()
+        try require(interrupted.activeMeeting == nil && interrupted.captureFinish == "failed" &&
+                    interrupted.captureProblemCode == "capture_interrupted" && FileManager.default.fileExists(atPath: unfinished.2.path),
+                    "helper failure retired the journal or incorrectly reported successful finalization")
+        print("Capture finish and recovery passed: recording blocks reconnect, stopped inputs and a dead helper allow recovery, the unsealed journal remains, and save retries remain explicit.")
     }
 }
 

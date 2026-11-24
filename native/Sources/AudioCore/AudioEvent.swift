@@ -89,7 +89,7 @@ public struct AudioConfig: Equatable, Sendable {
 }
 
 public enum AudioCoreError: Error, LocalizedError {
-    case invalidConfig(String), alreadyRunning, modelUnavailable(String), microphoneDenied
+    case invalidConfig(String), alreadyRunning, modelUnavailable(String), microphoneDenied, systemAudioDenied
     case unsupportedMachine, conversionFailed, inputOverflow, outputOverflow
 
     public var errorDescription: String? {
@@ -98,6 +98,7 @@ public enum AudioCoreError: Error, LocalizedError {
         case .alreadyRunning: return "Stop the current meeting before starting another configuration."
         case .modelUnavailable(let state): return "Local speech model is \(state). Use model_status; model installation is explicit."
         case .microphoneDenied: return "Allow microphone access for ZSJH Audio Helper in System Settings."
+        case .systemAudioDenied: return "Allow system audio recording for ZSJH Audio Helper in System Settings."
         case .unsupportedMachine: return "AudioCore requires Apple Silicon and macOS 26 or later."
         case .conversionFailed: return "Could not convert captured audio to the local speech format."
         case .inputOverflow: return "Audio input buffer exhausted; capture stopped instead of silently dropping audio."
