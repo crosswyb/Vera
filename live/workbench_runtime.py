@@ -21,7 +21,7 @@ from live.failure_diagnostics import RequestOutcomeUnknown, describe_failure, re
 from live.detection import DetectionBatch, normalize_question_reference, parse_detection, quote_options
 from live.original_evidence import official_source, target_for
 from live.output_validation import OutputValidationError, issues_for
-from live.meeting_archive import distinct_utterances, validate_summary
+from live.meeting_archive import distinct_utterances, requires_expanded_overview, validate_summary
 from live.provider_settings import from_environment
 from live.source_reader import DeepSeekSearch, DemoResearcher, Researcher, SearchOutcomeUnknown, TavilySearch, is_grounded_explanation, needs_internal_records, quote_catalog, relevance_terms, validate_result
 from live.store import LiveError
@@ -79,6 +79,7 @@ SUMMARY_SYSTEM = """你是会议纪要整理员。只根据提供的全量转录
 topics保留主要讨论要点。培训、录屏或引用其他讨论的内容作为回顾，只有本次会议明确采纳才归入decisions。
 actions逐条保留明确提出的后续行动，取数、核对、测试、排期和讨论各按所指交付分别记录。保留负责人、期限原措辞、条件和依赖，预估不得改成承诺。缺失的字段写未指定。open_questions列出尚未讨论清楚的问题，即使同时存在对应待办。
 没有明确决定或待办时对应数组为空。参考材料不等于会议结论。overview不引入任何新事实。
+会议概述面向参会者阅读，控制在180至240个中文字符，完整覆盖会议目的和范围、主要讨论过程、已经形成的决定和后续动作、仍未确定的边界。用具体名词和动作概括，不堆砌形容词，也不要逐条重复后面的四个数组。分段输入先写当前部分的事实，最终合并时补齐四个方面。
 转录可能不准确，存在歧义就在要点中明确待核对。每部分简洁，全部输出控制在1200个中文字左右。分段输入仅概括当前部分。
 """
 MODEL_SLOTS = threading.BoundedSemaphore(3)
@@ -419,7 +420,7 @@ class TextModel:
                     MeetingSummary, lambda value: validate_summary(value.model_dump(), work["segments"]),
                     conversation_id=work["meeting"].get("id"), before_request=guard))
             notes = reduced
-        return notes[0]
+        return validate_summary(notes[0], work["segments"], require_overview=requires_expanded_overview(work["segments"]))
 
 
 def demo_decisions(work):
