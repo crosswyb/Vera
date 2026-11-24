@@ -63,6 +63,23 @@ def clock(ms):
     return f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
 
 
+def transcript_anchor(segment_id, revision):
+    """Return a stable, renderer-safe anchor for one transcript revision."""
+    return "transcript-" + digest(f"{segment_id}:{revision}")[:16]
+
+
+def short_quote(text, limit=72):
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)] + "…"
+
+
+def requires_expanded_overview(segments):
+    """Require the expanded overview when there is enough transcript to summarize."""
+    return len(segments) >= 3 and sum(len(str(s.get("text", ""))) for s in segments) >= 240
+
+
 def render_transcript(meeting, segments):
     lines = ["# " + meeting["title"] + " · 全量转录", "", "> 语音识别结果可能有误，请结合原始音频核对。撤回内容不计入正文。", "",
              f"- 有效最终片段：{len(segments)}", f"- 会议 ID：{meeting['id']}", ""]
@@ -75,13 +92,33 @@ def render_transcript(meeting, segments):
         source = "文字补充" if s["capture_epoch"] == "manual" else SOURCE_LABELS[s["source"]]
         service = {"apple_local": "Apple 中文识别", "dashscope": "阿里云百炼", "deepseek": "DeepSeek 官方 ASR"}
         label = service.get(s.get("provider"), "Apple 中文识别") if s["capture_epoch"] != "manual" else "手动"
-        lines += [f"## S{index:04d} · {clock(s.get('audio_start_ms'))} · {source}", "",
+        lines += [f"<a id=\"{transcript_anchor(s['id'], s['revision'])}\"></a>",
+                  f"## S{index:04d} · {clock(s.get('audio_start_ms'))} · {source}", "",
                   f"录音段：{s['capture_epoch']} · 识别服务：{label} · 识别时间：{s.get('occurred_at', '')}", "", s["text"], ""]
     return "\n".join(lines)
 
 
+def render_source_ref(ref, labels, segments_by_key, transcript):
+    """Render a readable reference while retaining a legacy fallback."""
+    if isinstance(ref, str):
+        return ref
+    segment_id = ref.get("segment_id", "")
+    revision = ref.get("revision")
+    segment = segments_by_key.get((segment_id, revision))
+    if segment is None:
+        return f"{segment_id}@{revision}" if segment_id else "未提供"
+    label = labels.get(segment_id) or f"{segment_id}@{revision}"
+    detail = f"{label} · {clock(segment.get('audio_start_ms'))} · “{short_quote(segment.get('text'))}”"
+    if transcript:
+        from urllib.parse import quote
+        target = quote(Path(transcript).name) + "#" + transcript_anchor(segment_id, revision)
+        return f"{detail}（[定位原文]({target})）"
+    return detail
+
+
 def render_summary(meeting, segments, result=None, status="local_only"):
     labels = {s["id"]: f"S{i:04d}" for i, s in enumerate(segments, 1)}
+    segments_by_key = {(s["id"], s["revision"]): s for s in segments}
     lines = ["# " + meeting["title"] + " · 会议纪要", "", "> 根据会议转录整理，供参会者核对；不替代正式确认。", "",
              "- 会议日期：" + datetime.fromtimestamp(meeting["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M"),
              f"- 转录片段：{len(segments)}", ""]
@@ -90,13 +127,15 @@ def render_summary(meeting, segments, result=None, status="local_only"):
         from urllib.parse import quote
         lines += ["[查看全量转录](" + quote(Path(transcript).name) + ")", ""]
     if result is not None:
-        lines += ["## 会议概述", "", result["overview"], ""]
+        lines += ["## 会议概述", "", result.get("overview", "未生成会议概述。"), ""]
         for key, title in (("topics", "讨论要点"), ("decisions", "明确决定"), ("actions", "后续行动"), ("open_questions", "未决问题")):
             lines += ["## " + title, ""]
-            for item in result[key]:
-                refs = "、".join(labels[r["segment_id"]] for r in item["source_refs"])
-                lines += ["- " + item["text"] + "（依据：" + refs + "）"]
-            if not result[key]:
+            for item in result.get(key, []):
+                refs = "、".join(render_source_ref(r, labels, segments_by_key, transcript)
+                                 for r in item.get("source_refs", []))
+                suffix = f"（依据：{refs}）" if refs else ""
+                lines += ["- " + item["text"] + suffix]
+            if not result.get(key):
                 lines += ["转录中未提取到明确内容。"]
             lines += [""]
     else:
@@ -118,8 +157,14 @@ def render_summary(meeting, segments, result=None, status="local_only"):
     return "\n".join(lines)
 
 
-def validate_summary(result, segments):
+def validate_summary(result, segments, *, require_overview=False):
     result = MeetingSummary.model_validate(result).model_dump()
+    if require_overview:
+        overview = re.sub(r"\s+", "", result["overview"])
+        require(180 <= len(overview) <= 240, "会议概述应控制在180至240个中文字符左右", 409)
+        required_topics = ("目的", "范围", "讨论", "决定", "后续", "未决")
+        require(sum(term in overview for term in required_topics) >= 4,
+                "会议概述应覆盖目的范围、讨论过程、决定行动和未决边界", 409)
     visible = {(s["id"], s["revision"]) for s in segments}
     for key in ("topics", "decisions", "actions", "open_questions"):
         for item in result[key]:
@@ -271,7 +316,7 @@ class MeetingArchive(RecordingArchive):
 
     def finish_summary(self, principal, work, result=None, error=None):
         if result is not None:
-            result = validate_summary(result, work["segments"])
+            result = validate_summary(result, work["segments"], require_overview=requires_expanded_overview(work["segments"]))
         with self.store.transaction() as db:
             m = self._meeting(db, principal, work["meeting"]["id"], True)
             self.store._acl(db, principal, m["project_id"], {"agent"})

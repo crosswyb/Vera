@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from live.meeting_archive import distinct_utterances, final_segments
+from live.meeting_archive import distinct_utterances, final_segments, render_summary, render_transcript, transcript_anchor, validate_summary
 from live.store import LiveError
 from live.workbench_contracts import AudioEvent, AudioImport, AudioImportFinish, MeetingPermissions, NewMeeting, RecordingStart, Utterance
 from live.workbench_retention import purge
@@ -85,7 +85,9 @@ class MeetingArchiveTest(unittest.TestCase):
         self.assertTrue(path.is_file()); self.assertEqual(m["recordings"][0]["state"], "saved")
         self.assertEqual(m["summary"]["state"], "completed")
         content = self.wb.meeting_file(self.owner, self.mid, "summary")["content"]
-        self.assertIn("明确决定", content); self.assertIn("依据：S0001", content)
+        self.assertIn("明确决定", content); self.assertIn("依据：S0001 · 00:00:00", content)
+        self.assertIn("我们决定先完成本机验证", content)
+        self.assertIn("定位原文", content)
         for kind in ("transcript", "summary"):
             self.assertTrue(self.wb.writer.path(m["base_files"][kind]["path"]).is_file())
         listed = next(row for row in self.wb.home(self.owner)["meetings"] if row["id"] == self.mid)
@@ -185,6 +187,47 @@ class MeetingArchiveTest(unittest.TestCase):
         result["topics"][0]["source_refs"][0]["segment_id"] = "invented"
         with self.assertRaises(LiveError): self.wb.finish_summary(self.agent, work, result)
 
+    def test_summary_references_render_time_quote_and_stable_transcript_anchor(self):
+        segments = [{"id": "seg:one", "revision": 2, "audio_start_ms": 223000,
+                     "capture_epoch": "e1", "source": "microphone", "text": "先完成接口联调，再确认上线窗口。"}]
+        meeting = {"id": "m", "title": "引用定位", "created_at": time.time(),
+                   "base_files": {"transcript": {"path": "m/02-全量转录.md"}}}
+        result = {"overview": "会议围绕接口联调、上线窗口和验收安排进行讨论。",
+                  "topics": [{"text": "确认接口联调先行。", "source_refs": [{"segment_id": "seg:one", "revision": 2}]}],
+                  "decisions": [{"text": "暂不确定上线窗口。", "source_refs": [{"segment_id": "seg:one", "revision": 2}]}],
+                  "actions": [{"text": "继续完成联调。", "source_refs": [{"segment_id": "seg:one", "revision": 2}]}],
+                  "open_questions": [{"text": "上线窗口待确认。", "source_refs": [{"segment_id": "seg:one", "revision": 2}]}]}
+        transcript = render_transcript(meeting, segments)
+        summary = render_summary(meeting, segments, result)
+        anchor = transcript_anchor("seg:one", 2)
+        self.assertIn(f'<a id="{anchor}"></a>', transcript)
+        self.assertIn("S0001 · 00:03:43", summary)
+        self.assertIn("先完成接口联调，再确认上线窗口", summary)
+        self.assertIn(f"#{anchor}", summary)
+        self.assertEqual(summary.count("定位原文"), 4)
+
+    def test_summary_reference_fallback_keeps_legacy_missing_segments_readable(self):
+        meeting = {"id": "m", "title": "旧格式", "created_at": time.time(), "base_files": {}}
+        result = {"overview": "旧纪要摘要。", "topics": [{"text": "历史条目", "source_refs": [{"segment_id": "removed", "revision": 1}]}]}
+        content = render_summary(meeting, [], result)
+        self.assertIn("依据：removed@1", content)
+        current = [{"id": "same", "revision": 2, "audio_start_ms": 0, "text": "新修订"}]
+        stale = {"overview": "旧纪要摘要。", "topics": [{"text": "历史修订", "source_refs": [{"segment_id": "same", "revision": 1}]}]}
+        self.assertIn("依据：same@1", render_summary(meeting, current, stale))
+
+    def test_summary_overview_validation_requires_length_and_four_content_dimensions(self):
+        segments = [{"id": f"s{i}", "revision": 1} for i in range(3)]
+        point = {"text": "合成条目", "source_refs": [{"segment_id": "s0", "revision": 1}]}
+        base = {"topics": [point], "decisions": [point], "actions": [point], "open_questions": [point]}
+        with self.assertRaises(LiveError):
+            validate_summary({"overview": "太短", **base}, segments, require_overview=True)
+        overview = ("本次会议围绕一期系统试用和交付范围展开，先说明业务目标与实施边界，随后讨论功能验证、接口联调、部署安排和验收条件。"
+                    "会议决定先完成关键场景测试，并安排相关人员补充数据和确认上线窗口。后续动作包括整理问题清单、复核测试结果和同步交付材料。"
+                    "代码迁移、最终负责人及具体排期仍未确定，需结合测试反馈继续确认。相关接口的权限配置和异常处理方式，也要在下一轮联调中补充核对。")
+        self.assertTrue(180 <= len(overview) <= 240)
+        validated = validate_summary({"overview": overview, **base}, segments, require_overview=True)
+        self.assertEqual(validated["overview"], overview)
+
     def test_user_edited_markdown_is_preserved(self):
         self.wb.utterance(self.owner, self.mid, Utterance(text="保留用户编辑。"))
         m = self.wb.control(self.owner, self.mid, "end")
@@ -218,7 +261,10 @@ class MeetingArchiveTest(unittest.TestCase):
                 batch = content["segments"]; seen.extend(s["segment_id"] for s in batch)
                 first = batch[0]
                 point = {"text": "合成讨论要点。", "source_refs": [{"segment_id": first["segment_id"], "revision": 1}]}
-                return {"overview": "合成会议", "topics": [point], "decisions": [], "actions": [], "open_questions": []}
+                return {"overview": ("本次会议围绕长会议的系统验证范围展开，先梳理各段讨论涉及的业务目标和实施边界，再依次核对功能、接口、部署和验收事项。"
+                    "会议决定先完成关键场景测试，并安排相关人员补充数据、复核结果和同步交付材料。后续动作包括整理问题清单、确认接口权限和跟进测试排期。"
+                    "代码迁移、最终负责人及具体上线窗口仍未确定，需结合下一轮联调反馈继续确认，相关异常处理方式也要补充核对，并明确负责人。"),
+                    "topics": [point], "decisions": [], "actions": [], "open_questions": []}
             return content["chunk_notes"][0]
         with patch.object(TextModel, "call", side_effect=response):
             result = TextModel(None).summarize({"meeting": {"title": "长会议"}, "segments": segments})
