@@ -28,6 +28,15 @@ class DetectionBatch:
         return proposal
 
 
+def utterance_spans(text, limit):
+    """Yield literal spans in transcript order, keeping short utterances intact."""
+    for match in re.finditer(r'[^。！？?!\n]+[。！？?!\n]*|[。！？?!]+', text):
+        for start in range(match.start(), match.end(), limit):
+            end = min(start + limit, match.end())
+            if any(c.isalnum() for c in text[start:end]):
+                yield start, end
+
+
 def quote_options(segments, cursor):
     """Stable IDs for literal new utterance spans, including very short questions."""
     options = []
@@ -35,16 +44,11 @@ def quote_options(segments, cursor):
         if not segment.get('is_new', segment.get('event_seq', cursor + 1) > cursor):
             continue
         text = segment['text']
-        for match in re.finditer(r'[^。！？?!\n]+[。！？?!\n]*|[。！？?!]+', text):
-            for start in range(match.start(), match.end(), 400):
-                end = min(start + 400, match.end())
-                quote = text[start:end]
-                if not any(c.isalnum() for c in quote):
-                    continue
-                identity = json.dumps([segment['id'], segment['revision'], start, end], ensure_ascii=False)
-                options.append({'id': 'u-' + hashlib.sha256(identity.encode()).hexdigest()[:16],
-                    'segment_id': segment['id'], 'revision': segment['revision'], 'start': start,
-                    'end': end, 'quote': quote})
+        for start, end in utterance_spans(text, 400):
+            identity = json.dumps([segment['id'], segment['revision'], start, end], ensure_ascii=False)
+            options.append({'id': 'u-' + hashlib.sha256(identity.encode()).hexdigest()[:16],
+                'segment_id': segment['id'], 'revision': segment['revision'], 'start': start,
+                'end': end, 'quote': text[start:end]})
     return options
 
 

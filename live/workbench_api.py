@@ -15,7 +15,7 @@ from live.store import LiveError, require
 from live.workbench import Workbench
 from live.workbench_contracts import (AudioEvent, AudioImport, AudioImportFinish, CaptureFinish, DeleteMeeting,
     EditQuestion, MeetingControl, MeetingPermissions, NewMeeting, NewQuestion, QuestionAction, RecordingStart,
-    RenameMeeting, SpeechAuthorization, SpeechSessionRequest, Utterance, AudioImportResume)
+    RenameMeeting, SpeechAuthorization, SpeechSessionRequest, SummaryRetry, Utterance, AudioImportResume)
 
 
 def register_workbench(app, store):
@@ -313,8 +313,7 @@ def register_workbench(app, store):
 
     @app.post("/live/v2/meetings/<mid>/summary")
     def workbench_summary(mid):
-        require(request.get_json(silent=True) == {}, "请求不接收额外参数", 400)
-        return jsonify(wb.retry_summary(g.member, mid))
+        return jsonify(wb.retry_summary(g.member, mid, regenerate=body(SummaryRetry).regenerate))
 
     @app.post("/live/v2/meetings/<mid>/permissions")
     def workbench_permissions(mid):

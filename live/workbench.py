@@ -1237,9 +1237,14 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                         except (OSError, LiveError):
                             recording.update(state="unavailable", storage_error="原保存目录不可用，录音是否完整尚未核实；请连接原磁盘后重开应用。")
                 if m.get("summary", {}).get("state") == "running":
-                    from live.meeting_archive import final_segments, render_summary
-                    m["summary"].update(state="outcome_unknown", error="outcome_unknown")
-                    self._archive_file(db, m, "summary", render_summary(m, final_segments(self, db, m), status="outcome_unknown"), "03-会议纪要-本机摘录")
+                    summary = m["summary"]
+                    summary.pop("regenerate", None)
+                    if summary.get("result"):
+                        summary.update(state="completed", error="outcome_unknown")
+                    else:
+                        from live.meeting_archive import final_segments, render_summary
+                        summary.update(state="outcome_unknown", error="outcome_unknown")
+                        self._archive_file(db, m, "summary", render_summary(m, final_segments(self, db, m), status="outcome_unknown"), "03-会议纪要-状态")
                 if m.get("audio_import", {}).get("state") == "processing":
                     m["audio_import"].update(state="interrupted", failed_at_ms=m["audio_import"]["processed_ms"], error="应用退出中断了导入；已有转写保留，可重新导入为一场新会议。")
                 recovery_pending = self.recover_detection_tasks(db, m)

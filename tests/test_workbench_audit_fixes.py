@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from live.model_budget import ModelBudget
 from live.meeting_archive import SummaryValidationError
 from live.original_evidence import article_number, original_result, standard_ids, target_for
+from live.output_validation import OutputValidationError
 from live.provider_settings import ModelService
 from live.source_reader import DemoResearcher
 from live.store import LiveError
@@ -303,34 +304,87 @@ class AuditFixTest(unittest.TestCase):
             model._structured("synthetic", {}, Decisions, before_request=guard)
         self.assertEqual(call.call_count, 1)
 
-    def test_summary_corrects_batch_reference_without_dropping_the_note(self):
+    def test_summary_corrects_only_the_invalid_reference_and_restores_exact_revisions(self):
         model = TextModel(None)
         work = {"meeting": {"id": "meeting", "title": "合成会议"}, "segments": [
-            {"id": "s1", "revision": 1, "text": "讨论采购范围。"}], "follow_ups": []}
-        invalid = {"overview": "合成概述", "topics": [{"text": "采购范围", "source_refs": [{"segment_id": "missing", "revision": 1}]}],
-                   "decisions": [], "actions": [], "open_questions": []}
-        valid = {"overview": "合成概述", "topics": [{"text": "采购范围", "source_refs": [{"segment_id": "s1", "revision": 1}]}],
-                 "decisions": [], "actions": [], "open_questions": []}
-        with patch.object(model, "call", side_effect=[invalid, valid]) as call:
+            {"id": "long-id-for-a-revised-segment", "revision": 3, "text": "讨论采购范围。"},
+            {"id": "long-id-for-an-action", "revision": 2, "text": "周五前核对清单。"}],
+            "follow_ups": [
+                {"text": "周五前核对清单。", "source_refs": [{"segment_id": "long-id-for-an-action", "revision": 2}]},
+                {"text": "旧行动。", "source_refs": [{"segment_id": "long-id-for-an-action", "revision": 1}]}]}
+        valid = {"overview": "合成概述", "topics": [{"text": "采购范围", "evidence_ids": [1]}],
+                 "decisions": [], "actions": [{"text": "周五前核对清单。", "evidence_ids": [2]}], "open_questions": []}
+        invalid = {**valid, "actions": [{"text": "周五前核对清单。", "evidence_ids": [3]}]}
+        with patch.object(model, "call", side_effect=[invalid, valid, valid]) as call:
             result = model.summarize(work)
-        self.assertEqual(result["topics"][0]["source_refs"], [{"segment_id": "s1", "revision": 1}])
-        self.assertEqual(call.call_count, 2)
-        self.assertEqual(call.call_args_list[1].args[1]["validation_feedback"][0]["code"], "source_ref_not_in_transcript")
+        self.assertEqual(result["topics"], [{"text": "采购范围",
+            "source_refs": [{"segment_id": "long-id-for-a-revised-segment", "revision": 3, "quote": "讨论采购范围。"}]}])
+        self.assertEqual(result["actions"], [{"text": "周五前核对清单。",
+            "source_refs": [{"segment_id": "long-id-for-an-action", "revision": 2, "quote": "周五前核对清单。"}]}])
+        self.assertEqual(call.call_count, 3)
+        prompt = call.call_args_list[0].args[1]
+        self.assertEqual(prompt["segments"], [{"evidence_id": 1, "text": "讨论采购范围。"},
+                                              {"evidence_id": 2, "text": "周五前核对清单。"}])
+        self.assertEqual(prompt["follow_up_candidates"], [{"text": "周五前核对清单。", "evidence_ranges": [[2, 2]]}])
+        self.assertEqual(call.call_args_list[1].args[1]["validation_feedback"],
+                         [{"field": "actions.0.evidence_ids", "code": "source_ref_not_in_transcript"}])
 
-    def test_summary_repairs_only_overview_after_merge(self):
+    def test_summary_does_not_publish_when_no_evidence_number_matches(self):
         model = TextModel(None)
-        segments = [{"id": f"s{n}", "revision": 1, "text": "这是一段用于合成测试的会议讨论内容。" * 6} for n in range(3)]
+        work = {"meeting": {"title": "合成会议"}, "segments": [
+            {"id": "s1", "revision": 1, "text": "讨论采购范围。"}]}
+        invalid = {"overview": "合成概述", "topics": [{"text": "采购范围", "evidence_ids": [999]}]}
+        with patch.object(model, "call", return_value=invalid) as call, self.assertRaises(OutputValidationError) as error:
+            model.summarize(work)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(error.exception.issues,
+                         [{"field": "topics.0.evidence_ids", "code": "source_ref_not_in_transcript"}])
+
+    def test_summary_reviews_decisions_and_actions_against_literal_context(self):
+        work = {"meeting": {"title": "方案验证"}, "segments": [
+            {"id": "example", "revision": 3, "text": "先看一下屏幕。假设某地拿不到数据，可以请当地协助验证。这里只是举例。"},
+            {"id": "scope", "revision": 1, "text": "可以拿一份报告做对标。这只是其中一类。"},
+            {"id": "assigned", "revision": 2, "text": "先跑通一个试点。周五前由实施组核对数据。"}]}
+        draft = {"overview": "仅作候选", "topics": [{"text": "讨论验证方法", "evidence_ids": [2]}],
+                 "decisions": [{"text": "全量方案按报告重构", "evidence_ids": [4]}],
+                 "actions": [{"text": "联系当地团队", "evidence_ids": [2]},
+                             {"text": "实施组核对数据", "evidence_ids": [7]}]}
+        reviewed = {"overview": "会上讨论验证方法，先跑通一个试点。",
+                    "topics": [{"text": "以一份报告作为对标样例", "evidence_ids": [4, 5]}],
+                    "decisions": [{"text": "先跑通一个试点", "evidence_ids": [6]}],
+                    "actions": [{"text": "实施组周五前核对数据", "evidence_ids": [7]}]}
+        def respond(system, content, **kwargs):
+            if "source_quotes" not in content:
+                return draft
+            quotes = {item["evidence_id"]: item["text"] for item in content["source_quotes"]}
+            self.assertEqual(quotes[2], "假设某地拿不到数据，可以请当地协助验证。")
+            self.assertEqual(quotes[3], "这里只是举例。")
+            self.assertEqual(quotes[5], "这只是其中一类。")
+            return reviewed
+
+        with patch.object(TextModel, "call", side_effect=respond) as call:
+            result = TextModel(None).summarize(work)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual([item["text"] for item in result["actions"]], ["实施组周五前核对数据"])
+        self.assertEqual(result["decisions"][0]["source_refs"],
+                         [{"segment_id": "assigned", "revision": 2, "quote": "先跑通一个试点。"}])
+        self.assertEqual(result["topics"][0]["source_refs"][1]["quote"], "这只是其中一类。")
+
+    def test_summary_returns_grounded_body_when_overview_is_brief(self):
+        model = TextModel(None)
+        quote = "这是一段用于合成测试的会议讨论内容。"
+        segments = [{"id": f"s{n}", "revision": 1, "text": quote} for n in range(3)]
         work = {"meeting": {"id": "meeting", "title": "合成会议"}, "segments": segments, "follow_ups": []}
-        first = {"overview": "短概述", "topics": [{"text": "采购范围", "source_refs": [{"segment_id": "s0", "revision": 1}]}],
-                 "decisions": [{"text": "保留原决定", "source_refs": [{"segment_id": "s1", "revision": 1}]}],
-                 "actions": [{"text": "保留原行动", "source_refs": [{"segment_id": "s2", "revision": 1}]}], "open_questions": []}
-        overview = "会议目的和范围是核对采购方案，讨论过程围绕实施条件、责任分工和验证安排展开，已经形成先完成本机验证再确认排期的决定，并明确后续行动与负责人，仍未确定的边界包括外部依赖、最终时间和验收条件。" * 2
-        corrected = {**first, "overview": overview}
-        with patch.object(model, "call", side_effect=[first, corrected]) as call:
+        first = {"overview": "短概述", "topics": [{"text": "采购范围", "evidence_ids": [1]}],
+                 "decisions": [{"text": "保留原决定", "evidence_ids": [2]}],
+                 "actions": [{"text": "保留原行动", "evidence_ids": [3]}],
+                 "open_questions": [{"text": "保留未决问题", "evidence_ids": [2, 2]}]}
+        with patch.object(model, "call", return_value=first) as call:
             result = model.summarize(work)
-        self.assertEqual(result["overview"], overview)
-        self.assertEqual(result["decisions"], first["decisions"])
-        self.assertEqual(result["actions"], first["actions"])
+        self.assertEqual(result["overview"], first["overview"])
+        for (section, segment_id) in (("topics", "s0"), ("decisions", "s1"), ("actions", "s2"), ("open_questions", "s1")):
+            self.assertEqual(result[section], [{"text": first[section][0]["text"],
+                                               "source_refs": [{"segment_id": segment_id, "revision": 1, "quote": quote}]}])
         self.assertEqual(call.call_count, 2)
 
     def test_summary_failure_persists_structured_reason_for_the_ui(self):

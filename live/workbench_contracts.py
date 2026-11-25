@@ -1,6 +1,6 @@
 """Small v2 contracts. No table rows, tool execution, or permission actions."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -202,17 +202,46 @@ class Decisions(Contract):
     actions: list[QuestionDecision] = Field(max_length=12)
 
 
+class SummarySourceRef(SourceRef):
+    quote: str = Field(default="", max_length=160)
+
+
 class SummaryPoint(Contract):
     text: str = Field(min_length=1, max_length=1200)
-    source_refs: list[SourceRef] = Field(min_length=1, max_length=12)
+    source_refs: list[SummarySourceRef] = Field(min_length=1, max_length=12)
 
 
-class MeetingSummary(Contract):
+class SummaryDraftPoint(Contract):
+    text: str = Field(min_length=1, max_length=1200)
+    evidence_ids: list[Annotated[int, Field(ge=1)]] = Field(min_length=1, max_length=4)
+
+
+SummaryItem = TypeVar("SummaryItem", SummaryPoint, SummaryDraftPoint)
+SUMMARY_SECTIONS = ("topics", "decisions", "actions", "open_questions")
+
+
+class SummaryBody(Contract, Generic[SummaryItem]):
+    overview: str = Field(default="", max_length=2000)
+    topics: list[SummaryItem] = Field(min_length=1, max_length=16)
+    decisions: list[SummaryItem] = Field(default_factory=list, max_length=16)
+    actions: list[SummaryItem] = Field(default_factory=list, max_length=20)
+    open_questions: list[SummaryItem] = Field(default_factory=list, max_length=16)
+
+
+class MeetingSummary(SummaryBody[SummaryPoint]):
+    pass
+
+
+class MeetingSummaryDraft(SummaryBody[SummaryDraftPoint]):
+    pass
+
+
+class MeetingOverview(Contract):
     overview: str = Field(min_length=1, max_length=2000)
-    topics: list[SummaryPoint] = Field(min_length=1, max_length=16)
-    decisions: list[SummaryPoint] = Field(default_factory=list, max_length=16)
-    actions: list[SummaryPoint] = Field(default_factory=list, max_length=20)
-    open_questions: list[SummaryPoint] = Field(default_factory=list, max_length=16)
+
+
+class SummaryRetry(Contract):
+    regenerate: bool = False
 
 
 class Claim(Contract):

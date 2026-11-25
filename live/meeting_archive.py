@@ -5,12 +5,11 @@ import re
 import time
 from datetime import datetime
 from difflib import SequenceMatcher
-from pathlib import Path
 
 from live.artifact_writer import digest
 from live.recording_archive import RecordingArchive, identity
 from live.store import LiveError, require, uid
-from live.workbench_contracts import MeetingSummary
+from live.workbench_contracts import MeetingSummary, SUMMARY_SECTIONS
 
 
 SOURCE_LABELS = {"system": "电脑声音", "microphone": "麦克风", "file": "导入音频"}
@@ -77,13 +76,6 @@ def transcript_anchor(segment_id, revision):
     return "transcript-" + digest(f"{segment_id}:{revision}")[:16]
 
 
-def short_quote(text, limit=72):
-    text = re.sub(r"\s+", " ", str(text or "")).strip()
-    if len(text) <= limit:
-        return text
-    return text[: max(1, limit - 1)] + "…"
-
-
 def requires_expanded_overview(segments):
     """Require the expanded overview when there is enough transcript to summarize."""
     return len(segments) >= 3 and sum(len(str(s.get("text", ""))) for s in segments) >= 240
@@ -107,83 +99,61 @@ def render_transcript(meeting, segments):
     return "\n".join(lines)
 
 
-def render_source_ref(ref, labels, segments_by_key, transcript):
-    """Render a readable reference while retaining a legacy fallback."""
-    if isinstance(ref, str):
-        return ref
-    segment_id = ref.get("segment_id", "")
-    revision = ref.get("revision")
-    segment = segments_by_key.get((segment_id, revision))
-    if segment is None:
-        return f"{segment_id}@{revision}" if segment_id else "未提供"
-    label = labels.get(segment_id) or f"{segment_id}@{revision}"
-    detail = f"{label} · {clock(segment.get('audio_start_ms'))} · “{short_quote(segment.get('text'))}”"
-    if transcript:
-        from urllib.parse import quote
-        target = quote(Path(transcript).name) + "#" + transcript_anchor(segment_id, revision)
-        return f"{detail}（[定位原文]({target})）"
-    return detail
-
-
-def render_summary(meeting, segments, result=None, status="local_only"):
-    labels = {s["id"]: f"S{i:04d}" for i, s in enumerate(segments, 1)}
-    segments_by_key = {(s["id"], s["revision"]): s for s in segments}
+def render_summary(meeting, segments, result=None, status="local_only", *, overview_needs_review=False):
     lines = ["# " + meeting["title"] + " · 会议纪要", "", "> 根据会议转录整理，供参会者核对；不替代正式确认。", "",
-             "- 会议日期：" + datetime.fromtimestamp(meeting["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M"),
-             f"- 转录片段：{len(segments)}", ""]
-    transcript = meeting.get("base_files", {}).get("transcript", {}).get("path")
-    if transcript:
-        from urllib.parse import quote
-        lines += ["[查看全量转录](" + quote(Path(transcript).name) + ")", ""]
+             "- 会议日期：" + datetime.fromtimestamp(meeting["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M"), ""]
     if result is not None:
-        lines += ["## 会议概述", "", result.get("overview", "未生成会议概述。"), ""]
+        lines += ["## 会议概述", ""]
+        if overview_needs_review:
+            lines += ["> 概述待完善，可在应用中单独补写。", ""]
+        if overview := result.get("overview", "").strip():
+            lines += [overview, ""]
         for key, title in (("topics", "讨论要点"), ("decisions", "明确决定"), ("actions", "后续行动"), ("open_questions", "未决问题")):
             lines += ["## " + title, ""]
-            for item in result.get(key, []):
-                refs = "、".join(render_source_ref(r, labels, segments_by_key, transcript)
-                                 for r in item.get("source_refs", []))
-                suffix = f"（依据：{refs}）" if refs else ""
-                lines += ["- " + item["text"] + suffix]
-            if not result.get(key):
+            items = result.get(key, [])
+            if items:
+                lines.extend("- " + item["text"] for item in items)
+            else:
                 lines += ["转录中未提取到明确内容。"]
             lines += [""]
     else:
-        statuses = {"pending": "AI 总结正在等待生成。以下为本机原话摘录，尚未归纳决定或待办。",
-                    "running": "AI 总结正在生成。以下为本机原话摘录。",
-                    "failed": "AI 总结生成失败；已保留本机摘录，可在应用中重试。",
+        statuses = {"pending": "AI 总结正在等待生成。",
+                    "running": "AI 总结正在生成。",
+                    "failed": "AI 总结生成失败，可在应用中重试。",
                     "outcome_unknown": "AI 总结请求被中断，结果未知；未自动重复调用，可在应用中重试。",
-                    "local_only": "未启用本场模型处理。以下为本机原话摘录，未生成 AI 归纳。",
-                    "permission_revoked": "本场模型授权已关闭，已停止后续总结请求。以下为本机原话摘录。"}
+                    "local_only": "本场未启用 AI 总结。",
+                    "permission_revoked": "本场模型授权已关闭，已停止后续总结请求。"}
         if meeting["state"] == "active" and meeting.get("permissions", {}).get("model"):
-            statuses["local_only"] = "会议尚未结束。以下为本机原话摘录，结束会议后整理 AI 总结。"
-        lines += [statuses.get(status, statuses["local_only"]), "", "## 讨论摘录", ""]
-        selected = sorted({round(i * (len(segments) - 1) / min(11, len(segments) - 1)) for i in range(min(12, len(segments)))}) if len(segments) > 1 else list(range(len(segments)))
-        for i in selected:
-            lines += [f"- {segments[i]['text']}（原话：S{i + 1:04d}）"]
+            statuses["local_only"] = "会议尚未结束，结束后将整理 AI 总结。"
+        lines += [statuses.get(status, statuses["local_only"]), ""]
         if not segments:
-            lines += ["没有已确认的转录内容，无法生成有依据的纪要。请先检查录音和识别状态。"]
-        lines += ["", "## 决定与后续行动", "", "尚未归纳；请结合全量转录确认，未推断负责人、期限或会议结论。", ""]
+            lines += ["没有已确认的转录内容，请检查录音和识别状态。", ""]
     return "\n".join(lines)
 
 
-def validate_overview(overview):
-    compact = re.sub(r"\s+", "", overview)
-    _summary_require(180 <= len(compact) <= 240, "会议概述应控制在180至240个中文字符左右", "overview_length")
-    required_topics = ("目的", "范围", "讨论", "决定", "后续", "未决")
-    _summary_require(sum(term in compact for term in required_topics) >= 4,
-                     "会议概述应覆盖目的范围、讨论过程、决定行动和未决边界", "overview_coverage")
+def overview_needs_review(overview, segments):
+    length = len(re.sub(r"\s+", "", overview))
+    return length == 0 or (requires_expanded_overview(segments) and not 180 <= length <= 240)
+
+
+def validate_overview(overview, segments):
+    _summary_require(not overview_needs_review(overview, segments), "会议概述为空或篇幅不符合要求", "overview_length")
     return overview
 
 
-def validate_summary(result, segments, *, require_overview=False):
+def validate_summary(result, segments):
     result = MeetingSummary.model_validate(result).model_dump()
-    if require_overview:
-        validate_overview(result["overview"])
-    visible = {(s["id"], s["revision"]) for s in segments}
-    for key in ("topics", "decisions", "actions", "open_questions"):
+    visible = {(s["id"], s["revision"]): s["text"] for s in segments}
+    for key in SUMMARY_SECTIONS:
         for item in result[key]:
-            _summary_require(all((r["segment_id"], r["revision"]) in visible for r in item["source_refs"]),
-                             "纪要依据不在本次转录中", "source_ref_not_in_transcript")
+            for ref in item["source_refs"]:
+                identity = (ref["segment_id"], ref["revision"])
+                _summary_require(identity in visible, "纪要依据不在本次转录中", "source_ref_not_in_transcript")
+                if ref["quote"]:
+                    _summary_require(ref["quote"] in visible[identity],
+                                     "纪要引文与转录不一致", "summary_quote_not_in_transcript")
+                else:
+                    del ref["quote"]  # Preserve the archived shape of older results.
     return result
 
 
@@ -276,14 +246,16 @@ class MeetingArchive(RecordingArchive):
                 if not self._saved_file_exists(m, transcript):
                     self._archive_file(db, m, "transcript", render_transcript(m, segments), "02-全量转录")
                 if not self._saved_file_exists(m, summary_file):
-                    self._archive_file(db, m, "summary", render_summary(m, segments, old.get("result"), old["state"]), "03-会议纪要" if old.get("result") else "03-会议纪要-本机摘录")
+                    self._archive_file(db, m, "summary", render_summary(m, segments, old.get("result"), old["state"],
+                        overview_needs_review=old.get("overview_needs_review", False)),
+                        "03-会议纪要" if old.get("result") else "03-会议纪要-状态")
                 self._save(db, m)
             else:
                 self._archive_file(db, m, "transcript", render_transcript(m, segments), "02-全量转录")
                 permitted = bool(m.get("permissions", {}).get("model") and self.capabilities.get("model_enabled"))
                 state = "pending" if permitted and segments and m["state"] == "ended" else "local_only"
                 m["summary"] = {"state": state, "fingerprint": fingerprint, "generation": old.get("generation", 0) + 1}
-                self._archive_file(db, m, "summary", render_summary(m, segments, status=state), "03-会议纪要-本机摘录")
+                self._archive_file(db, m, "summary", render_summary(m, segments, status=state), "03-会议纪要-状态")
                 self._event(db, m, "meeting.archived", {"segment_count": len(segments)})
                 self._save(db, m)
         self.publish_index(mid)
@@ -297,22 +269,28 @@ class MeetingArchive(RecordingArchive):
                 if m["project_id"] != principal["project_id"] or m["state"] != "ended" or summary.get("state") != "pending":
                     continue
                 if not m.get("permissions", {}).get("model") or not self.capabilities.get("model_enabled"):
-                    summary["state"] = "local_only"; self._save(db, m); continue
+                    summary["state"] = "completed" if summary.get("result") else "local_only"
+                    self._save(db, m)
+                    continue
                 segments = final_segments(self, db, m)
-                current = {(s['id'], s['revision']) for s in segments}
-                follow_ups = []
-                for question in self._items(db, 'wb_question', m['id']):
-                    result = question.get('result') or {}
-                    if question.get('basis_stale') or result.get('meeting_resolution') != 'follow_up':
-                        continue
-                    refs = result.get('meeting_evidence', [])
-                    if refs and all((ref['segment_id'], ref['revision']) in current for ref in refs):
-                        follow_ups.append({'text': result['answer'], 'source_refs': [
-                            {key: ref[key] for key in ('segment_id', 'revision')} for ref in refs]})
                 summary.update(state="running", lease_id=uid("summary"))
+                work = {"meeting": m, "segments": segments, "fingerprint": summary["fingerprint"], "lease_id": summary["lease_id"]}
+                if summary.get("overview_needs_review") and summary.get("result") and not summary.get("regenerate"):
+                    work["overview_draft"] = summary["result"]
+                else:
+                    current = {(s['id'], s['revision']) for s in segments}
+                    follow_ups = []
+                    for question in self._items(db, 'wb_question', m['id']):
+                        result = question.get('result') or {}
+                        if question.get('basis_stale') or result.get('meeting_resolution') != 'follow_up':
+                            continue
+                        refs = result.get('meeting_evidence', [])
+                        if refs and all((ref['segment_id'], ref['revision']) in current for ref in refs):
+                            follow_ups.append({'text': result['answer'], 'source_refs': [
+                                {key: ref[key] for key in ('segment_id', 'revision')} for ref in refs]})
+                    work["follow_ups"] = follow_ups
                 self._save(db, m)
-                return {"meeting": m, "segments": segments, "follow_ups": follow_ups,
-                        "fingerprint": summary["fingerprint"], "lease_id": summary["lease_id"]}
+                return work
         return None
 
     def check_summary_work(self, principal, work):
@@ -331,7 +309,7 @@ class MeetingArchive(RecordingArchive):
 
     def finish_summary(self, principal, work, result=None, error=None, error_details=None):
         if result is not None:
-            result = validate_summary(result, work["segments"], require_overview=requires_expanded_overview(work["segments"]))
+            result = validate_summary(result, work["segments"])
         with self.store.transaction() as db:
             m = self._meeting(db, principal, work["meeting"]["id"], True)
             self.store._acl(db, principal, m["project_id"], {"agent"})
@@ -341,14 +319,22 @@ class MeetingArchive(RecordingArchive):
                     and transcript_fingerprint(final_segments(self, db, m)) == work["fingerprint"], "纪要上下文已变化，忽略旧结果", 409)
             if not m.get("permissions", {}).get("model") or not self.capabilities.get("model_enabled"):
                 result, error, error_details = None, "permission_revoked", None
-            summary.update(state="completed" if result is not None else "permission_revoked" if error == "permission_revoked" else "outcome_unknown" if error == "outcome_unknown" else "failed",
-                           error=error, error_details=error_details, result=result, finished_at=time.time())
-            self._archive_file(db, m, "summary", render_summary(m, work["segments"], result, summary["state"]), "03-会议纪要" if result is not None else "03-会议纪要-本机摘录")
+            kept_draft = result is None and bool(summary.get("result"))
+            summary.pop("regenerate", None)
+            if not kept_draft:
+                summary["result"] = result
+                summary["overview_needs_review"] = result is not None and overview_needs_review(result["overview"], work["segments"])
+            summary.update(state="completed" if summary["result"] is not None else "permission_revoked" if error == "permission_revoked" else "outcome_unknown" if error == "outcome_unknown" else "failed",
+                           error=error, error_details=error_details, finished_at=time.time())
+            if not kept_draft:
+                self._archive_file(db, m, "summary", render_summary(m, work["segments"], result, summary["state"],
+                    overview_needs_review=summary["overview_needs_review"]),
+                    "03-会议纪要" if result is not None else "03-会议纪要-状态")
             self._event(db, m, "summary." + summary["state"], {})
             self._save(db, m)
         self.publish_index(m["id"])
 
-    def retry_summary(self, principal, mid):
+    def retry_summary(self, principal, mid, *, regenerate=False):
         with self.store.transaction() as db:
             m = self._meeting(db, principal, mid, True)
             self.store._acl(db, principal, m["project_id"], {"owner"})
@@ -357,10 +343,16 @@ class MeetingArchive(RecordingArchive):
             require(m.get("summary", {}).get("state") not in {"pending", "running"}, "纪要正在生成", 409)
             segments = final_segments(self, db, m)
             require(bool(segments), "没有可总结的转录内容", 409)
-            self._archive_file(db, m, "transcript", render_transcript(m, segments), "02-全量转录")
-            m["summary"] = {"state": "pending", "fingerprint": transcript_fingerprint(segments),
-                            "generation": m.get("summary", {}).get("generation", 0) + 1}
-            self._archive_file(db, m, "summary", render_summary(m, segments, status="pending"), "03-会议纪要-本机摘录")
+            old = m.get("summary", {})
+            fingerprint = transcript_fingerprint(segments)
+            m["summary"] = {"state": "pending", "fingerprint": fingerprint, "generation": old.get("generation", 0) + 1}
+            if old.get("result") and old.get("fingerprint") == fingerprint:
+                m["summary"].update(result=old["result"], overview_needs_review=old.get("overview_needs_review", False))
+                if regenerate:
+                    m["summary"]["regenerate"] = True
+            else:
+                self._archive_file(db, m, "transcript", render_transcript(m, segments), "02-全量转录")
+                self._archive_file(db, m, "summary", render_summary(m, segments, status="pending"), "03-会议纪要-状态")
             self._event(db, m, "summary.requested", {})
             self._save(db, m)
         self.publish_index(mid)
@@ -387,4 +379,16 @@ class MeetingArchive(RecordingArchive):
             require(record is not None, "结束会议后自动生成会议文件", 404)
             path = self.writer_for(m).path(record["path"])
             require(path.is_file(), "文件未成功保存，请检查目录权限后重试", 409)
-            return {"content": path.read_text(encoding="utf-8"), "filename": path.name, "path": str(path), "state": record["state"]}
+            content = path.read_text(encoding="utf-8")
+            filename = path.name
+            # Older generated minutes recorded a segment count in the header.
+            # Render from the saved result only when the file still matches the archive.
+            if kind == "summary" and "\n- 转录片段：" in content and record.get("hash") == digest(content):
+                summary = m.get("summary", {})
+                result = summary.get("result")
+                if result is not None or "\n## 讨论摘录\n" in content:
+                    segments = final_segments(self, db, m) if result is None else []
+                    content = render_summary(m, segments, result, summary.get("state", "local_only"),
+                                             overview_needs_review=summary.get("overview_needs_review", False))
+                    filename = filename.replace("03-会议纪要-本机摘录", "03-会议纪要-状态", 1)
+            return {"content": content, "filename": filename, "path": str(path), "state": record["state"]}

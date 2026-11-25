@@ -7,7 +7,8 @@ from pydantic import ValidationError
 
 FIELDS = {"actions", "title", "question_id", "expected_version", "source_refs", "segment_id", "revision", "public_query",
           "answer", "claims", "text", "source_id", "quote", "uncertainty", "evidence_status", "overview", "topics",
-          "decisions", "open_questions", "sources", "response", "quote_id", "brief", "short_answer", "key_points", "caveat", "kind", "claim_indices"}
+          "decisions", "open_questions", "sources", "response", "quote_id", "brief", "short_answer", "key_points", "caveat", "kind", "claim_indices",
+          "evidence_ids"}
 LABELS = {"actions": "问题识别动作", "title": "问题标题", "source_refs": "发言依据", "public_query": "公开检索词",
           "answer": "参考回答", "claims": "佐证", "quote": "原文引用", "uncertainty": "限制说明", "brief": "会中短答"}
 
@@ -37,7 +38,7 @@ def issues_for(exc):
         return [{"field": "response", "code": "invalid_json"}]
     details = getattr(exc, "details", {})
     summary_fields = {"overview_length": "overview", "overview_coverage": "overview",
-                      "source_ref_not_in_transcript": "source_refs"}
+                      "source_ref_not_in_transcript": "source_refs", "summary_quote_not_in_transcript": "source_refs"}
     if isinstance(details, dict) and details.get("code") in summary_fields:
         return [{"field": summary_fields[details["code"]], "code": details["code"]}]
     code = "output_incomplete" if str(exc) == "model output incomplete" else "invalid_output"
@@ -91,6 +92,7 @@ def failure_message(details):
                 "overview_length": "会议概述长度不符合要求",
                 "overview_coverage": "会议概述没有覆盖会议目的、讨论、决定、后续行动和未决边界",
                 "source_ref_not_in_transcript": "纪要依据的片段编号或版本不在本次输入中",
+                "summary_quote_not_in_transcript": "纪要引文与转录不一致",
                 "extra_forbidden": f"{label}包含不支持的字段", "missing": f"{label}缺少必要字段"}.get(issue["code"], f"{label}格式不符合要求"))
     corrected = "；已自动修正一次，仍未通过" if details.get("correction_attempts") else ""
     return stage + "未通过校验：" + "；".join(reasons) + corrected + "。"

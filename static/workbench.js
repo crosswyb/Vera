@@ -1906,7 +1906,8 @@
       const value = await api(`/live/v2/meetings/${encodeURIComponent(mid)}/files/${kind}`);
       if (!current()) return;
       text($('meeting-file-title'), kind === 'summary' ? '会议纪要' : '全量转录');
-      renderMeetingMarkdown(value.content); $('meeting-file-preview').hidden = false;
+      renderMeetingMarkdown(value.content, kind);
+      $('meeting-file-preview').hidden = false;
       if (scroll) $('meeting-file-preview').scrollIntoView({block:'nearest'});
     } catch (error) { if (current()) text($('archive-error'), error.message); }
   }
@@ -1927,11 +1928,12 @@
     const archiving = recordings.some(r => ['pending', 'converting', 'cleanup'].includes(r.archive_state));
     const archiveFailed = recordings.some(r => ['failed', 'cleanup_failed'].includes(r.archive_state));
     const summaryRunning = ['pending', 'running'].includes(meeting.summary?.state);
-    const complete = saved.length > 0 && recordings.every(r => r.state === 'saved' && (!r.archive_state || r.archive_state === 'saved')) && files.transcript?.state === 'saved' && files.summary?.state === 'saved' && meeting.summary?.state === 'completed';
+    const overviewNeedsReview = meeting.summary?.overview_needs_review;
+    const complete = saved.length > 0 && recordings.every(r => r.state === 'saved' && (!r.archive_state || r.archive_state === 'saved')) && files.transcript?.state === 'saved' && files.summary?.state === 'saved' && meeting.summary?.state === 'completed' && !overviewNeedsReview;
     text($('archive-status'), unavailable ? '保存位置不可用' : ended ? complete ? '已归档' : missing ? '录音不完整' : archiveFailed ? '录音归档失败' : !saved.length ? '录音未保存' : archiving || summaryRunning ? '正在归档' : '资料已保存 · 请核对下方状态' : '会后自动归档');
     text($('archive-guidance'), unavailable ? '原保存目录不可用，录音是否完整尚未核实；请连接原磁盘后重开应用。' : ended ? !saved.length ? '本场没有录音文件；此前未录下的音频无法从文字恢复。已保存文件可在下方查看。' : '录音和已保存的文档位于本场会议文件夹，状态见下方。' : '收听时同步保存原始音频；结束会议后自动保存完整转录并整理纪要。');
-    const names = {pending:'等待生成 AI 总结', running:'正在整理 AI 总结', completed:'AI 总结已保存，请核对', failed:'AI 总结失败 · 已保留本机摘录', outcome_unknown:'AI 请求被中断 · 可重试', permission_revoked:'本场模型授权已关闭 · 已停止总结并保留本机摘录；重新授权后可重试', local_only:'本机摘录已保存 · 未启用 AI 总结'};
-    if (!ended && meeting.permissions?.model) names.local_only = '本机摘录已保存 · 结束后整理纪要';
+    const names = {pending:'等待生成 AI 总结', running:'正在整理 AI 总结', completed:'AI 总结已保存，请核对', failed:'AI 总结失败 · 可重试', outcome_unknown:'AI 请求被中断 · 可重试', permission_revoked:'本场模型授权已关闭 · 重新授权后可重试', local_only:'本场未启用 AI 总结'};
+    if (!ended && meeting.permissions?.model) names.local_only = '会议结束后整理纪要';
     const row = (title, status) => {
       const node = element('div', 'meeting-file-row');
       const copy = element('div'); copy.append(element('h3', '', title), element('p', '', status));
@@ -1980,7 +1982,22 @@
     transcript.actions.append(exportTranscript);
     const summaryState = meeting.summary?.state;
     const summaryFailureHint = summaryFailureReason(meeting.summary?.error_details);
-    const summaryStatus = files.summary?.state === 'save_failed' ? '纪要文件保存失败 · 请检查目录写入权限' : summaryState === 'failed' && summaryFailureHint ? `AI 总结失败 · ${summaryFailureHint} · 已保留本机摘录` : summaryState === 'outcome_unknown' && summaryFailureHint ? `AI 请求被中断 · ${summaryFailureHint} · 可重试` : names[summaryState] || (ended ? '旧版会议尚未生成纪要' : '结束会议后整理讨论要点、明确决定与后续行动');
+    let summaryStatus = names[summaryState] || (ended ? '旧版会议尚未生成纪要' : '结束会议后整理讨论要点、明确决定与后续行动');
+    if (files.summary?.state === 'save_failed') {
+      summaryStatus = '纪要文件保存失败 · 请检查目录写入权限';
+    } else if (summaryRunning && meeting.summary?.result) {
+      summaryStatus = meeting.summary.regenerate ? '正在重新整理 · 上一版纪要仍可查看'
+        : '正在补写概述 · 纪要正文已保存';
+    } else if (summaryState === 'completed' && meeting.summary?.error) {
+      summaryStatus = summaryFailureHint ? `本次整理未完成 · ${summaryFailureHint} · 已保留上一版纪要`
+        : '本次整理未完成 · 已保留上一版纪要';
+    } else if (overviewNeedsReview) {
+      summaryStatus = '纪要正文已保存 · 概述待完善';
+    } else if (summaryState === 'failed' && summaryFailureHint) {
+      summaryStatus = `AI 总结失败 · ${summaryFailureHint} · 可重试`;
+    } else if (summaryState === 'outcome_unknown' && summaryFailureHint) {
+      summaryStatus = `AI 请求被中断 · ${summaryFailureHint} · 可重试`;
+    }
     const summary = row('03  会议纪要', summaryStatus);
     summary.node.dataset.fileKind = 'summary';
     for (const [kind, target] of [['transcript', transcript], ['summary', summary]]) {
@@ -2007,13 +2024,21 @@
       }
     }
     if (ended && meeting.permissions?.model && state.home?.capabilities?.model_enabled && !['pending','running'].includes(meeting.summary?.state)) {
-      const retry = element('button', '', meeting.summary?.state === 'completed' ? '重新整理' : '生成 AI 总结');
-      retry.addEventListener('click', async () => {
-        retry.disabled = true; text($('archive-error'), '');
-        try { await api(`/live/v2/meetings/${encodeURIComponent(meeting.id)}/summary`, {method:'POST', body:{}}); await refreshNow(); }
-        catch (error) { text($('archive-error'), error.message); retry.disabled = false; }
-      });
-      summary.actions.append(retry);
+      const buttons = [];
+      const addSummaryAction = (label, body) => {
+        const button = element('button', '', label);
+        button.addEventListener('click', async () => {
+          buttons.forEach(action => { action.disabled = true; });
+          text($('archive-error'), '');
+          try { await api(`/live/v2/meetings/${encodeURIComponent(meeting.id)}/summary`, {method:'POST', body}); await refreshNow(); }
+          catch (error) { text($('archive-error'), error.message); buttons.forEach(action => { action.disabled = false; }); }
+        });
+        buttons.push(button);
+        summary.actions.append(button);
+      };
+      if (overviewNeedsReview) addSummaryAction('补写概述', {});
+      if (summaryState === 'completed') addSummaryAction('重新整理', {regenerate: true});
+      else addSummaryAction('生成 AI 总结', {});
     }
     list.replaceChildren(audio.node, transcript.node, summary.node);
   }
@@ -2025,20 +2050,25 @@
       overview_length: '会议概述长度不符合要求',
       overview_coverage: '会议概述未覆盖会议目的、讨论、决定、后续行动和未决边界',
       source_ref_not_in_transcript: '模型引用了输入中不存在的转录片段',
+      summary_quote_not_in_transcript: '纪要引文与转录不一致',
       output_incomplete: '模型输出未完成或被输出上限截断',
       invalid_json: '模型未返回完整 JSON',
     };
     const reason = reasons[issue?.code] || details.label || '模型输出未通过校验';
     return details.correction_attempts ? `${reason}，自动修正后仍未通过校验` : reason;
   }
-  function renderMeetingMarkdown(content) {
+  function renderMeetingMarkdown(content, kind) {
     const fragment = document.createDocumentFragment();
     for (const line of content.split('\n')) {
       if (!line.trim()) continue;
+      if (kind === 'transcript' && /^<a id="transcript-[0-9a-f]{16}"><\/a>$/.test(line)) continue;
       const heading = line.match(/^(#{1,3})\s+(.+)$/);
-      if (heading) fragment.append(element(`h${Math.min(heading[1].length + 1, 4)}`, '', heading[2]));
-      else if (/^\[查看全量转录\]\(/.test(line)) continue;
-      else fragment.append(element(line.startsWith('> ') ? 'blockquote' : 'p', '', line.replace(/^>\s*/, '').replace(/^-\s*/, '• ')));
+      if (heading) {
+        fragment.append(element(`h${Math.min(heading[1].length + 1, 4)}`, '', heading[2]));
+      } else {
+        const prose = line.replace(/^>\s*/, '').replace(/^-\s*/, '• ');
+        fragment.append(element(line.startsWith('> ') ? 'blockquote' : 'p', '', prose));
+      }
     }
     $('meeting-file-content').replaceChildren(fragment);
   }

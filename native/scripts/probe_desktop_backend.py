@@ -167,7 +167,7 @@ def probe(backend):
             assert result["base_files"]["transcript"] == "02-全量转录.md"
             # This offline probe has no model. Do not label raw excerpts as an
             # AI summary or claim there is an audio recording without capture.
-            assert result["base_files"]["summary"] == "03-会议纪要-本机摘录.md"
+            assert result["base_files"]["summary"] == "03-会议纪要-状态.md"
             meeting_url = "/live/v2/meetings/" + meeting["id"]
             status, data = request(meeting_url, {"title": "Renamed frozen smoke"}, method="PATCH")
             renamed = json.loads(data)

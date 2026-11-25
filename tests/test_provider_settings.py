@@ -509,8 +509,10 @@ class ProviderSettingsTest(unittest.TestCase):
             if system.startswith(ANSWER_SYSTEM):
                 return completion({"answer": "没有可核验资料。", "claims": [], "uncertainty": [], "evidence_status": "insufficient",
                     "brief": {"short_answer": "没有可核验资料。", "key_points": [{"text": "仅用于合成验证。", "kind": "explanation", "claim_indices": []}], "caveat": "仅用于离线验证。"}})
-            segment = prompt.get("segments", [{"segment_id": "s0"}])[0]
-            return completion({"overview": "合成纪要。", "topics": [{"text": "合成要点。", "source_refs": [{"segment_id": segment["segment_id"], "revision": 1}]}],
+            if "chunk_notes" in prompt:
+                return completion(prompt["chunk_notes"][0])
+            segment = prompt["segments"][0]
+            return completion({"overview": "合成纪要。", "topics": [{"text": "合成要点。", "evidence_ids": [segment["evidence_id"]]}],
                                "decisions": [], "actions": [], "open_questions": []})
         with patch("requests.Session.post", side_effect=go) as post:
             model = TextModel(self.budget(), config)
