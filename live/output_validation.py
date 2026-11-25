@@ -35,13 +35,21 @@ def issues_for(exc):
         return issues
     if isinstance(exc, json.JSONDecodeError):
         return [{"field": "response", "code": "invalid_json"}]
+    details = getattr(exc, "details", {})
+    summary_fields = {"overview_length": "overview", "overview_coverage": "overview",
+                      "source_ref_not_in_transcript": "source_refs"}
+    if isinstance(details, dict) and details.get("code") in summary_fields:
+        return [{"field": summary_fields[details["code"]], "code": details["code"]}]
     code = "output_incomplete" if str(exc) == "model output incomplete" else "invalid_output"
     return [{"field": "response", "code": code}]
 
 
 def failure_details(exc, stage):
-    return output_presentation({"stage": stage, "issues": issues_for(exc), "correction_attempts": getattr(exc, "corrections", 0),
+    details = output_presentation({"stage": stage, "issues": issues_for(exc), "correction_attempts": getattr(exc, "corrections", 0),
             **({"response": exc.response} if isinstance(exc, OutputValidationError) and exc.response else {})})
+    if stage == "summarizing":
+        details["message"] = failure_message(details)
+    return details
 
 
 def output_presentation(details):
@@ -80,6 +88,9 @@ def failure_message(details):
                 "output_incomplete": "模型输出未完成或被输出上限截断", "invalid_json": "模型未返回完整 JSON",
                 "quote_not_in_new_segment": "问题依据未匹配所引用的新发言原话",
                 "source_not_in_new_segment": "问题引用的发言编号或版本不在本批新发言中",
+                "overview_length": "会议概述长度不符合要求",
+                "overview_coverage": "会议概述没有覆盖会议目的、讨论、决定、后续行动和未决边界",
+                "source_ref_not_in_transcript": "纪要依据的片段编号或版本不在本次输入中",
                 "extra_forbidden": f"{label}包含不支持的字段", "missing": f"{label}缺少必要字段"}.get(issue["code"], f"{label}格式不符合要求"))
     corrected = "；已自动修正一次，仍未通过" if details.get("correction_attempts") else ""
     return stage + "未通过校验：" + "；".join(reasons) + corrected + "。"

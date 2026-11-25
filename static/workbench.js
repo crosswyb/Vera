@@ -1978,7 +1978,10 @@
       catch (error) { text($('archive-error'), error.message); }
     });
     transcript.actions.append(exportTranscript);
-    const summary = row('03  会议纪要', files.summary?.state === 'save_failed' ? '纪要文件保存失败 · 请检查目录写入权限' : names[meeting.summary?.state] || (ended ? '旧版会议尚未生成纪要' : '结束会议后整理讨论要点、明确决定与后续行动'));
+    const summaryState = meeting.summary?.state;
+    const summaryFailureHint = summaryFailureReason(meeting.summary?.error_details);
+    const summaryStatus = files.summary?.state === 'save_failed' ? '纪要文件保存失败 · 请检查目录写入权限' : summaryState === 'failed' && summaryFailureHint ? `AI 总结失败 · ${summaryFailureHint} · 已保留本机摘录` : summaryState === 'outcome_unknown' && summaryFailureHint ? `AI 请求被中断 · ${summaryFailureHint} · 可重试` : names[summaryState] || (ended ? '旧版会议尚未生成纪要' : '结束会议后整理讨论要点、明确决定与后续行动');
+    const summary = row('03  会议纪要', summaryStatus);
     summary.node.dataset.fileKind = 'summary';
     for (const [kind, target] of [['transcript', transcript], ['summary', summary]]) {
       if (!files[kind]) continue;
@@ -2013,6 +2016,20 @@
       summary.actions.append(retry);
     }
     list.replaceChildren(audio.node, transcript.node, summary.node);
+  }
+  function summaryFailureReason(details) {
+    if (!details) return '';
+    if (details.message) return details.message;
+    const issue = details.issues?.[0];
+    const reasons = {
+      overview_length: '会议概述长度不符合要求',
+      overview_coverage: '会议概述未覆盖会议目的、讨论、决定、后续行动和未决边界',
+      source_ref_not_in_transcript: '模型引用了输入中不存在的转录片段',
+      output_incomplete: '模型输出未完成或被输出上限截断',
+      invalid_json: '模型未返回完整 JSON',
+    };
+    const reason = reasons[issue?.code] || details.label || '模型输出未通过校验';
+    return details.correction_attempts ? `${reason}，自动修正后仍未通过校验` : reason;
   }
   function renderMeetingMarkdown(content) {
     const fragment = document.createDocumentFragment();

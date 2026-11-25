@@ -98,6 +98,9 @@ def describe_failure(exc, stage, service="model"):
     diagnostic = getattr(exc, "diagnostic", None)
     if isinstance(diagnostic, dict):
         return {**diagnostic, "stage": stage}
+    contract_details = getattr(exc, "details", None)
+    if isinstance(exc, ValueError) and isinstance(contract_details, dict) and contract_details.get("code"):
+        return failure_details(exc, stage)
     status = getattr(exc, "status", None)
     if type(status) is int and 100 <= status <= 599:
         labels = {401: "鉴权失败", 403: "访问被拒绝", 404: "接口或模型不存在", 429: "限流或额度不足"}

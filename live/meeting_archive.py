@@ -16,6 +16,15 @@ from live.workbench_contracts import MeetingSummary
 SOURCE_LABELS = {"system": "电脑声音", "microphone": "麦克风", "file": "导入音频"}
 
 
+class SummaryValidationError(LiveError, ValueError):
+    """A summary contract error that can be corrected before publication."""
+
+
+def _summary_require(condition, message, code):
+    if not condition:
+        raise SummaryValidationError(message, 409, code=code)
+
+
 def distinct_utterances(segments):
     """Filter likely speaker bleed in model input while keeping all archived originals."""
     kept = {}
@@ -157,18 +166,24 @@ def render_summary(meeting, segments, result=None, status="local_only"):
     return "\n".join(lines)
 
 
+def validate_overview(overview):
+    compact = re.sub(r"\s+", "", overview)
+    _summary_require(180 <= len(compact) <= 240, "会议概述应控制在180至240个中文字符左右", "overview_length")
+    required_topics = ("目的", "范围", "讨论", "决定", "后续", "未决")
+    _summary_require(sum(term in compact for term in required_topics) >= 4,
+                     "会议概述应覆盖目的范围、讨论过程、决定行动和未决边界", "overview_coverage")
+    return overview
+
+
 def validate_summary(result, segments, *, require_overview=False):
     result = MeetingSummary.model_validate(result).model_dump()
     if require_overview:
-        overview = re.sub(r"\s+", "", result["overview"])
-        require(180 <= len(overview) <= 240, "会议概述应控制在180至240个中文字符左右", 409)
-        required_topics = ("目的", "范围", "讨论", "决定", "后续", "未决")
-        require(sum(term in overview for term in required_topics) >= 4,
-                "会议概述应覆盖目的范围、讨论过程、决定行动和未决边界", 409)
+        validate_overview(result["overview"])
     visible = {(s["id"], s["revision"]) for s in segments}
     for key in ("topics", "decisions", "actions", "open_questions"):
         for item in result[key]:
-            require(all((r["segment_id"], r["revision"]) in visible for r in item["source_refs"]), "纪要依据不在本次转录中", 409)
+            _summary_require(all((r["segment_id"], r["revision"]) in visible for r in item["source_refs"]),
+                             "纪要依据不在本次转录中", "source_ref_not_in_transcript")
     return result
 
 
@@ -314,7 +329,7 @@ class MeetingArchive(RecordingArchive):
                     and transcript_fingerprint(final_segments(self, db, m)) == work["fingerprint"],
                     "纪要上下文已变化，已停止后续总结请求", 409)
 
-    def finish_summary(self, principal, work, result=None, error=None):
+    def finish_summary(self, principal, work, result=None, error=None, error_details=None):
         if result is not None:
             result = validate_summary(result, work["segments"], require_overview=requires_expanded_overview(work["segments"]))
         with self.store.transaction() as db:
@@ -325,9 +340,9 @@ class MeetingArchive(RecordingArchive):
                     and summary["fingerprint"] == work["fingerprint"]
                     and transcript_fingerprint(final_segments(self, db, m)) == work["fingerprint"], "纪要上下文已变化，忽略旧结果", 409)
             if not m.get("permissions", {}).get("model") or not self.capabilities.get("model_enabled"):
-                result, error = None, "permission_revoked"
+                result, error, error_details = None, "permission_revoked", None
             summary.update(state="completed" if result is not None else "permission_revoked" if error == "permission_revoked" else "outcome_unknown" if error == "outcome_unknown" else "failed",
-                           error=error, result=result, finished_at=time.time())
+                           error=error, error_details=error_details, result=result, finished_at=time.time())
             self._archive_file(db, m, "summary", render_summary(m, work["segments"], result, summary["state"]), "03-会议纪要" if result is not None else "03-会议纪要-本机摘录")
             self._event(db, m, "summary." + summary["state"], {})
             self._save(db, m)

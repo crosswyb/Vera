@@ -21,7 +21,7 @@ from live.failure_diagnostics import RequestOutcomeUnknown, describe_failure, re
 from live.detection import DetectionBatch, normalize_question_reference, parse_detection, quote_options
 from live.original_evidence import official_source, target_for
 from live.output_validation import OutputValidationError, issues_for
-from live.meeting_archive import distinct_utterances, requires_expanded_overview, validate_summary
+from live.meeting_archive import SummaryValidationError, distinct_utterances, requires_expanded_overview, validate_summary
 from live.provider_settings import from_environment
 from live.source_reader import DeepSeekSearch, DemoResearcher, Researcher, SearchOutcomeUnknown, TavilySearch, is_grounded_explanation, needs_internal_records, quote_catalog, relevance_terms, validate_result
 from live.store import LiveError
@@ -227,7 +227,7 @@ class TextModel:
                 # request. Unknown network outcomes never enter this branch.
                 prompt = {**content, "previous_response": raw, "validation_feedback": issues,
                           "correction_instruction": ("保持原 actions 的数量和顺序，仅修正标记的项目。grounding_quote 必须从所引新发言中逐字复制。"
-                              if detection else "根据全部校验错误修正输出，仅返回符合Schema的JSON。查证引文优先从quote_options选择已有编号，不要重写原文或编造编号。不能降低证据状态来掩盖引用错误。")}
+                              if detection else "根据全部校验错误修正输出，仅返回符合Schema的JSON。纪要的 source_refs 只能使用当前输入 segments 中逐字提供的 segment_id 和 revision，不得引用其他批次的片段或自行生成编号。不能删掉有依据的讨论要点来掩盖校验错误。")}
 
     def decisions(self, work, *, before_request=None):
         content = {"recent_segments": [{"segment_id": s["id"], "revision": s["revision"], "text": s["text"], "source": s.get('source'), "truncated": s.get("truncated", False),
@@ -396,10 +396,11 @@ class TextModel:
             batches.append(batch)
         notes = []
         guard = work.get("before_request")
-        for batch in batches:
+        for batch_index, batch in enumerate(batches, 1):
             if guard:
                 guard()
-            content = {"meeting_title": work["meeting"]["title"], "segments": [
+            content = {"meeting_title": work["meeting"]["title"], "batch_index": batch_index,
+                       "batch_count": len(batches), "segments": [
                 {"segment_id": s["id"], "revision": s["revision"], "text": s["text"]} for s in batch]}
             visible = {(s['id'], s['revision']) for s in batch}
             follow_ups = [item for item in work.get('follow_ups', []) if all(
@@ -407,6 +408,8 @@ class TextModel:
             if follow_ups:
                 content['follow_up_candidates'] = follow_ups
                 content['instruction'] = '按原话核对待办候选，有依据的行动写入actions，保留时间和条件。'
+            else:
+                content['instruction'] = '只引用当前批次 segments 中的 segment_id 和 revision，不得引用其他批次的片段或自行生成编号。'
             notes.append(self._structured(SUMMARY_SYSTEM, content, MeetingSummary, lambda value: validate_summary(value.model_dump(), batch),
                                           conversation_id=work["meeting"].get("id"), before_request=guard))
         while len(notes) > 1:
@@ -420,7 +423,21 @@ class TextModel:
                     MeetingSummary, lambda value: validate_summary(value.model_dump(), work["segments"]),
                     conversation_id=work["meeting"].get("id"), before_request=guard))
             notes = reduced
-        return validate_summary(notes[0], work["segments"], require_overview=requires_expanded_overview(work["segments"]))
+        require_overview = requires_expanded_overview(work["segments"])
+        try:
+            return validate_summary(notes[0], work["segments"], require_overview=require_overview)
+        except SummaryValidationError as exc:
+            if not require_overview:
+                raise
+            correction = {
+                "meeting_title": work["meeting"]["title"],
+                "previous_summary": notes[0],
+                "validation_feedback": issues_for(exc),
+                "instruction": "只修正会议概述，使其满足长度和内容覆盖要求。保留 topics、decisions、actions、open_questions 的原文和依据，不新增事实，不修改 source_refs。",
+            }
+            return self._structured(SUMMARY_SYSTEM, correction, MeetingSummary,
+                                    lambda value: validate_summary(value.model_dump(), work["segments"], require_overview=True),
+                                    conversation_id=work["meeting"].get("id"), before_request=guard)
 
 
 def demo_decisions(work):
@@ -658,10 +675,11 @@ class WorkbenchRuntime:
             if not self.stop_event.is_set():
                 self.wb.finish_summary(actor, work, result=result)
         except Exception as exc:
-            code = "outcome_unknown" if isinstance(exc, OutcomeUnknown) else "budget_exhausted" if isinstance(exc, RuntimeError) and "limit reached" in str(exc) else "model_contract_invalid" if isinstance(exc, (ValueError, ValidationError)) else "request_failed"
+            code = "outcome_unknown" if isinstance(exc, OutcomeUnknown) else "budget_exhausted" if isinstance(exc, RuntimeError) and "limit reached" in str(exc) else "model_contract_invalid" if isinstance(exc, (ValueError, ValidationError)) else "context_invalid" if isinstance(exc, LiveError) else "request_failed"
+            details = describe_failure(exc, "summarizing")
             if not self.stop_event.is_set():
                 try:
-                    self.wb.finish_summary(actor, work, error=code)
+                    self.wb.finish_summary(actor, work, error=code, error_details=details)
                 except LiveError:
                     pass  # A corrected/expired transcript invalidates late output.
 

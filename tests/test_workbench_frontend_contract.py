@@ -248,6 +248,11 @@ assert.equal($('speech-gap-items').children[0].children.find(n=>n.textContent ==
         required |= {'/live/v2/meetings/{}/' + p for p in ('snapshot', 'segments', 'transcript', 'utterances', 'questions', 'permissions', 'controls', 'demo', 'deletion', 'summary', 'files/{}', 'files/retry')}
         self.assertFalse(required - paths)
 
+    def test_meeting_summary_failure_exposes_structured_reason(self):
+        self.assertIn('summaryFailureReason', self.js)
+        self.assertIn('source_ref_not_in_transcript', self.js)
+        self.assertIn('自动修正后仍未通过校验', self.js)
+
     def test_storage_refresh_ignores_stale_sessions_and_reloads_after_native_change(self):
         """Exercise actual async loader: a picker event cannot be lost behind a GET."""
         script = r"""

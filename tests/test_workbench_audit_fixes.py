@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from live.model_budget import ModelBudget
+from live.meeting_archive import SummaryValidationError
 from live.original_evidence import article_number, original_result, standard_ids, target_for
 from live.provider_settings import ModelService
 from live.source_reader import DemoResearcher
@@ -301,6 +302,49 @@ class AuditFixTest(unittest.TestCase):
         with patch.object(model, "call", side_effect=response) as call, self.assertRaises(LiveError):
             model._structured("synthetic", {}, Decisions, before_request=guard)
         self.assertEqual(call.call_count, 1)
+
+    def test_summary_corrects_batch_reference_without_dropping_the_note(self):
+        model = TextModel(None)
+        work = {"meeting": {"id": "meeting", "title": "合成会议"}, "segments": [
+            {"id": "s1", "revision": 1, "text": "讨论采购范围。"}], "follow_ups": []}
+        invalid = {"overview": "合成概述", "topics": [{"text": "采购范围", "source_refs": [{"segment_id": "missing", "revision": 1}]}],
+                   "decisions": [], "actions": [], "open_questions": []}
+        valid = {"overview": "合成概述", "topics": [{"text": "采购范围", "source_refs": [{"segment_id": "s1", "revision": 1}]}],
+                 "decisions": [], "actions": [], "open_questions": []}
+        with patch.object(model, "call", side_effect=[invalid, valid]) as call:
+            result = model.summarize(work)
+        self.assertEqual(result["topics"][0]["source_refs"], [{"segment_id": "s1", "revision": 1}])
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(call.call_args_list[1].args[1]["validation_feedback"][0]["code"], "source_ref_not_in_transcript")
+
+    def test_summary_repairs_only_overview_after_merge(self):
+        model = TextModel(None)
+        segments = [{"id": f"s{n}", "revision": 1, "text": "这是一段用于合成测试的会议讨论内容。" * 6} for n in range(3)]
+        work = {"meeting": {"id": "meeting", "title": "合成会议"}, "segments": segments, "follow_ups": []}
+        first = {"overview": "短概述", "topics": [{"text": "采购范围", "source_refs": [{"segment_id": "s0", "revision": 1}]}],
+                 "decisions": [{"text": "保留原决定", "source_refs": [{"segment_id": "s1", "revision": 1}]}],
+                 "actions": [{"text": "保留原行动", "source_refs": [{"segment_id": "s2", "revision": 1}]}], "open_questions": []}
+        overview = "会议目的和范围是核对采购方案，讨论过程围绕实施条件、责任分工和验证安排展开，已经形成先完成本机验证再确认排期的决定，并明确后续行动与负责人，仍未确定的边界包括外部依赖、最终时间和验收条件。" * 2
+        corrected = {**first, "overview": overview}
+        with patch.object(model, "call", side_effect=[first, corrected]) as call:
+            result = model.summarize(work)
+        self.assertEqual(result["overview"], overview)
+        self.assertEqual(result["decisions"], first["decisions"])
+        self.assertEqual(result["actions"], first["actions"])
+        self.assertEqual(call.call_count, 2)
+
+    def test_summary_failure_persists_structured_reason_for_the_ui(self):
+        self.wb.utterance(self.owner, self.mid, Utterance(text="合成讨论内容。"))
+        self.wb.control(self.owner, self.mid, "end")
+        work = self.wb.summary_work(self.agent)
+        runtime = self.runtime()
+        error = SummaryValidationError("概述长度错误", 409, code="overview_length")
+        model = SimpleNamespace(summarize=Mock(side_effect=error))
+        runtime._summarize(self.agent, work, model)
+        summary = self.meeting()["summary"]
+        self.assertEqual(summary["state"], "failed")
+        self.assertEqual(summary["error"], "model_contract_invalid")
+        self.assertEqual(summary["error_details"]["issues"][0]["code"], "overview_length")
 
     def test_summary_result_returning_after_revocation_is_not_published(self):
         self.wb.utterance(self.owner, self.mid, Utterance(text="合成讨论。", segment_id="s"))
