@@ -1645,7 +1645,8 @@
     const issue = coordinatorIssue(meeting);
     const researchState = meeting?.coordinator_state;
     const postMeetingWork = state.snapshot?.automation_progress?.pending || researchState === 'running' || state.snapshot?.questions?.some(q => activeStates.has(q.state));
-    text($('questions-guidance'), ended ? !researchAvailable() ? '会议内容已清理，无法继续查证。' : issue ? '会后问题识别受阻，原因见上方提示。已有问题仍可单独查证。' : meeting?.research_paused ? '会议已结束，自动任务已暂停。恢复后会从剩余转写继续识别问题；已有问题也可单独重试。' : postMeetingWork ? '正在处理会后任务：继续分析剩余转写，并查证未完成的问题。' : '本场转写已分析完毕。可查看已有资料，或打开具体问题重试。' : meeting?.research_paused ? '自动查证已暂停。打开等待中的问题可立即查证，也可以手动添加或重试。' : ['scheduled', 'running'].includes(meeting?.coordinator_retry?.state) ? '正在恢复问题识别，将从未处理的发言继续。已有问题可照常查证。' : issue ? '自动问题识别受阻，原因见上方提示。已有问题仍可手动查证。' : synthetic ? '打开问题查看参考回答、来源与 Markdown。示例内容仅用于体验。' : !available ? '联网查证尚未就绪。你可以先添加问题，配置服务后再查证。' : researchState === 'running' ? '正在分析讨论，识别待查证的问题…' : researchState === 'pending' ? '等待分析新发言，识别后会显示在这里。' : '“调研一下”“找些来源”等明确请求会自动识别，也可以手动添加。');
+    $('questions-guidance').hidden = ended && researchAvailable() && !issue && Boolean(meeting?.research_paused);
+    text($('questions-guidance'), ended ? !researchAvailable() ? '会议内容已清理，无法继续查证。' : issue ? '会后问题识别受阻，原因见上方提示。已有问题仍可单独查证。' : postMeetingWork ? '正在处理会后任务：继续分析剩余转写，并查证未完成的问题。' : '本场转写已分析完毕。可查看已有资料，或打开具体问题重试。' : meeting?.research_paused ? '自动查证已暂停。打开等待中的问题可立即查证，也可以手动添加或重试。' : ['scheduled', 'running'].includes(meeting?.coordinator_retry?.state) ? '正在恢复问题识别，将从未处理的发言继续。已有问题可照常查证。' : issue ? '自动问题识别受阻，原因见上方提示。已有问题仍可手动查证。' : synthetic ? '打开问题查看参考回答、来源与 Markdown。示例内容仅用于体验。' : !available ? '联网查证尚未就绪。你可以先添加问题，配置服务后再查证。' : researchState === 'running' ? '正在分析讨论，识别待查证的问题…' : researchState === 'pending' ? '等待分析新发言，识别后会显示在这里。' : '“调研一下”“找些来源”等明确请求会自动识别，也可以手动添加。');
     const folderDisabled = !meetingFolderId();
     $('open-meeting-folder').disabled = folderDisabled;
     $('open-files-folder').disabled = folderDisabled;
@@ -1907,6 +1908,7 @@
       if (!current()) return;
       text($('meeting-file-title'), kind === 'summary' ? '会议纪要' : '全量转录');
       renderMeetingMarkdown(value.content, kind);
+      $('meeting-file-preview').dataset.fileKind = kind;
       $('meeting-file-preview').hidden = false;
       if (scroll) $('meeting-file-preview').scrollIntoView({block:'nearest'});
     } catch (error) { if (current()) text($('archive-error'), error.message); }
@@ -1939,7 +1941,7 @@
       const copy = element('div'); copy.append(element('h3', '', title), element('p', '', status));
       const actions = element('div', 'meeting-file-actions'); node.append(copy, actions); return {node, copy, actions};
     };
-    const audio = row('01  会议录音', unavailable ? '保存位置不可用 · 录音完整性待核实' : recording ? '正在保存到本机' : saved.length ? `${saved.length} 份录音${saved.some(r => r.state === 'partial') ? ' · 部分录音被中断' : ' · 已保存'}` : ended ? '本场没有已保存的录音' : '开始收听或导入音频后保存');
+    const audio = row('会议录音', unavailable ? '保存位置不可用 · 录音完整性待核实' : recording ? '正在保存到本机' : saved.length ? `${saved.length} 份录音${saved.some(r => r.state === 'partial') ? ' · 部分录音被中断' : ' · 已保存'}` : ended ? '本场没有已保存的录音' : '开始收听或导入音频后保存');
     if (recordings.length) {
       const clips = element('ul', 'meeting-recordings');
       recordings.forEach((r, index) => {
@@ -1973,7 +1975,7 @@
         audio.actions.append(retry);
       }
     }
-    const transcript = row('02  全量转录 · Markdown', files.transcript?.state === 'saved' ? '完整保存，包含全部最终转写片段' : files.transcript?.state === 'save_failed' ? '保存失败 · 可先导出转写，检查目录写入权限' : ended ? '旧版会议尚未归档，可导出转写' : '结束会议后自动保存');
+    const transcript = row('全量转录 · Markdown', files.transcript?.state === 'saved' ? '完整保存，包含全部最终转写片段' : files.transcript?.state === 'save_failed' ? '保存失败 · 可先导出转写，检查目录写入权限' : ended ? '旧版会议尚未归档，可导出转写' : '结束会议后自动保存');
     const exportTranscript = element('button', '', '导出转录');
     exportTranscript.addEventListener('click', async () => {
       try { const value = await api(`/live/v2/meetings/${encodeURIComponent(meeting.id)}/transcript`); downloadMarkdown(value.content, value.filename); }
@@ -1998,8 +2000,7 @@
     } else if (summaryState === 'outcome_unknown' && summaryFailureHint) {
       summaryStatus = `AI 请求被中断 · ${summaryFailureHint} · 可重试`;
     }
-    const summary = row('03  会议纪要', summaryStatus);
-    summary.node.dataset.fileKind = 'summary';
+    const summary = row('会议纪要', summaryStatus);
     for (const [kind, target] of [['transcript', transcript], ['summary', summary]]) {
       if (!files[kind]) continue;
       const preview = element('button', '', '查看' + (kind === 'summary' ? '纪要' : '转录'));
@@ -2287,7 +2288,7 @@
         meta.append(element('span', 'card-state-icon'), element('span', 'badge'), element('time'));
         const footer = element('div', 'card-footer');
         footer.append(element('span', 'card-stage'), element('span', 'priority'));
-        card.append(meta, element('span', 'card-title'), footer);
+        card.append(element('span', 'card-title'), meta, footer);
       }
       card.setAttribute('aria-pressed', String(question.id === state.selectedQuestionId));
       const held = automationHeld(question);
@@ -2299,8 +2300,11 @@
       card.querySelector('.badge').dataset.state = held ? 'paused' : question.state || '';
       text(card.querySelector('time'), time(question.created_at));
       text(card.querySelector('.card-title'), question.title || '未命名问题');
-      text(card.querySelector('.card-stage'), held ? '自动任务已暂停 · 可打开后立即查证' : question.state === 'backlog' ? '队列已满，等待执行' : ['running', 'failed', 'outcome_unknown', 'paused'].includes(question.state) ? question.error || stages[question.stage] || question.stage || '' : '');
-      text(card.querySelector('.priority'), question.priority > 0 ? '优先' : '');
+      const stage = held ? '可打开后立即查证' : question.state === 'backlog' ? '队列已满，等待执行' : ['running', 'failed', 'outcome_unknown', 'paused'].includes(question.state) ? question.error || stages[question.stage] || question.stage || '' : '';
+      const priority = question.priority > 0 ? '优先' : '';
+      text(card.querySelector('.card-stage'), stage);
+      text(card.querySelector('.priority'), priority);
+      card.querySelector('.card-footer').hidden = !stage && !priority;
       fragment.append(card);
       }
     }
@@ -2628,34 +2632,8 @@
       briefSection.append(element('p', 'short-answer', brief.short_answer));
     }
     container.append(briefSection);
-    if (result.analysis?.length || (result.answer && result.answer.trim() !== brief.short_answer.trim())) {
-      const analysis = element('section', 'answer-analysis');
-      analysis.setAttribute('aria-label', '完整分析');
-      analysis.append(element('h3', '', '完整分析'));
-      renderAnalysis(analysis, result, sourceItems);
-      container.append(analysis);
-    }
-    if (result.meeting_evidence?.length) {
-      const section = element('section', 'answer-analysis');
-      section.append(element('h3', '', '会中原话'));
-      for (const ref of result.meeting_evidence) {
-        section.append(element('blockquote', 'answer-text', ref.quote));
-        if (!question.basis_stale) {
-          const locate = element('button', 'text-button', '查看原发言');
-          locate.type = 'button';
-          locate.addEventListener('click', () => perform(locate, () => locateDetectionTask({source_refs: [ref]}, question.meeting_id)));
-          section.append(locate);
-        }
-      }
-      container.append(section);
-    }
-    if (result.original_evidence) {
-      const proof = element('section', 'original-evidence');
-      renderOriginalEvidence(proof, result.original_evidence);
-      container.append(proof);
-    }
-    const evidence = element('details', 'answer-disclosure');
-    evidence.append(element('summary', '', '适用范围与关键依据'));
+    const evidence = element('section', 'answer-analysis answer-key-evidence');
+    evidence.append(element('h3', '', brief.key_points?.length ? '关键依据' : '适用范围'));
     const points = element('ul', 'brief-points');
     const kinds = {fact: '资料事实', source_claim: '来源主张', inference: '模型推断', explanation: '参考说明'};
     for (const point of brief.key_points || []) {
@@ -2670,13 +2648,48 @@
       if (refs.childElementCount) item.append(refs);
       points.append(item);
     }
+    if (points.childElementCount) evidence.append(points);
     if (brief.caveat) {
       const caveat = element('p', 'brief-caveat');
       caveat.append(element('strong', '', '适用限制'), document.createTextNode(brief.caveat));
       evidence.append(caveat);
     }
-    evidence.append(points);
-    container.append(evidence);
+    if (brief.caveat || points.childElementCount) container.append(evidence);
+    if (result.meeting_evidence?.length) {
+      const section = element('section', 'answer-analysis');
+      section.append(element('h3', '', '会中原话'));
+      const segments = visibleTranscripts(state.snapshot?.segments || []);
+      for (const ref of result.meeting_evidence) {
+        const quote = element('div', 'meeting-evidence-quote');
+        if (!question.basis_stale) {
+          const segment = segments.find(item => item.segment_id === ref.segment_id && item.revision === ref.revision && !retracted(item));
+          const timestamp = segment ? segment.source === 'file' ? audioTime(segment.audio_start_ms) : time(segmentTime(segment)) : '';
+          const locate = element('button', 'text-button evidence-locate', timestamp || '查看原发言');
+          locate.type = 'button';
+          if (timestamp) locate.setAttribute('aria-label', '查看原发言 ' + timestamp);
+          locate.addEventListener('click', () => perform(locate, () => locateDetectionTask({source_refs: [ref]}, question.meeting_id)));
+          const meta = element('div', 'meeting-evidence-meta');
+          meta.append(locate);
+          if (segment) meta.append(element('span', 'muted', segmentSource(segment)));
+          quote.append(meta);
+        }
+        quote.append(element('blockquote', 'answer-text', ref.quote));
+        section.append(quote);
+      }
+      container.append(section);
+    }
+    if (result.original_evidence) {
+      const proof = element('section', 'original-evidence');
+      renderOriginalEvidence(proof, result.original_evidence);
+      container.append(proof);
+    }
+    if (result.analysis?.length || (result.answer && result.answer.trim() !== brief.short_answer.trim())) {
+      const analysis = element('section', 'answer-analysis');
+      analysis.setAttribute('aria-label', '完整分析');
+      analysis.append(element('h3', '', '完整分析'));
+      renderAnalysis(analysis, result, sourceItems);
+      container.append(analysis);
+    }
     copy.addEventListener('click', async () => {
       copy.disabled = true;
       const value = [question.title, evidenceStates[result.evidence_status] || '',
@@ -3200,7 +3213,12 @@
     }
     const from = state.returnNote;
     setMeetingTab(from ? 'transcript' : 'questions');
-    if (!from) return;
+    if (!from) {
+      const cards = $('question-list').querySelectorAll('[data-question-id]');
+      const selected = [...cards].find(card => card.dataset.questionId === state.selectedQuestionId);
+      (selected || $('queue-filters').querySelector('[aria-pressed="true"]'))?.focus();
+      return;
+    }
     transcriptViewport().scrollTop = from.scrollTop;
     const note = [...$('transcript-list').querySelectorAll('details[data-note-id]')].find(node => node.dataset.noteId === from.id);
     (note?.querySelector('summary') || $('transcript-list')).focus({preventScroll: true});

@@ -323,7 +323,7 @@ button:focus-visible,summary:focus-visible{outline-offset:1px}
 .detail-body{padding:18px 0 36px;min-height:0}.question-detail-heading h2{font-size:18px;line-height:1.55}.article-tools{margin:8px 0 16px}.short-answer{font-size:17px;line-height:1.65;padding-left:12px;border-left:2px solid var(--accent)}
 .markdown-preview{background:var(--sidebar);color:var(--body-ink)}.failure-panel{border-radius:7px;background:var(--danger-bg);border-color:var(--danger);padding:12px 14px}
 .question-detail-heading:has(#question-state[data-state=outcome_unknown]) .failure-panel{background:var(--warning-bg);border-color:var(--warning)}.question-detail-heading:has(#question-state[data-state=outcome_unknown]) .failure-panel h3{color:var(--warning)}
-#work-grid[data-left-pane=summary] .meeting-file-row:not([data-file-kind=summary]){display:none}.meeting-files-list{margin:0}.meeting-file-row{flex-wrap:wrap;padding:14px 0;gap:8px 14px}
+.meeting-files-list{margin:0}.meeting-file-row{flex-wrap:wrap;padding:14px 0;gap:8px 14px}
 .workspace-footer{margin:0;padding:4px var(--gutter);min-height:27px;background:var(--sidebar);font-size:11px}
 @media(min-width:1101px){
   #meeting-view{height:100%;min-height:540px}.meeting-content{display:grid;grid-template-columns:minmax(0,1fr) clamp(350px,33vw,480px);grid-template-rows:minmax(0,1fr);flex:1 0 240px;min-height:240px}
