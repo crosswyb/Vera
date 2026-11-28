@@ -1321,7 +1321,7 @@
     for (const kind of ['model','search']) text($('setup-' + kind), cap[kind + '_enabled'] ? '已启用' : cap[kind + '_configured'] ? '待启用' : '未配置');
     text($('settings-audio-state'), desktop ? `实时 ${liveState} · 文件 ${importState}` : '请在桌面 App 中检查与安装。');
     text($('settings-model-state'), modelMessage);
-    $('check-model').disabled = !desktop || !native?.ready || downloadingModel || Boolean(native?.meetingId);
+    $('check-model').disabled = !desktop || !native?.ready || Boolean(native?.meetingId);
     $('install-model').disabled = !desktop || !native?.ready || !installableModel || downloadingModel || Boolean(native?.meetingId);
     text($('install-model'), liveModel === 'installed' && fileModel === 'installed' ? '已安装' : downloadingModel ? '安装中…' : '安装模型');
     text($('settings-reasoning-badge'), cap.model_enabled ? '已启用' : cap.model_configured ? '待启用' : '未配置');
@@ -1608,7 +1608,7 @@
     else if (moving || bound && native.captureState === 'stopped') guidance = native.status || '音频组件正在收尾，请稍候。';
     else if (listening) guidance = input.help;
     else if (needsApple) guidance = '实时转写需要中文识别模型。点击“安装中文模型”前往设置。';
-    else if (liveProvider === 'apple_local' && native?.modelState === 'downloading') guidance = '中文模型正在安装，完成后即可开始收听。';
+    else if (liveProvider === 'apple_local' && native?.modelState === 'downloading') guidance = '中文模型安装完成后，请在语音转写设置中检查，再开始收听。';
     else if (liveProvider === 'apple_local' && native?.modelState === 'unsupported') guidance = '当前系统不支持本机中文识别，可在设置中选择云端服务，或使用文字补充。';
     else if (liveProvider === 'apple_local' && native?.modelState === 'unknown') guidance = '请在语音转写设置中检查中文模型，再开始收听。';
     else if (!canStart && liveProvider !== 'apple_local') guidance = `${speech.label(liveProvider)}实时转写尚未就绪，可在设置中查看。`;

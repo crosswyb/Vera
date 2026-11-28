@@ -300,6 +300,25 @@ class SpeechSessionTest(unittest.TestCase):
         self.assertEqual(self.end().status_code, 409)
         self.assertEqual(path.read_bytes(), b'truncated')
 
+    def test_model_diagnostics_do_not_change_active_capture(self):
+        self.assertEqual(self.capture(provider='apple_local').status_code, 200)
+        running = self.event('audio.status', stream_id='control-run-1', state='running')
+        self.assertEqual(self.send(running).status_code, 200)
+        capture = self.snapshot()['meeting']['capture']
+        self.assertEqual(capture['status'], 'running')
+
+        for seq, kind in enumerate(('audio.model_status', 'model.status'), start=2):
+            event = self.event(kind, stream_id='control-run-1', seq=seq, state='downloadable', detail='zh-CN')
+            response = self.send(event)
+            self.assertEqual(response.status_code, 200, response.get_json())
+            self.assertEqual(self.snapshot()['meeting']['capture'], capture)
+
+        paused = self.event('asr.status', provider='apple_local', state='paused', code='speech_model_unavailable')
+        self.assertEqual(self.send(paused).status_code, 200)
+        meeting = self.snapshot()['meeting']
+        self.assertEqual(meeting['capture'], capture)
+        self.assertEqual(meeting['transcription']['system']['status'], 'paused')
+
     def test_snapshot_recovers_speech_failure_chain_from_persisted_events(self):
         self.assertEqual(self.authorize().status_code, 200)
         self.assertEqual(self.capture().status_code, 200)

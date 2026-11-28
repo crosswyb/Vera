@@ -75,6 +75,8 @@ public enum CaptureEventOutbox {
         }
 
         public func submit(_ event: AudioEvent) {
+            // Model availability is reported to the desktop over JSONL.
+            guard event.type != "audio.model_status" else { return }
             guard event.meetingID == manifest.meetingID, event.captureEpoch == manifest.epoch else { return }
             lock.lock()
             if (event.framesReceived ?? 0) > 0 || event.type == "transcript.final" { hadAudio = true }

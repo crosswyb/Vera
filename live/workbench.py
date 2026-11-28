@@ -590,7 +590,7 @@ class Workbench(DetectionRecovery, MeetingArchive, MeetingStorage, SpeechWorkben
                     m["capture"].update(updated_at=time.time(), level=value.level if value.level is not None else min(value.rms or 0, 1))
                     self._save(db, m)
                     return {"type": value.type, "accepted": True}
-                if value.type != "audio.recording":
+                if value.type not in {"audio.recording", "audio.model_status", "model.status"}:
                     m["capture"] = {"status": value.state or value.status or value.type.removeprefix("audio."), "updated_at": time.time(),
                                     "source": value.source, "level": value.level if value.level is not None else min(value.rms or 0, 1), "code": value.code}
                 if value.type == "audio.status" and value.state == "stopped":

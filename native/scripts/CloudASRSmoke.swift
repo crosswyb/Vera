@@ -434,6 +434,9 @@ struct CloudASRSmoke {
         core.onEvent = { event in events.append(event); journal.submit(event) }
         try await core.start(.init(meetingID: "pressure", sources: sources, recordingDirectory: directory, captureEpoch: "pressure"),
                              speech: liveConfig(), lease: SpeechLease(seconds: 10))
+        core.reportModelStatus(locale: "zh-CN", status: "downloadable")
+        try require(events.contains { $0.type == "audio.model_status" && $0.state == "downloadable" },
+                    "model diagnostics did not reach the helper event callback")
         try await wait("backlog sockets run-task") { sockets.count == 2 && sockets.allSatisfy { $0.taskID != nil } }
         for socket in sockets { try socket.server("task-started") }
         let buffer = fixtureBuffer()
@@ -460,6 +463,7 @@ struct CloudASRSmoke {
         let journaled = try CaptureEventOutbox.pending(in: outbox).map { url in
             try JSONDecoder().decode(AudioEvent.self, from: Data(contentsOf: url))
         }
+        try require(!journaled.contains { $0.type == "audio.model_status" }, "outbox persisted desktop model diagnostics")
         try require(!journaled.contains { $0.type == "transcript.final" }, "outbox didn't exceed the final-text quota")
         try require(journaled.contains { $0.type == "asr.gap" && $0.source == .system && $0.audioStartMS == 0 && $0.audioEndMS == 100 },
                     "outbox did not preserve the dropped final's interval")

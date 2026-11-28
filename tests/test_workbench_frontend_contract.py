@@ -248,39 +248,53 @@ assert.equal($('speech-gap-items').children[0].children.find(n=>n.textContent ==
         required |= {'/live/v2/meetings/{}/' + p for p in ('snapshot', 'segments', 'transcript', 'utterances', 'questions', 'permissions', 'controls', 'demo', 'deletion', 'summary', 'files/{}', 'files/retry')}
         self.assertFalse(required - paths)
 
-    def test_settings_offer_recovery_when_only_the_live_apple_model_is_missing(self):
+    def test_settings_offer_recovery_for_an_unavailable_live_apple_model(self):
         script = r"""
 const assert = require('node:assert/strict');
 const src = require('node:fs').readFileSync(process.argv[1], 'utf8');
 const render = src.match(/  function renderSettings\(\) \{[\s\S]*?\n  \}/)[0];
+const bindCheck = src.split('\n').find(line => line.includes("$('check-model').addEventListener"));
 const nodes = new Map();
 const $ = id => {
-  if (!nodes.has(id)) nodes.set(id, {});
+  if (!nodes.has(id)) nodes.set(id, {
+    addEventListener(_event, callback) { this.onClick = callback; },
+    click() { if (!this.disabled) this.onClick(); },
+  });
   return nodes.get(id);
 };
 const state = {native:{ready:true, modelState:'downloadable', fileModelState:'installed'}};
+const messages = [];
+const nativePost = action => messages.push(action);
 const noop = () => {};
 const speech = {activeProvider: () => 'apple_local', render: noop};
 const text = (node, value) => { node.textContent = value; };
 const nativeAvailable = () => true;
 const requestLimitsText = () => '';
 const renderUpdates = noop, renderProviderSettings = noop, renderStorageSettings = noop;
-eval(render + `
+eval(render + '\n' + bindCheck + `
 state.native.meetingId = 'meeting';
 renderSettings();
 assert.match($('settings-audio-state').textContent, /实时 待安装 · 文件 已就绪/);
 assert.match($('settings-model-state').textContent, /请安装/);
+assert.equal($('check-model').disabled, true);
 assert.equal($('install-model').disabled, true);
 state.native.meetingId = null;
 renderSettings();
 assert.equal($('install-model').disabled, false);
 state.native.modelState = 'downloading';
 renderSettings();
-assert.equal($('check-model').disabled, true);
+assert.match($('settings-model-state').textContent, /完成后可重新检查/);
+assert.equal($('check-model').disabled, false);
 assert.equal($('install-model').disabled, true);
+$('check-model').click();
+assert.deepEqual(messages, ['checkModel']);
 state.native.modelState = 'installed';
 renderSettings();
 assert.equal($('install-model').textContent, '已安装');
+assert.equal($('install-model').disabled, true);
+state.native.fileModelState = 'downloading';
+renderSettings();
+assert.equal($('check-model').disabled, false);
 assert.equal($('install-model').disabled, true);
 `);
 """
