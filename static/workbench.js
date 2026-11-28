@@ -1303,20 +1303,27 @@
     const cap = state.home?.capabilities || {};
     const native = state.native;
     const desktop = nativeAvailable();
-    const modelStates = {unknown:'正在检查中文识别模型…', installed:'中文识别模型已安装 · 音频在本机处理', downloadable:'尚未安装中文识别模型，请先安装。', downloading:'正在安装中文识别模型…', unsupported:'当前系统不支持本机中文识别。'};
+    const liveModel = native?.modelState || 'unknown';
     const fileModel = native?.fileModelState || 'unknown';
+    const models = [liveModel, fileModel];
+    const downloadingModel = models.includes('downloading');
+    const installableModel = models.includes('downloadable');
+    let modelMessage = 'Apple 本机转写无需 API Key。';
+    if (desktop && downloadingModel) modelMessage = '中文模型正在安装，完成后可重新检查。';
+    else if (desktop && installableModel) modelMessage = '请安装尚未就绪的中文模型。';
+    else if (desktop && models.includes('unknown')) modelMessage = '请检查本机中文模型状态。';
     const readiness = {installed:'已就绪', downloadable:'待安装', downloading:'安装中', unsupported:'不支持', unknown:'待检查'};
-    const liveState = readiness[native?.modelState] || '待检查', importState = readiness[fileModel] || '待检查';
+    const liveState = readiness[liveModel] || '待检查', importState = readiness[fileModel] || '待检查';
     const liveProvider = speech.activeProvider('live'), fileProvider = speech.activeProvider('file');
     const selectedLive = liveProvider === 'apple_local' ? liveState : speech.label(liveProvider);
     const selectedFile = fileProvider === 'apple_local' ? importState : speech.label(fileProvider);
     text($('setup-audio'), desktop ? `实时 ${selectedLive} · 文件 ${selectedFile}` : '需在 Mac 检查');
     for (const kind of ['model','search']) text($('setup-' + kind), cap[kind + '_enabled'] ? '已启用' : cap[kind + '_configured'] ? '待启用' : '未配置');
     text($('settings-audio-state'), desktop ? `实时 ${liveState} · 文件 ${importState}` : '请在桌面 App 中检查与安装。');
-    text($('settings-model-state'), desktop ? modelStates[fileModel] || '模型状态待确认' : '音频在本机处理，无需 API Key。');
-    $('check-model').disabled = !desktop || !native?.ready || native?.modelState === 'downloading' || Boolean(native?.meetingId);
-    $('install-model').disabled = !desktop || !native?.ready || ![native?.modelState,fileModel].includes('downloadable') || [native?.modelState,fileModel].includes('downloading') || Boolean(native?.meetingId);
-    text($('install-model'), native?.modelState === 'installed' && fileModel === 'installed' ? '已安装' : [native?.modelState,fileModel].includes('downloading') ? '安装中…' : '安装模型');
+    text($('settings-model-state'), modelMessage);
+    $('check-model').disabled = !desktop || !native?.ready || downloadingModel || Boolean(native?.meetingId);
+    $('install-model').disabled = !desktop || !native?.ready || !installableModel || downloadingModel || Boolean(native?.meetingId);
+    text($('install-model'), liveModel === 'installed' && fileModel === 'installed' ? '已安装' : downloadingModel ? '安装中…' : '安装模型');
     text($('settings-reasoning-badge'), cap.model_enabled ? '已启用' : cap.model_configured ? '待启用' : '未配置');
     text($('settings-search-badge'), cap.search_enabled ? '已启用' : cap.search_configured ? '待启用' : '未配置');
     text($('settings-authorization'), `新会议默认开启联网查证，可在创建或导入时关闭。自动搜索使用公开检索词。${requestLimitsText()}`);
@@ -1600,9 +1607,10 @@
     else if (desktop && native?.captureState === 'error') guidance = native.status || '请检查系统录音权限，然后重新开始收听。';
     else if (moving || bound && native.captureState === 'stopped') guidance = native.status || '音频组件正在收尾，请稍候。';
     else if (listening) guidance = input.help;
-    else if (needsApple) guidance = '首次使用需要中文识别模型。点击“安装中文模型”前往设置。';
+    else if (needsApple) guidance = '实时转写需要中文识别模型。点击“安装中文模型”前往设置。';
     else if (liveProvider === 'apple_local' && native?.modelState === 'downloading') guidance = '中文模型正在安装，完成后即可开始收听。';
     else if (liveProvider === 'apple_local' && native?.modelState === 'unsupported') guidance = '当前系统不支持本机中文识别，可在设置中选择云端服务，或使用文字补充。';
+    else if (liveProvider === 'apple_local' && native?.modelState === 'unknown') guidance = '请在语音转写设置中检查中文模型，再开始收听。';
     else if (!canStart && liveProvider !== 'apple_local') guidance = `${speech.label(liveProvider)}实时转写尚未就绪，可在设置中查看。`;
     else if (serverCapture.status === 'paused' || serverCapture.status === 'stopped') guidance = '收听已暂停，可切换音源后继续。';
     if (desktop && bound && !moving && listening) guidance += ' 切换音源请先暂停。';
@@ -2954,7 +2962,7 @@
     const authorized = speech.renderUpload('meeting', scope);
     $('meeting-submit').disabled = state.pendingButtons.has('meeting-submit') || !authorized;
     text($('meeting-audio-help'), desktop && provider === 'apple_local' && state.native?.modelState === 'downloadable'
-      ? '首次收听需要安装中文模型。创建后可前往设置安装。'
+      ? '实时转写需要安装中文模型。创建后可前往设置安装。'
       : `${input.help}${desktop && provider === 'apple_local' ? ' 音频由 Apple 在本机处理。' : ''}`);
     $('meeting-setup-warning').hidden = synthetic || Boolean(state.home?.capabilities?.model_enabled && state.home?.capabilities?.search_enabled);
     $('meeting-permissions-field').hidden = synthetic;

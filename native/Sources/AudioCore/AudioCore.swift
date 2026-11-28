@@ -85,7 +85,11 @@ public final class AudioCore {
                 }
             }
             reportStatus()
-            for stream in streams { stream.startRecognition(speech: speech, lease: lease, makeSocket: makeSocket) }
+            for stream in streams {
+                stream.startRecognition(speech: speech, lease: lease, makeSocket: makeSocket) { [weak self] status in
+                    self?.reportModelStatus(locale: requested.locale, status: status)
+                }
+            }
         } catch {
             guard generation == token else { return }
             await stop(graceful: false)
@@ -236,9 +240,11 @@ private final class CaptureStream {
     }
 
     func startRecognition(speech: SpeechSessionConfig?, lease: SpeechLease?,
-                          makeSocket: ((URLRequest) -> any DashScopeSocket)?) {
+                          makeSocket: ((URLRequest) -> any DashScopeSocket)?,
+                          onModelStatus: @escaping (String) -> Void) {
         guard config.transcribe else { return }
         recognition = LiveCaptureRecognition(config: config, speech: speech, lease: lease, makeSocket: makeSocket,
+            onModelStatus: onModelStatus,
             onEvent: { [weak self] type, provider, state, code, detail, interval in
                 guard let self else { return }
                 var event = self.makeEvent(type: type)

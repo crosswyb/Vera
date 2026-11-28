@@ -248,6 +248,44 @@ assert.equal($('speech-gap-items').children[0].children.find(n=>n.textContent ==
         required |= {'/live/v2/meetings/{}/' + p for p in ('snapshot', 'segments', 'transcript', 'utterances', 'questions', 'permissions', 'controls', 'demo', 'deletion', 'summary', 'files/{}', 'files/retry')}
         self.assertFalse(required - paths)
 
+    def test_settings_offer_recovery_when_only_the_live_apple_model_is_missing(self):
+        script = r"""
+const assert = require('node:assert/strict');
+const src = require('node:fs').readFileSync(process.argv[1], 'utf8');
+const render = src.match(/  function renderSettings\(\) \{[\s\S]*?\n  \}/)[0];
+const nodes = new Map();
+const $ = id => {
+  if (!nodes.has(id)) nodes.set(id, {});
+  return nodes.get(id);
+};
+const state = {native:{ready:true, modelState:'downloadable', fileModelState:'installed'}};
+const noop = () => {};
+const speech = {activeProvider: () => 'apple_local', render: noop};
+const text = (node, value) => { node.textContent = value; };
+const nativeAvailable = () => true;
+const requestLimitsText = () => '';
+const renderUpdates = noop, renderProviderSettings = noop, renderStorageSettings = noop;
+eval(render + `
+state.native.meetingId = 'meeting';
+renderSettings();
+assert.match($('settings-audio-state').textContent, /实时 待安装 · 文件 已就绪/);
+assert.match($('settings-model-state').textContent, /请安装/);
+assert.equal($('install-model').disabled, true);
+state.native.meetingId = null;
+renderSettings();
+assert.equal($('install-model').disabled, false);
+state.native.modelState = 'downloading';
+renderSettings();
+assert.equal($('check-model').disabled, true);
+assert.equal($('install-model').disabled, true);
+state.native.modelState = 'installed';
+renderSettings();
+assert.equal($('install-model').textContent, '已安装');
+assert.equal($('install-model').disabled, true);
+`);
+"""
+        subprocess.run(['node', '-e', script, str(ROOT / 'static/workbench.js')], check=True)
+
     def test_meeting_summary_failure_exposes_structured_reason(self):
         self.assertIn('summaryFailureReason', self.js)
         self.assertIn('source_ref_not_in_transcript', self.js)

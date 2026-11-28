@@ -8,6 +8,7 @@ window.createSpeechSettings = function ({api, state, $, text, nativeAvailable, p
   const gapReasons = {
     speech_input_overflow:'待转写的音频积压，识别已中断', speech_output_overflow:'转写结果积压，识别已中断',
     speech_model_unavailable:'语音识别模型不可用或启动失败', speech_recognition_failed:'语音识别返回错误',
+    speech_start_failed:'本机语音识别启动失败',
     speech_finalization_failed:'语音识别无法保存最终文字', speech_finalization_incomplete:'末尾转写未完整保存',
     speech_finalization_interrupted:'停止时仍有音频未完成转写', speech_inactive:'语音识别意外停止',
     speech_input_failed:'无法向识别服务传入录音', speech_replay_window:'重连或切换服务时，部分音频超出可重放范围',

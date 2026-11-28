@@ -16,6 +16,7 @@ final class LiveCaptureRecognition {
     private let speech: SpeechSessionConfig?
     private let lease: SpeechLease?
     private let makeSocket: ((URLRequest) -> any DashScopeSocket)?
+    private let onModelStatus: (String) -> Void
     private let onEvent: (String, String, String?, String?, String?, ClosedRange<Int>?) -> Void
     private let onChange: (TranscriptChange, String) -> Void
     private let clock = ContinuousClock()
@@ -51,12 +52,14 @@ final class LiveCaptureRecognition {
 
     init(config: AudioConfig, speech: SpeechSessionConfig?, lease: SpeechLease?,
          makeSocket: ((URLRequest) -> any DashScopeSocket)?,
+         onModelStatus: @escaping (String) -> Void = { _ in },
          onEvent: @escaping (String, String, String?, String?, String?, ClosedRange<Int>?) -> Void,
          onChange: @escaping (TranscriptChange, String) -> Void) {
         self.config = config
         self.speech = speech
         self.lease = lease
         self.makeSocket = makeSocket
+        self.onModelStatus = onModelStatus
         self.onEvent = onEvent
         self.onChange = onChange
         provider = speech == nil ? "apple_local" : "dashscope"
@@ -142,10 +145,17 @@ final class LiveCaptureRecognition {
         let token = generation
         let locale = config.locale
         connecting = Task { [weak self] in
+            let status = await LocalSpeechModels.status(locale: locale)
+            guard !Task.isCancelled, self?.generation == token else { return }
+            if status != "installed" {
+                self?.onModelStatus(status)
+                let detail = status == "downloadable"
+                    ? "Apple 实时转写模型需要安装。请先暂停收听，再到语音转写设置中安装。"
+                    : "Apple 实时转写模型尚未就绪，请到语音转写设置中检查。"
+                self?.appleFailed(code: "speech_model_unavailable", detail: detail)
+                return
+            }
             do {
-                let status = await LocalSpeechModels.status(locale: locale)
-                guard !Task.isCancelled, self?.generation == token else { return }
-                guard status == "installed" else { throw AudioCoreError.modelUnavailable(status) }
                 let recognition = try await LocalRecognition.start(locale: locale)
                 guard !Task.isCancelled, let self, self.generation == token else {
                     await recognition.cancel()
@@ -170,13 +180,7 @@ final class LiveCaptureRecognition {
                 }
             } catch {
                 guard let self, self.generation == token, !Task.isCancelled else { return }
-                let detail: String
-                if case AudioCoreError.modelUnavailable = error {
-                    detail = "Apple 中文模型尚未就绪，请在语音转写设置中检查。"
-                } else {
-                    detail = "Apple 中文识别无法启动。"
-                }
-                self.appleFailed(code: "speech_model_unavailable", detail: detail)
+                self.appleFailed(code: "speech_start_failed", detail: "Apple 中文识别无法启动。请暂停后重新收听。")
             }
         }
     }
@@ -303,7 +307,7 @@ final class LiveCaptureRecognition {
     private func appleFailed(code: String, detail: String) {
         onEvent("asr.error", provider, nil, code, detail, nil)
         invalidate()
-        pause(code: code)
+        pause(code: code, detail: detail)
     }
 
     private func invalidate(cancelSession: Bool = true) {
@@ -330,11 +334,12 @@ final class LiveCaptureRecognition {
         apple = nil
     }
 
-    private func pause(code: String) {
+    private func pause(code: String, detail: String? = nil) {
         guard pausedCode == nil else { return }
         pausedCode = code
         tail.removeAll()
-        onEvent("asr.status", provider, "paused", code, "转写暂停，录音继续。", nil)
+        let message = "转写暂停，录音继续。"
+        onEvent("asr.status", provider, "paused", code, detail.map { message + $0 } ?? message, nil)
     }
 
     func pauseForDeliveryBacklog() {

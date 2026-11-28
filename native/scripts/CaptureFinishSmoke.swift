@@ -109,11 +109,40 @@ extension DesktopController {
         try speechEvent("asr.error", ["provider": "apple_local", "code": "speech_model_unavailable", "detail": "合成模型不可用"])
         try require(speech.transcription["system"]?["state"] == "error" &&
                     speech.transcription["system"]?["detail"] == "合成模型不可用", "native state discarded the ASR failure")
+        try speechEvent("asr.status", ["provider": "apple_local", "state": "paused", "code": "speech_model_unavailable",
+                                      "detail": "转写暂停，录音继续。合成模型不可用"])
+        try require(speech.captureState == "listening" &&
+                    speech.transcription["system"]?["detail"] == "转写暂停，录音继续。合成模型不可用",
+                    "pausing ASR lost the failure reason or changed capture state")
         try speechEvent("asr.gap", ["code": "speech_model_unavailable"])
-        try require(speech.transcription["system"]?["state"] == "error", "gap erased the recognizer state")
+        try require(speech.transcription["system"]?["state"] == "paused", "gap erased the recognizer state")
         try speechEvent("asr.status", ["provider": "apple_local", "state": "running"])
         try require(speech.transcription["system"]?["code"] == nil && speech.transcription["system"]?["detail"] == nil,
                     "recovery retained a stale failure")
+        let models = DesktopController()
+        models.port = 9999
+        models.pageLoaded = true
+        models.backend = completed.1
+        models.helper = completed.1
+        models.modelState = "installed"
+        models.fileModelState = "installed"
+        try require(models.canStart && models.canImport && !models.installItem.isEnabled,
+                    "installed models did not enable live capture and file import")
+        models.activeMeeting = "meeting"
+        models.captureState = "listening"
+        core.onEvent = { event in
+            if let data = try? JSONEncoder().encode(event) { models.audioLine(data) }
+        }
+        core.reportModelStatus(locale: "zh-CN", status: "downloadable")
+        try require(models.modelState == "downloadable" && models.fileModelState == "installed" &&
+                    models.captureState == "listening" && !models.installItem.isEnabled,
+                    "live model status changed file readiness or interrupted active capture")
+        models.activeMeeting = nil
+        try require(!models.canStart && models.canImport && models.installItem.isEnabled,
+                    "missing live model did not offer installation independently of file import")
+        core.reportModelStatus(locale: "zh-CN", status: "installed")
+        try require(models.canStart && !models.installItem.isEnabled,
+                    "successful live model installation did not restore capture readiness")
         completed.0.stopWithStatus("fixture stop")
         try stopped(completed.0, epoch: "epoch-1")
         try require(completed.0.canReconnectBackend && !completed.0.statusStopItem.isEnabled,
