@@ -1255,8 +1255,15 @@
     }[failureStage] || '更新未完成';
     const blockedReason = update?.installBlockedReason || '';
     const progress = Number.isFinite(update?.downloadProgress) ? Math.max(0, Math.min(1, update.downloadProgress)) : null;
-    text($('update-current-version'), update?.currentVersion
-      ? `真实交互 · Vera ${update.currentVersion}${Number.isInteger(update.currentBuild) ? `（build ${update.currentBuild}）` : ''}` : '真实交互 · Vera');
+    const currentVersion = update?.currentVersion;
+    const currentBuild = Number.isInteger(update?.currentBuild) ? update.currentBuild : null;
+    const sidebarVersion = $('sidebar-app-version');
+    const versionLabel = desktop && currentVersion && currentVersion !== '未知版本'
+      ? `${currentVersion}${currentBuild === null ? '' : ` build ${currentBuild}`}` : '';
+    text(sidebarVersion, versionLabel);
+    sidebarVersion.hidden = !versionLabel;
+    text($('update-current-version'), currentVersion
+      ? `真实交互 · Vera ${currentVersion}${currentBuild === null ? '' : `（build ${currentBuild}）`}` : '真实交互 · Vera');
     let status = '正在读取版本信息…';
     if (!desktop) status = '请在桌面 App 中检查软件更新。';
     else if (checking) status = '正在检查更新…';

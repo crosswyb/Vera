@@ -68,7 +68,10 @@
   <div id="workspace" hidden data-route="meetings" data-mobile-nav="closed">
     <aside id="app-navigation" class="app-sidebar" aria-label="主导航">
       <div class="sidebar-heading">
-        <a class="brand" href="#meetings"><span class="brand-mark" aria-hidden="true"><svg><use href="#i-wave"/></svg></span><span>真实交互</span></a>
+        <a class="brand" href="#meetings" aria-describedby="sidebar-app-version">
+          <span class="brand-mark" aria-hidden="true"><svg><use href="#i-wave"/></svg></span>
+          <span class="brand-label">真实交互 <span id="sidebar-app-version" hidden></span></span>
+        </a>
         <button id="rail-toggle" type="button" aria-label="收起侧栏" title="收起侧栏" aria-controls="app-navigation" aria-expanded="true"><svg class="rail-desktop-icon" aria-hidden="true"><use href="#i-sidebar"/></svg><svg class="rail-mobile-icon" aria-hidden="true"><use href="#i-close"/></svg><span class="visually-hidden">收起侧栏</span></button>
       </div>
       <div class="sidebar-actions" role="group" aria-label="会议操作">
